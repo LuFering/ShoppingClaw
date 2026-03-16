@@ -59,7 +59,7 @@ class FileDownloadResponse:
     content: bytes | None = None
     error: FileOperationError | None = None
 
-
+"""这是抽象类，用于实现backend，功能是对file进行系统级操作"""
 class BackendProtocol(abc.ABC):  # abc是抽象基类模块，ABC是抽象类。相当于接口
     def ls_info(self, path: str) -> list["FileInfo"]:
         """从指定路径中获取文件数据信息"""

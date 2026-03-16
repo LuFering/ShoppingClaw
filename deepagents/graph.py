@@ -69,7 +69,7 @@ def create_main_agent(
 
     summarization_defaults = _compute_summarization_defaults(model)
 
-    backend = backend if backend is not None else StateBackend
+    backend = backend if backend is not None else StateBackend #这里是传StateBackend类名，不是传实例，故不用输入runtime
 
     gp_middleware: list[AgentMiddleware[Any, Any, Any]] = [
         TodoListMiddleware(),
