@@ -27,6 +27,7 @@ BASE_AGENT_PROMPT = (Path(__file__).parent / "BASE_PROMPT.md").read_text(encodin
 
 
 def get_default_model():
+    """设置默认Model"""
     return ChatOllama(
         model="deepseek-r1:1.5b",
         temperature=0.7,
@@ -54,6 +55,8 @@ def create_main_agent(
 ) -> CompiledStateGraph:
     if model is None:
         model = get_default_model()
+
+        """如果model存在，进行model初始化"""
     elif isinstance(model, str):
         if model.startswith("qwen:"):
             model_init_params: dict = {"temperature": 0.1, "top_p": 0.8}

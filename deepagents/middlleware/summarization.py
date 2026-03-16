@@ -9,18 +9,47 @@ from typing_extensions import TypedDict
 from deepagents.backends.protocol import BackendProtocol, BackendFactory
 
 
-class TruncateArgsSettings:
-    pass
+class TruncateArgsSettings(TypedDict, total=False):  # total来限制Typedict，无需全部修改属性
+    '''长对话或复杂任务多使用该类'''
+    trigger: ContextSize
+    keep: ContextSize
+    max_length: int  # 最长字符限制
+    truncation_text: str  # 替换文本，用处不知
 
 
 class SummarizationDefaults(TypedDict):
-    trigger: ContextSize
-    keep: ContextSize
-    truncate_args_settings: TruncateArgsSettings
+    """摘要配置模板，含3个配置"""
+    trigger: ContextSize  # 触发摘要的阈值，输入类型是ContextSize【元组】("XX",值）
+    keep: ContextSize  # 保留多少消息
+    truncate_args_settings: TruncateArgsSettings  # 字典
 
 
 def _compute_summarization_defaults(model: BaseChatModel) -> SummarizationDefaults:
-    pass
+    """查看模型配置(model.profile)来修改摘要配置参数"""
+    has_profile = (  # 有固定模型配置的条件
+            model.profile is not None
+            and isinstance(model.profile, dict)
+            and "max_input_tokens" in model.profile
+            and isinstance(model.profile["max_input_tokens"], int)
+    )
+
+    if has_profile:
+        return {
+            "trigger": ("fraction", 0.85),
+            "keep": ("fraction", 0.10),
+            "truncate_args_settings": {
+                "trigger": ("fraction", 0.85),
+                "keep": ("fraction", 0.10),
+            },
+        }
+    return {  # 若没有，返回固定摘要配置
+        "trigger": ("token", 170000),
+        "keep": ("message", 6),
+        "truncate_args_settings": {
+            "trigger": ("message", 20),
+            "keep": ("message", 20),
+        },
+    }
 
 
 class SummarizationState:
@@ -37,11 +66,11 @@ class DeepAgentsSummarizationMiddleWare(AgentMiddleware):
                  trigger: ContextSize | list[ContextSize] | None = None,
                  keep: ContextSize = ("message", _DEFAULT_MESSAGES_TO_KEEP),
                  token_counter: TokenCounter = count_tokens_approximately,
-                 summary_prompt:str=DEFAULT_SUMMARY_PROMPT,
-                 trim_tokens_to_summarize:int|None=_DEFAULT_TRIM_TOKEN_LIMIT,
-                 history_path_prefix:str="conversation_history",
-                 truncate_args_settings:TruncateArgsSettings|None=None,
+                 summary_prompt: str = DEFAULT_SUMMARY_PROMPT,
+                 trim_tokens_to_summarize: int | None = _DEFAULT_TRIM_TOKEN_LIMIT,
+                 history_path_prefix: str = "conversation_history",
+                 truncate_args_settings: TruncateArgsSettings | None = None,
                  **kwargs,
-                 )->None:
-        self._backend=backend
-        self._history_path_prefix=history_path_prefix
+                 ) -> None:
+        self._backend = backend
+        self._history_path_prefix = history_path_prefix
