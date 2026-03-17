@@ -71,7 +71,7 @@ def create_main_agent(
 
     backend = backend if backend is not None else StateBackend #这里是传StateBackend类名，不是传实例，故不用输入runtime
 
-    gp_middleware: list[AgentMiddleware[Any, Any, Any]] = [
+    gp_middleware: list[AgentMiddleware[Any, Any, Any]] = [ #Generic[Any, Any, Any]类型参数化，让一个基类能适配多种类型组
         TodoListMiddleware(),
         FilesystemMiddleware(backend=backend),
         DeepAgentsSummarizationMiddleWare(
