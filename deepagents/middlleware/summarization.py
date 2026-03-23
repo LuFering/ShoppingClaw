@@ -1,9 +1,14 @@
+from typing import Any, cast
+
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.context_editing import TokenCounter
 from langchain.agents.middleware.summarization import ContextSize, _DEFAULT_MESSAGES_TO_KEEP, DEFAULT_SUMMARY_PROMPT, \
-    _DEFAULT_TRIM_TOKEN_LIMIT
+    _DEFAULT_TRIM_TOKEN_LIMIT, SummarizationMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages.utils import count_tokens_approximately
+from langgraph.prebuilt import ToolRuntime
+from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
 
 from deepagents.backends.protocol import BackendProtocol, BackendFactory
@@ -72,5 +77,55 @@ class DeepAgentsSummarizationMiddleWare(AgentMiddleware):
                  truncate_args_settings: TruncateArgsSettings | None = None,
                  **kwargs,
                  ) -> None:
+        self._lc_helper = SummarizationMiddleware(
+            model=model,
+            trigger=trigger,
+            keep=keep,
+            token_counter=token_counter,
+            summary_prompt=summary_prompt,
+            trim_tokens_to_summarize=trim_tokens_to_summarize,
+            **kwargs
+        )
+
         self._backend = backend
         self._history_path_prefix = history_path_prefix
+
+        if truncate_args_settings is None:
+            self._truncate_args_trigger = None
+            self._truncate_args_keep: ContextSize = ("messages", 20)
+            self._max_arg_length = 2000
+            self._truncation_text = "...(argument truncated)"
+        else:
+            self._truncate_args_trigger = None
+            self._truncate_args_keep: ContextSize = ("messages", 20)
+            self._max_arg_length = 2000
+            self._truncation_text = "...(argument truncated)"
+    @property
+    def model(self) -> BaseChatModel:
+        return self._lc_helper.model
+
+    @property
+    def token_counter(self)->TokenCounter:
+        return self._lc_helper.token_counter
+
+    def _get_profile_limits(self)->int|None:
+        return self._lc_helper._get_profile_limits()
+
+    def _get_backend(self,
+                     state:AgentState[Any],
+                     runtime:Runtime,
+                     )->BackendProtocol:
+        if callable(self._backend):
+            config=cast("RunnableConfig",getattr(runtime,"config",{}))
+
+            tool_runtime=ToolRuntime(
+                state=state,
+                context=runtime.context,
+                stream_writer=runtime.stream_writer,
+                store=runtime.store,
+                config=config,
+                tool_call_id=None
+            )
+            return self._backend(tool_runtime)
+        return self._backend
+

@@ -1,9 +1,10 @@
 import abc
 import asyncio
-from typing import TypedDict, NotRequired, Any
+from collections.abc import Callable
+from typing import TypedDict, NotRequired, Any, TypeAlias, Literal
 from dataclasses import dataclass
 
-from dotenv.variables import Literal
+from langgraph.prebuilt import ToolRuntime
 
 FileOperationError = Literal[
     "file_not_found",  # 下载问题，文件不存在
@@ -59,7 +60,10 @@ class FileDownloadResponse:
     content: bytes | None = None
     error: FileOperationError | None = None
 
+
 """这是抽象类，用于实现backend，功能是对file进行系统级操作"""
+
+
 class BackendProtocol(abc.ABC):  # abc是抽象基类模块，ABC是抽象类。相当于接口
     def ls_info(self, path: str) -> list["FileInfo"]:
         """从指定路径中获取文件数据信息"""
@@ -164,5 +168,4 @@ class BackendProtocol(abc.ABC):  # abc是抽象基类模块，ABC是抽象类。
         return await asyncio.to_thread(self.download_file, paths)
 
 
-class BackendFactory:
-    pass
+BackendFactory: TypeAlias = Callable[[ToolRuntime], BackendProtocol]  #定义一个输入为toolRuntime输出为BackendProtocol的可调用函数为BackendFactory
