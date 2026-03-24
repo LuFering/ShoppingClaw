@@ -3,10 +3,12 @@ from typing import Sequence, Any, Callable
 
 from aiohttp.web_middlewares import middleware
 from langchain.agents import AgentState
-from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import StateT_co, ResponseT
-from langchain.agents.structured_output import OutputToolBinding, ResponseFormat
+from langchain.agents.middleware import AgentMiddleware, ModelResponse
+from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest
+from langchain.agents.structured_output import OutputToolBinding, ResponseFormat, ToolStrategy, ProviderStrategy, \
+    AutoStrategy
 from langchain_core.language_models import BaseChatModel
+from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph._internal._runnable import RunnableCallable
 from langgraph.cache.base import BaseCache
@@ -17,14 +19,41 @@ from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Command, Checkpointer
-from langgraph.typing import ContextT
+from langgraph.typing import ContextT, NodeInputT
 
 
 def model_node(
+        model: str | BaseChatModel,
+        tools: Sequence[BaseTool | Callable[..., Any] | dict[str, Any]] | None,
+        middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
+        initial_response_format: ToolStrategy[Any] | ProviderStrategy[Any] | AutoStrategy[Any] | None,
         state: AgentState[Any],
-        runtime: Runtime[ContextT]
+        runtime: Runtime[ContextT],
 ) -> list[Command[Any]]:
     """定义model_node"""
+    default_tools = []
+    request = ModelRequest(  # 发送给LLM的标准数据包
+        model=model,
+        tools=default_tools,
+        response_format=initial_response_format,
+        messages=state["messages"],
+        tool_choice=None,
+        state=state,
+        runtime=runtime
+    )
+
+    if _get_model_call(middleware) is None:
+
+
+def _execute_model_sync(
+        request: ModelRequest,
+) -> ModelResponse:
+    BaseChatModel, effective_response_format = _get_bound_model(request)
+
+
+def _get_bound_model(
+        request: ModelRequest,
+) -> tuple[Runnable[Any, Any], ResponseFormat[Any] | None]:
     pass
 
 
@@ -37,7 +66,7 @@ async def amodel_node(
 
 
 def _get_real_middleware_list(
-        middleware: Sequence[AgentMiddleware[StateT_co, ContextT]]
+        middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> (list, list, list, list):
     """hook函数列表"""
     before_agent = [
@@ -109,7 +138,7 @@ def _get_exit_node(
 ) -> str:
     """exit节点判断"""
     if after_agent:
-        exit_node = f"{after_agent[0].name}.after_agent"
+        exit_node = f"{after_agent[-1].name}.after_agent"
     else:
         exit_node = END
 
@@ -140,6 +169,116 @@ def _get_tool_call(
 
 def _chain_async_tool_call(async_wrapper: list):
     pass
+
+
+def _get_model_call(
+        middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
+):
+    middleware_model_call = [
+        m for m in middleware
+        if m.__class__.wrap_model_call is not AgentMiddleware.wrap_model_call
+           or m.__class__.awrap_model_call is not AgentMiddleware.awrap_model_call
+    ]
+    if middleware_model_call:
+        sync_handlers = [
+            m.wrap_model_call
+            for m in middleware_model_call
+        ]
+        warp_model_call_handler = _chain_model_call(sync_handlers)
+
+    return warp_model_call_handler
+
+
+def middleware_node(
+        graph: StateGraph,
+        merged_state_schema: type[NodeInputT],
+        middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
+) -> None:
+    """添加middleware节点"""
+    for m in middleware:
+        if (
+                m.__class__.before_agent is not AgentMiddleware.before_agent
+                or m.__class__.before_agent is not AgentMiddleware.before_agent
+        ):
+            sync_before_agent = (
+                m.before_agent
+                if m.__class__.before_agent is not AgentMiddleware.before_agent
+                else None
+            )
+            async_before_agent = (
+                m.abefore_agent
+                if m.__class__.abefore_agent is not AgentMiddleware.abefore_agent
+                else None
+            )
+            before_agent_node = RunnableCallable(sync_before_agent, async_before_agent)
+            graph.add_node(
+                f"{m.name}.before_agent",
+                before_agent_node,
+                input_schema=merged_state_schema
+            )
+
+        if (
+                m.__class__.before_model is not AgentMiddleware.before_model
+                or m.__class__.abefore_model is not AgentMiddleware.abefore_model
+        ):
+            sync_before_model = (
+                m.before_model
+                if m.__class__.before_model is not AgentMiddleware.before_model
+                else None
+            )
+            async_before_model = (
+                m.abefore_model
+                if m.__class__.abefore_model is not AgentMiddleware.abefore_model
+                else None
+            )
+            before_model_node = RunnableCallable(sync_before_model, async_before_model)
+            graph.add_node(
+                f"{m.name}.before_model",
+                before_model_node,
+                input_schema=merged_state_schema
+            )
+
+        if (
+                m.__class__.after_agent is not AgentMiddleware.after_agent
+                or m.__class__.after_agent is not AgentMiddleware.after_agent
+        ):
+            sync_after_agent = (
+                m.after_agent
+                if m.__class__.after_agent is not AgentMiddleware.after_agent
+                else None
+            )
+            async_after_agent = (
+                m.aafter_agent
+                if m.__class__.aafter_agent is not AgentMiddleware.aafter_agent
+                else None
+            )
+            after_agent_node = RunnableCallable(sync_after_agent, async_after_agent)
+            graph.add_node(
+                f"{m.name}.after_agent",
+                after_agent_node,
+                input_schema=merged_state_schema
+            )
+
+        if (
+                m.__class__.after_model is not AgentMiddleware.after_model
+                or m.__class__.aafter_model is not AgentMiddleware.aafter_model
+        ):
+            sync_after_model = (
+                m.after_model
+                if m.__class__.after_model is not AgentMiddleware.after_model
+                else None
+            )
+            async_after_model = (
+                m.aafter_model
+                if m.__class__.aafter_model is not AgentMiddleware.aafter_model
+                else None
+            )
+            after_model_node = RunnableCallable(sync_after_model, async_after_model)
+            graph.add_node(
+                f"{m.name}.before_model",
+                after_model_node,
+                input_schema=merged_state_schema
+            )
 
 
 def _get_async_tool_call(
@@ -190,6 +329,41 @@ def _get_schema(
             input_schema, output_schema)
 
 
+def _choose_tools_model_edge(
+        tool_node,
+        model_destinations,
+        structured_output_tools,
+        end_destination
+):
+    pass
+
+
+def _choose_model_to_tools_edge(
+        model_destinations,
+        structured_output_tools,
+        end_destination
+):
+    pass
+
+
+def _add_middleware_edge(
+        graph,
+        name,
+        default_destination,
+        model_destination,
+        end_destination,
+        can_jump_to
+):
+    pass
+
+
+def _get_can_jump_to(
+        m1,
+        param
+):
+    pass
+
+
 def create_agent(
         model: str | BaseChatModel,
         tools: Sequence[BaseTool | Callable[..., Any] | dict[str, Any]] | None = None,
@@ -226,6 +400,7 @@ def create_agent(
     structured_output_tools: dict[str, OutputToolBinding[Any]] = {}
 
     """wrap_tool_call_wrapper"""
+    # TODO:实现tool_call的链式连接
     wrap_tool_call_wrapper = _get_tool_call(middleware)
 
     """async_wrap_tool_call_wrapper"""
@@ -258,6 +433,7 @@ def create_agent(
         model_to_tools_destinations.append(loop_entry_node)
 
     """四大schema"""
+    # TODO:实现__merged_schema()
     (state_schemas, merged_state_schema,
      input_schema, output_schema) = _get_schema(middleware)
 
@@ -269,6 +445,7 @@ def create_agent(
         context_schema=context_schema,
     )
 
+    # TODO:实现model_node函数
     """添加model节点"""
     graph.add_node("model", RunnableCallable(model_node, amodel_node))
 
@@ -276,53 +453,13 @@ def create_agent(
     graph.add_node("tools", tool_node)
 
     """添加middleware节点"""
-    for m in middleware:
-        if (
-                m.__class__.before_agent is not AgentMiddleware.before_agent
-                or m.__class__.before_agent is not AgentMiddleware.before_agent
-        ):
-            sync_before_agent = (
-                m.before_agent
-                if m.__class__.before_agent is not AgentMiddleware.before_agent
-                else None
-            )
-            async_before_agent = (
-                m.abefore_agent
-                if m.__class__.abefore_agent is not AgentMiddleware.abefore_agent
-                else None
-            )
-            before_agent_node = RunnableCallable(sync_before_agent, async_before_agent)
-            graph.add_node(
-                f"{m.name}.before_agent",
-                before_agent_node,
-                input_schema=merged_state_schema
-            )
-
-        if (
-                m.__class__.before_model is not AgentMiddleware.before_model
-                or m.__class__.abefore_model is not AgentMiddleware.abefore_model
-        ):
-            sync_before_model = (
-                m.before_model
-                if m.__class__.before_model is not AgentMiddleware.before_model
-                else None
-            )
-            async_before_model = (
-                m.abefore_model
-                if m.__class__.abefore_model is not AgentMiddleware.abefore_model
-                else None
-            )
-            before_model_node = RunnableCallable(sync_before_model, async_before_model)
-            graph.add_node(
-                f"{m.name}.before_model",
-                before_model_node,
-                input_schema=merged_state_schema
-            )
+    middleware_node(graph, middleware)
 
     """构建从Start到entry_node的edge"""
     graph.add_edge(START, entry_node)
 
     """构建从tools到model的条件边"""
+    #TODO:实现_choose_tools_model_edge函数
     graph.add_conditional_edges(
         "tools",
         RunnableCallable(  # 路由函数
@@ -337,7 +474,8 @@ def create_agent(
         tools_to_model_destinations,  # 目标节点列表
     )
 
-    """构建从model到出点的条件边"""
+    """构建从loop_exit_node到出点的条件边"""
+    #TODO:实现_choose_model_to_tools_edge函数
     graph.add_conditional_edges(
         loop_exit_node,
         RunnableCallable(
@@ -352,6 +490,8 @@ def create_agent(
     )
 
     """构建before_agent middleware 边"""
+    #TODO:实现_add_middleware_edge函数
+    #TODO:实现_get_can_jump_to函数
     for m1, m2 in itertools.pairwise(middleware_before_agent):  # 输入[A, B, C, D]，会输出(A, B), (B, C), (C, D)
         _add_middleware_edge(  # 两两连接中间件node
             graph,
@@ -359,7 +499,7 @@ def create_agent(
             default_destination=f"{m2.name}.before_agent",
             model_destination=loop_entry_node,
             end_destination=exit_node,
-            can_jump_to=_get_can_to_jump_to(m1, "before_agent"),
+            can_jump_to=_get_can_jump_to(m1, "before_agent"),
         )
     _add_middleware_edge(  # 将最后一个middleware node和loop_entry_node连接
         graph,
@@ -367,7 +507,7 @@ def create_agent(
         default_destination=loop_entry_node,
         model_destination=loop_entry_node,
         end_destination=exit_node,
-        can_jump_to=_get_can_to_jump_to(middleware_before_agent[-1], "before_agent"),
+        can_jump_to=_get_can_jump_to(middleware_before_agent[-1], "before_agent"),
     )
 
     """构建before_model middleware 边"""
@@ -378,7 +518,7 @@ def create_agent(
             default_destinantion=f"{m2.name}.before_model",
             model_destination=loop_entry_node,
             end_destination=exit_node,
-            can_jump_to=_get_can_to_jump_to(m1, "before_model"),
+            can_jump_to=_get_can_jump_to(m1, "before_model"),
         )
     _add_middleware_edge(
         graph,
@@ -386,7 +526,7 @@ def create_agent(
         default_destination="model",
         model_destination=loop_entry_node,
         end_destination=exit_node,
-        can_jump_to=_get_can_to_jump_to(middleware_before_model[-1], "before_model"),
+        can_jump_to=_get_can_jump_to(middleware_before_model[-1], "before_model"),
     )
 
     """构建after_model middleware 边"""
@@ -399,7 +539,7 @@ def create_agent(
             default_destination=f"{m2.name}.after_model",
             model_destination=loop_entry_node,
             end_destination=exit_node,
-            can_jump_to=_get_can_to_jump_to(m1, "after_model"),
+            can_jump_to=_get_can_jump_to(m1, "after_model"),
         )
     # Model节点不具备重新回到model节点和直接退出的功能，否则过于冗余
     graph.add_edge("model", f"{middleware_after_model[-1].name}.after_model")
@@ -414,7 +554,7 @@ def create_agent(
             default_destination=f"{m2.name}.after_agent",
             model_destination=loop_entry_node,
             end_destination=exit_node,
-            can_jump_to=_get_can_to_jump_to(m1, "after_agent"),
+            can_jump_to=_get_can_jump_to(m1, "after_agent"),
         )
     _add_middleware_edge(
         graph,
@@ -422,7 +562,7 @@ def create_agent(
         default_destiantion=END,
         model_destination=loop_entry_node,
         end_destination=exit_node,
-        can_jump_to=_get_can_to_jump_to(middleware_after_agent[0], "after_agent"),
+        can_jump_to=_get_can_jump_to(middleware_after_agent[0], "after_agent"),
     )
 
     return graph.compile(
