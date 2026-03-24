@@ -14,7 +14,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
-from deepagents.backends.filesystem import FilesystemMiddleware
+from deepagents.middlleware.filesystem import FilesystemMiddleware
 from deepagents.backends.protocol import BackendProtocol, BackendFactory
 from deepagents.backends.state import StateBackend
 from deepagents.middlleware.memory import MemoryMiddleware
@@ -27,6 +27,7 @@ BASE_AGENT_PROMPT = (Path(__file__).parent / "BASE_PROMPT.md").read_text(encodin
 
 
 def get_default_model():
+    """设置默认Model"""
     return ChatOllama(
         model="deepseek-r1:1.5b",
         temperature=0.7,
@@ -54,6 +55,8 @@ def create_main_agent(
 ) -> CompiledStateGraph:
     if model is None:
         model = get_default_model()
+
+        """如果model存在，进行model初始化"""
     elif isinstance(model, str):
         if model.startswith("qwen:"):
             model_init_params: dict = {"temperature": 0.1, "top_p": 0.8}
@@ -66,9 +69,9 @@ def create_main_agent(
 
     summarization_defaults = _compute_summarization_defaults(model)
 
-    backend = backend if backend is not None else StateBackend
+    backend = backend if backend is not None else StateBackend #这里是传StateBackend类名，不是传实例，故不用输入runtime
 
-    gp_middleware: list[AgentMiddleware[Any, Any, Any]] = [
+    gp_middleware: list[AgentMiddleware[Any, Any, Any]] = [ #Generic[Any, Any, Any]类型参数化，让一个基类能适配多种类型组
         TodoListMiddleware(),
         FilesystemMiddleware(backend=backend),
         DeepAgentsSummarizationMiddleWare(
@@ -86,14 +89,14 @@ def create_main_agent(
     if interrupt_on is not None:
         gp_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
 
+
+    # 往下是对子agent
     general_purpose_spec: SubAgent = {
         **GENERAL_PURPOSE_SUBAGENT,
         "model": model,
         "tools": tools or [],
         "middleware": gp_middleware,
     }
-    # 往上是对主agent
-    # 往下是对子agent
     processed_subagents: list[SubAgent | CompiledSubAgent] = []
     for spec in subagents or []:
         if "runnable" in spec:
@@ -130,7 +133,7 @@ def create_main_agent(
             }
 
             processed_subagents.append(processed_spec)
-
+    # 总共的agent
     all_subagents: list[SubAgent | CompiledSubAgent] = [general_purpose_spec, *processed_subagents]
 
     mainagent_middleware: list[AgentMiddleware[Any, Any, Any]] = [
