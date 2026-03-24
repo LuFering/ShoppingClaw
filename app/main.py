@@ -4,7 +4,7 @@ ShoppingClaw - Deep Agents Shopping Agent
 """
 from fastapi import FastAPI
 
-from infra.agent_factory import get_agent
+from src.utils.infra.agent_factory import get_agent
 
 app = FastAPI(
     title="ShoppingClaw",
