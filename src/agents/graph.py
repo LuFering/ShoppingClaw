@@ -8,6 +8,7 @@ from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest
 from langchain.agents.structured_output import OutputToolBinding, ResponseFormat, ToolStrategy, ProviderStrategy, \
     AutoStrategy
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph._internal._runnable import RunnableCallable
@@ -16,6 +17,7 @@ from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt.tool_node import ToolCallWrapper, ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Command, Checkpointer
@@ -145,8 +147,35 @@ def _get_exit_node(
     return exit_node
 
 
-def _chain_tool_call(wrapper: list):
-    pass
+def _chain_tool_call(
+        wrappers: Sequence[ToolCallWrapper]
+) -> ToolCallWrapper | None:
+    def compose_two(outer: ToolCallWrapper, inner: ToolCallWrapper) -> ToolCallWrapper:
+        """
+        将两个 wrapper 组合成一个新的 wrapper（outer 包裹 inner）。
+        :param outer:外层 wrapper（先执行）
+        :param inner:内层 wrapper（后执行）
+        :return:一个新的 wrapper，行为等价于 outer(inner(execute))
+
+        执行顺序：
+        请求流： outer -> inner -> execute
+        返回流： execute -> inner -> outer
+        """
+        def composed(
+                request: ToolCallRequest,
+                execute: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
+        ) -> ToolMessage | Command[Any]:
+            """outer不直接调用execute,而是调用call_inner，实现wrapper中间件层层包裹"""
+            def call_inner(request: ToolCallRequest) -> ToolMessage | Command[Any]:
+                return inner(request, execute) #调用execute的真正中间件
+
+            return outer(request, call_inner)
+
+        return composed
+
+    result =wrappers[-1] #[A,B,C],取出的是C
+    for wrapper in reversed(wrappers[:-1]):# =>[B,A]
+        result=compose_two(wrapper,result)
 
 
 def _get_tool_call(
@@ -163,7 +192,7 @@ def _get_tool_call(
             for m in middleware_tool_call
         ]
         wrap_tool_call_wrapper = _chain_tool_call(wrapper)
-
+    # wrap_tool_call_wrapper 是包裹tool的wrapper层，用于在tool执行的前，中，后阶段，对调用过程进行控制，增强或拦截等操作
     return wrap_tool_call_wrapper
 
 
@@ -400,7 +429,6 @@ def create_agent(
     structured_output_tools: dict[str, OutputToolBinding[Any]] = {}
 
     """wrap_tool_call_wrapper"""
-    # TODO:实现tool_call的链式连接
     wrap_tool_call_wrapper = _get_tool_call(middleware)
 
     """async_wrap_tool_call_wrapper"""
@@ -459,7 +487,7 @@ def create_agent(
     graph.add_edge(START, entry_node)
 
     """构建从tools到model的条件边"""
-    #TODO:实现_choose_tools_model_edge函数
+    # TODO:实现_choose_tools_model_edge函数
     graph.add_conditional_edges(
         "tools",
         RunnableCallable(  # 路由函数
@@ -475,7 +503,7 @@ def create_agent(
     )
 
     """构建从loop_exit_node到出点的条件边"""
-    #TODO:实现_choose_model_to_tools_edge函数
+    # TODO:实现_choose_model_to_tools_edge函数
     graph.add_conditional_edges(
         loop_exit_node,
         RunnableCallable(
@@ -490,8 +518,8 @@ def create_agent(
     )
 
     """构建before_agent middleware 边"""
-    #TODO:实现_add_middleware_edge函数
-    #TODO:实现_get_can_jump_to函数
+    # TODO:实现_add_middleware_edge函数
+    # TODO:实现_get_can_jump_to函数
     for m1, m2 in itertools.pairwise(middleware_before_agent):  # 输入[A, B, C, D]，会输出(A, B), (B, C), (C, D)
         _add_middleware_edge(  # 两两连接中间件node
             graph,
