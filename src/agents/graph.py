@@ -1,14 +1,15 @@
 import itertools
-from typing import Sequence, Any, Callable
+from dataclasses import field, dataclass
+from typing import Sequence, Any, Callable, Awaitable, Generic
 
 from aiohttp.web_middlewares import middleware
 from langchain.agents import AgentState
-from langchain.agents.middleware import AgentMiddleware, ModelResponse
+from langchain.agents.middleware import AgentMiddleware, ModelResponse, ExtendedModelResponse
 from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest
 from langchain.agents.structured_output import OutputToolBinding, ResponseFormat, ToolStrategy, ProviderStrategy, \
     AutoStrategy
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, AIMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph._internal._runnable import RunnableCallable
@@ -22,6 +23,12 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Command, Checkpointer
 from langgraph.typing import ContextT, NodeInputT
+
+
+@dataclass  # 类似java的@data,自动创建__init__构造函数
+class _ComposedExtendedModelResponse(Generic[ResponseT]):
+    model_response: ModelResponse[ResponseT]
+    commands: list[Command[Any]] = field(default_factory=list)  # field(default_factory)会在每次实例类时调用list函数创建list
 
 
 def model_node(
@@ -161,21 +168,75 @@ def _chain_tool_call(
         请求流： outer -> inner -> execute
         返回流： execute -> inner -> outer
         """
+
         def composed(
                 request: ToolCallRequest,
                 execute: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
         ) -> ToolMessage | Command[Any]:
             """outer不直接调用execute,而是调用call_inner，实现wrapper中间件层层包裹"""
+
             def call_inner(request: ToolCallRequest) -> ToolMessage | Command[Any]:
-                return inner(request, execute) #调用execute的真正中间件
+                return inner(request, execute)  # 调用execute的真正中间件
 
             return outer(request, call_inner)
 
         return composed
 
-    result =wrappers[-1] #[A,B,C],取出的是C
-    for wrapper in reversed(wrappers[:-1]):# =>[B,A]
-        result=compose_two(wrapper,result)
+    result = wrappers[-1]  # [A,B,C],取出的是C
+    for wrapper in reversed(wrappers[:-1]):  # =>[B,A]
+        result = compose_two(wrapper, result)
+    return result
+
+
+def _chain_async_tool_call(
+        async_wrappers: Sequence[
+            Callable[
+                [ToolCallRequest, Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]]],
+                Awaitable[ToolMessage | Command[Any]],
+            ]
+        ],
+) -> (
+        Callable[
+            [ToolCallRequest, Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]]],
+            Awaitable[ToolMessage | Command[Any]],
+        ]
+        | None
+):
+    """参数类似于async def wrapper(
+                    request: ToolCallRequest,
+                    execute: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]]
+                    ) -> ToolMessage | Command:
+                    ..."""
+
+    def compose_two(
+            outer: Callable[
+                [ToolCallRequest, Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]]],
+                Awaitable[ToolMessage | Command[Any]],
+            ],
+            inner: Callable[
+                [ToolCallRequest, Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]]],
+                Awaitable[ToolMessage | Command[Any]],
+            ],
+    ) -> Callable[
+        [ToolCallRequest, Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]]],
+        Awaitable[ToolMessage | Command[Any]],
+    ]:
+        async def composed(
+                request: ToolCallRequest,
+                execute: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+        ) -> ToolMessage | Command[Any]:
+            async def call_inner(req: ToolCallRequest) -> ToolMessage | Command[Any]:
+                return await inner(req, execute)
+
+            return await inner(request, call_inner)
+
+        return composed
+
+    result = async_wrappers[-1]
+    for async_wrapper in reversed(async_wrappers[:-1]):
+        result = compose_two(async_wrapper, result)
+
+    return result
 
 
 def _get_tool_call(
@@ -196,8 +257,178 @@ def _get_tool_call(
     return wrap_tool_call_wrapper
 
 
-def _chain_async_tool_call(async_wrapper: list):
-    pass
+def _normalize_to_model_response(
+        result: ModelResponse | AIMessage | ExtendedModelResponse,
+) -> ModelResponse:
+    """从result中提取model_response"""
+    if isinstance(result, AIMessage):
+        return ModelResponse(result=[result], structured_response=None)
+    if isinstance(result, ExtendedModelResponse):
+        return result.model_response
+    else:
+        return result
+
+
+def _chain_model_call(
+        sync_handlers: Sequence[
+            Callable[
+                [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], ModelResponse]],
+                ModelResponse | AIMessage | ExtendedModelResponse,
+            ]
+        ],
+) -> Callable[
+    [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], ModelResponse]],
+    _ComposedExtendedModelResponse,
+]:
+    """将model_call_handler进行链接"""
+    def _to_composed_result(
+            result: ModelResponse | AIMessage | ExtendedModelResponse | _ComposedExtendedModelResponse,
+            extra_commands: list[Command[Any]] | None = None,
+    ) -> _ComposedExtendedModelResponse:
+        """为result统一格式"""
+        commands: list[Command[Any]] = list(extra_commands or [])  # 如果 extra_commands 存在 → 复制一份,如果没有 → 空列表 []
+        if isinstance(result, _ComposedExtendedModelResponse):  # 有commands
+            commands.extend(result.commands)
+            model_response = result.model_response
+        elif isinstance(result, ExtendedModelResponse):  # 可能有commands，可能是没有
+            model_response = result.model_response
+            if result.command is not None:
+                commands.append(result.command)
+        else:
+            model_response = _normalize_to_model_response(result)
+        return _ComposedExtendedModelResponse(model_response=model_response, commands=commands)  # 创建统一实例
+
+    def composed_two(
+            outer: Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], ModelResponse]],
+                       ModelResponse | AIMessage | ExtendedModelResponse
+                   ]
+                   | Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], ModelResponse]],
+                       _ComposedExtendedModelResponse
+                   ],
+            inner: Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], ModelResponse]],
+                       ModelResponse | AIMessage | ExtendedModelResponse
+                   ]
+                   | Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], ModelResponse]],
+                       _ComposedExtendedModelResponse
+                   ],
+    ) -> Callable[
+        [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], ModelResponse]],
+        _ComposedExtendedModelResponse
+    ]:
+        def composed(
+                request: ModelRequest[ContextT],
+                handler: Callable[[ModelRequest[ContextT]], ModelResponse],
+        ) -> _ComposedExtendedModelResponse:
+            accumulated_commands: list[Command[Any]] = []  # command累加
+
+            def inner_handle(req: ModelRequest[ContextT]) -> ModelResponse:
+                accumulated_commands.clear()
+                inner_result = inner(req, handler) #执行handler的真正函数
+                if isinstance(inner_result, _ComposedExtendedModelResponse):
+                    accumulated_commands.extend(inner_result.commands)
+                    return inner_result.model_response
+                if isinstance(inner_result, ExtendedModelResponse):
+                    if inner_result.command is not None:
+                        accumulated_commands.append(inner_result.command)
+                    return inner_result.model_response
+                return _normalize_to_model_response(inner_result)
+
+            outer_result = outer(request, inner_handle)
+            return _to_composed_result(
+                outer_result,
+                extra_commands=accumulated_commands,
+            )
+
+        return composed
+    composed_handler=composed_two(sync_handlers[-2],sync_handlers[-1]) #列表最后一个和最后第二个进行链接
+    for h in reversed(sync_handlers[:-2]):
+        composed_handler = composed_two(h,composed_handler)
+    return composed_handler
+
+
+def _chain_async_model_call(
+        async_handlers:Sequence[
+            Callable[
+                [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
+                Awaitable[ModelResponse | AIMessage | ExtendedModelResponse],
+            ]
+        ],
+)-> Callable[
+    [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
+    Awaitable[_ComposedExtendedModelResponse],
+]:
+    def _to_composed_result(
+            result: ModelResponse | AIMessage | ExtendedModelResponse | _ComposedExtendedModelResponse,
+            extra_commands: list[Command[Any]] | None = None,
+    ) -> _ComposedExtendedModelResponse:
+        """为result统一格式"""
+        commands: list[Command[Any]] = list(extra_commands or [])  # 如果 extra_commands 存在 → 复制一份,如果没有 → 空列表 []
+        if isinstance(result, _ComposedExtendedModelResponse):  # 有commands
+            commands.extend(result.commands)
+            model_response = result.model_response
+        elif isinstance(result, ExtendedModelResponse):  # 可能有commands，可能是没有
+            model_response = result.model_response
+            if result.command is not None:
+                commands.append(result.command)
+        else:
+            model_response = _normalize_to_model_response(result)
+        return _ComposedExtendedModelResponse(model_response=model_response, commands=commands)  # 创建统一实例
+
+    def composed_two(
+            outer: Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
+                       Awaitable[ModelResponse | AIMessage | ExtendedModelResponse]
+                   ]
+                   | Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
+                       Awaitable[_ComposedExtendedModelResponse]
+                   ],
+            inner: Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
+                       Awaitable[ModelResponse | AIMessage | ExtendedModelResponse]
+                   ]
+                   | Callable[
+                       [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
+                       Awaitable[_ComposedExtendedModelResponse]
+                   ],
+    ) -> Callable[
+        [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
+        Awaitable[_ComposedExtendedModelResponse]
+    ]:
+        async def composed(
+                request: ModelRequest[ContextT],
+                handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]],
+        ) -> _ComposedExtendedModelResponse:
+            accumulated_commands: list[Command[Any]] = []  # command累加
+
+            async def inner_handle(req: ModelRequest[ContextT]) -> ModelResponse:
+                accumulated_commands.clear()
+                inner_result = await inner(req, handler)  # 执行handler的真正函数
+                if isinstance(inner_result, _ComposedExtendedModelResponse):
+                    accumulated_commands.extend(inner_result.commands)
+                    return inner_result.model_response
+                if isinstance(inner_result, ExtendedModelResponse):
+                    if inner_result.command is not None:
+                        accumulated_commands.append(inner_result.command)
+                    return inner_result.model_response
+                return _normalize_to_model_response(inner_result)
+
+            outer_result = await outer(request, inner_handle)
+            return _to_composed_result(
+                outer_result,
+                extra_commands=accumulated_commands,
+            )
+
+        return composed
+
+    composed_handler = composed_two(async_handlers[-2], async_handlers[-1])  # 列表最后一个和最后第二个进行链接
+    for h in reversed(async_handlers[:-2]):
+        composed_handler = composed_two(h, composed_handler)
+    return composed_handler
 
 
 def _get_model_call(
@@ -215,6 +446,23 @@ def _get_model_call(
         ]
         warp_model_call_handler = _chain_model_call(sync_handlers)
 
+    return warp_model_call_handler
+
+
+def _get_async_model_call(
+        middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
+):
+    middleware_async_model_call = [
+        m for m in middleware
+        if m.__class__.wrap_model_call is not AgentMiddleware.wrap_model_call
+           or m.__class__.awrap_model_call is not AgentMiddleware.awrap_model_call
+    ]
+    if middleware_async_model_call:
+        async_handlers = [
+            m.awrap_model_call
+            for m in middleware_async_model_call
+        ]
+        warp_model_call_handler = _chain_async_model_call(async_handlers)
     return warp_model_call_handler
 
 
@@ -433,6 +681,12 @@ def create_agent(
 
     """async_wrap_tool_call_wrapper"""
     async_wrap_tool_call_wrapper = _get_async_tool_call(middleware)
+
+    """wrap_model_call_handler"""
+    wrap_model_call_handler = _get_model_call(middleware)
+
+    """async_wrap_model_call_handler"""
+    async_wrap_model_call_handler = _get_async_model_call(middleware)
 
     """tools列表"""
     (middleware_tools, llm_tools,
