@@ -1,11 +1,12 @@
 import itertools
 from dataclasses import field, dataclass
-from typing import Sequence, Any, Callable, Awaitable, Generic
+from typing import Sequence, Any, Callable, Awaitable, Generic, get_type_hints, Required, NotRequired, get_args, \
+    Annotated
 
 from aiohttp.web_middlewares import middleware
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware, ModelResponse, ExtendedModelResponse
-from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest
+from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest, OmitFromSchema
 from langchain.agents.structured_output import OutputToolBinding, ResponseFormat, ToolStrategy, ProviderStrategy, \
     AutoStrategy
 from langchain_core.language_models import BaseChatModel
@@ -23,6 +24,8 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Command, Checkpointer
 from langgraph.typing import ContextT, NodeInputT
+from mypyc.irbuild.util import TypedDict
+from typing_extensions import get_origin
 
 
 @dataclass  # 类似java的@data,自动创建__init__构造函数
@@ -281,6 +284,7 @@ def _chain_model_call(
     _ComposedExtendedModelResponse,
 ]:
     """将model_call_handler进行链接"""
+
     def _to_composed_result(
             result: ModelResponse | AIMessage | ExtendedModelResponse | _ComposedExtendedModelResponse,
             extra_commands: list[Command[Any]] | None = None,
@@ -327,7 +331,7 @@ def _chain_model_call(
 
             def inner_handle(req: ModelRequest[ContextT]) -> ModelResponse:
                 accumulated_commands.clear()
-                inner_result = inner(req, handler) #执行handler的真正函数
+                inner_result = inner(req, handler)  # 执行handler的真正函数
                 if isinstance(inner_result, _ComposedExtendedModelResponse):
                     accumulated_commands.extend(inner_result.commands)
                     return inner_result.model_response
@@ -344,20 +348,21 @@ def _chain_model_call(
             )
 
         return composed
-    composed_handler=composed_two(sync_handlers[-2],sync_handlers[-1]) #列表最后一个和最后第二个进行链接
+
+    composed_handler = composed_two(sync_handlers[-2], sync_handlers[-1])  # 列表最后一个和最后第二个进行链接
     for h in reversed(sync_handlers[:-2]):
-        composed_handler = composed_two(h,composed_handler)
+        composed_handler = composed_two(h, composed_handler)
     return composed_handler
 
 
 def _chain_async_model_call(
-        async_handlers:Sequence[
+        async_handlers: Sequence[
             Callable[
                 [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
                 Awaitable[ModelResponse | AIMessage | ExtendedModelResponse],
             ]
         ],
-)-> Callable[
+) -> Callable[
     [ModelRequest[ContextT], Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse]]],
     Awaitable[_ComposedExtendedModelResponse],
 ]:
@@ -590,17 +595,47 @@ def _get_tools(
             external_tools, available_tools)
 
 
-def __merged_schema():
-    pass
+def _extract_metadata(field_type: type) -> list[Any]:
+    """
+    从字段中取出额外metadata数据
+    :param field_type: schema的数值字段
+    :return: 最终提取出的metadata列表
+    """
+    if get_origin(field_type) in {Required,NotRequired}:#如果field_type是Required[X]或NotRequired[X]
+        inner_type=get_args(field_type)[0] #取出X
+        if get_origin(inner_type) is Annotated:#如果X是Annotated[A,B,C]
+            return list(get_args(inner_type)[1:])
+    elif get_origin(field_type) is Annotated:#如果field_type是Annotated[A,B,C]
+        return list(get_args(field_type)[1:])
+    #以上形式都不是，说明field_type没有metadata数据，返回空列表
+    #不写else,是因为get_origin(field_type)可能判为None，没有该分支判断
+    return []
+
+
+def __merged_schema(schemas: set[type], schema_name: str, omit_flag: str | None = None) -> type:
+    all_annotations = {}
+    for schema in schemas:
+        hints = get_type_hints(schema, include_extras=True)  # 拿到 schema 里的字段定义（包括 Annotated 的 metadata）
+        for field_name, field_type in hints.items():  # 遍历每一个字段，把合适的字段添加至all_annotations
+            should_omit = False  # 默认设置不忽略
+            if omit_flag:
+                metadata = _extract_metadata(field_type)  # 提取metadata
+                for meta in metadata:
+                    if isinstance(meta, OmitFromSchema) or getattr(meta,omit_flag) is True:  # 判断是否是OmitFromSchema，是否匹配omit_flag
+                        should_omit = True
+                        break
+            if not should_omit:
+                all_annotations[field_name] = field_type
+    return TypedDict(schema_name, all_annotations)
 
 
 def _get_schema(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]]
 ):
     state_schemas: set[type] = {m.state_schema for m in middleware}
-    merged_state_schema = __merged_schema()  # 合并所有state_schema
-    input_schema = __merged_schema()  # 挑出输入
-    output_schema = __merged_schema()  # 挑出输出
+    merged_state_schema = __merged_schema(state_schemas,"StateSchema",None)  # 合并所有state_schema
+    input_schema = __merged_schema(state_schemas,"InputSchema","input")  # 挑出输入
+    output_schema = __merged_schema(state_schemas,"OutputSchema","output")  # 挑出输出
 
     return (state_schemas, merged_state_schema,
             input_schema, output_schema)
@@ -715,7 +750,6 @@ def create_agent(
         model_to_tools_destinations.append(loop_entry_node)
 
     """四大schema"""
-    # TODO:实现__merged_schema()
     (state_schemas, merged_state_schema,
      input_schema, output_schema) = _get_schema(middleware)
 
