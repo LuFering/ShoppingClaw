@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 class AgentManager():
     def __init__(self):
         self._classes = {}  # 待创建的agent
@@ -9,7 +12,7 @@ class AgentManager():
 
     def init_all_agents(self):
         """初始化agent实例"""
-        for agent in self._classes.keys()
+        for agent in self._classes.keys():
             self.get_agent(agent)
 
     def get_agent(self,agent):
@@ -31,5 +34,20 @@ class AgentManager():
         for agent in self._classes.keys():
             pass
 
+    async def get_agents_info(self):
+        """异步获取所有agent信息"""
+        #TODO:异步获取所有agent信息
+        pass
 
+    def auto_discover_agent(self):
+        """自动发现并注册 src/agents/ 下的所有智能体"""
+        #agent 目录路径 ,src/agents
+        agent_dir = Path(__file__).parent
+        #TODO:自动发现并注册 src/agents/ 下的所有智能体
+        pass
 
+agent_manager=AgentManager()
+agent_manager.auto_discover_agent()
+
+agent_manager.init_all_agents()
+__all__=["agent_manager"]

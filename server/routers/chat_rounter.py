@@ -11,12 +11,12 @@ chat = APIRouter(prefix="/chat", tags=["chat"])
 
 @chat.post("/agent/{agent_id}")
 async def chat_agent(
-        agent_id: str,  # 智能体 ID，从 URL 路径获取
+        agent_name: str,  # 智能体 ID，从 URL 路径获取
         query: str = Body(...),  # 用户问题
         config: dict = Body({}),  # 配置项：thread_id, model, agent_config_id
         meta: dict = Body(None),  # 元数据：request_id, model_provider
 ):
-    logging.info(f"agent_id:{agent_id},query:{query},config:{config},meta:{meta}")
+    logging.info(f"agent_id:{agent_name},query:{query},config:{config},meta:{meta}")
 
     # request_id 用于链路追踪，如果前端没传则自动生成 UUID
     if "request_id" not in meta or not meta.get("request_id"):
@@ -26,7 +26,7 @@ async def chat_agent(
     meta.update(
         {
             "query": query,
-            "agent_id": agent_id,
+            "agent_name": agent_name,
             "thread_id": config.get("thread_id"),  # 线程ID,多轮对话历史管理
         }
     )
@@ -35,7 +35,7 @@ async def chat_agent(
     """前端会收到多个 JSON 行（NDJSON 格式），每行一个 chunk"""
     return StreamResponse(
         stream_agent_chat(
-            agent_id=agent_id,
+            agent_name=agent_name,
             query=query,
             config=config,
             meta=meta,
