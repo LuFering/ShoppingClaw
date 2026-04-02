@@ -1,0 +1,2 @@
+class BaseContext:
+    pass
