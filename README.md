@@ -216,7 +216,7 @@ Research  Analysis  Recommendation  Custom
 
 ## 开发指南
 
-详细开发文档请参考：[SHOPPING_CLAW_DEV_GUIDE.md](./SHOPPING_CLAW_DEV_GUIDE.md)
+详细开发文档请参考：[SHOPPING_CLAW_DEV_GUIDE.md](docs/SHOPPING_CLAW_DEV_GUIDE.md)
 
 ## License
 

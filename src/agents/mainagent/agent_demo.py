@@ -14,7 +14,7 @@ from langgraph.types import Checkpointer
 
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middlleware.subagent import SubAgent, CompiledSubAgent
-from src.agents.graph import create_agent
+from src.agents.mainagent.factory import create_agent
 
 BASE_AGENT_PROMPT = (Path(__file__).parent / "BASE_PROMPT.md").read_text(encoding="utf-8")
 

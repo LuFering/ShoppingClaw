@@ -1,3 +1,4 @@
+import logging
 from abc import abstractmethod
 
 from langgraph.graph.state import CompiledStateGraph
@@ -27,6 +28,9 @@ class BaseAgent:
         if isinstance(agent_config, dict):
             context.update(agent_config)
         context.update(input_context)
+        logging.debug(f"stream_messages: {context}")
+
+        # 构建配置：LangGraph 会自动从 checkpointer 恢复 state
         input_config = {
             "configurable": {"thread_id": context.thread_id, "user_id": context.uesr_id},
             "recursion_limit": 100,

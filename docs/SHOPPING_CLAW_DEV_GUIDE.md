@@ -327,7 +327,7 @@ class MainAgent:
         self._agent = self.create_agent()
     
     def create_agent(self):
-        """创建 Agent 实例（调用 deepagents/graph.py）"""
+        """创建 Agent 实例（调用 deepagents/factory.py）"""
         config = {
             "model": "qwen2.5:3b",  # 使用 Ollama Qwen 模型
         }
@@ -335,7 +335,7 @@ class MainAgent:
             from langgraph.checkpoint.memory import MemorySaver
             config["checkpointer"] = MemorySaver()
         
-        # 调用 deepagents/graph.py 的 create_main_agent
+        # 调用 deepagents/factory.py 的 create_main_agent
         return create_main_agent(**config)
     
     def invoke(self, user_input: str, thread_id: str = "default"):
@@ -400,7 +400,7 @@ async def stream_agent_chat(...):
 `create_main_agent()` 函数的中间件构建流程：
 
 ```python
-# deepagents/graph.py - create_main_agent 核心逻辑
+# deepagents/factory.py - create_main_agent 核心逻辑
 def create_main_agent(
     model: str | BaseChatModel | None = None,
     tools: Sequence[BaseTool | Callable] | None = None,
@@ -611,7 +611,7 @@ class RecommendationAgent:
 deepagents 提供了一套完整的中间件系统来扩展 Agent 能力：
 
 ```python
-# deepagents/graph.py - create_main_agent 函数节选
+# deepagents/factory.py - create_main_agent 函数节选
 def create_main_agent(
     model: str | BaseChatModel | None = None,
     tools: Sequence[BaseTool | Callable] | None = None,
@@ -1561,7 +1561,7 @@ ollama run qwen2.5:3b "你好"
 
 **调试技巧**：
 ```python
-# 在 deepagents/graph.py 中添加调试日志
+# 在 deepagents/factory.py 中添加调试日志
 import logging
 logger = logging.getLogger(__name__)
 

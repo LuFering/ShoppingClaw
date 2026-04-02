@@ -4,10 +4,9 @@
 from typing import Any
 
 from dotenv import load_dotenv
-import os
 
 from langchain_core.messages import HumanMessage
-from src.agents.agent_demo import create_main_agent
+from src.agents.mainagent.agent_demo import create_main_agent
 
 # ========== 配置日志过滤 ==========
 import logging
