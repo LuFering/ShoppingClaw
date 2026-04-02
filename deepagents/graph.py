@@ -174,7 +174,7 @@ def create_main_agent(
     else:
         final_system_prompt = system_prompt + "\n\n" + BASE_AGENT_PROMPT
 
-    return create_agent(
+    return graph.compile(
         model,
         system_prompt=final_system_prompt,
         tools=tools,
