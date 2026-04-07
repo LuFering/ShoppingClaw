@@ -6,10 +6,11 @@ from typing import Any
 from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage
-from src.agents.mainagent.agent_demo import create_main_agent
 
 # ========== 配置日志过滤 ==========
 import logging
+
+from src.agents.mainagent.agent_demo import create_main_agent
 
 # 设置根 logger 级别为 INFO（只显示 INFO 及以上）
 logging.basicConfig(
@@ -56,7 +57,7 @@ class MainAgent:
         if self.persistence:  # checkpointer 持久化
             from langgraph.checkpoint.memory import MemorySaver
             config["checkpointer"] = MemorySaver()
-    
+
         return create_main_agent(**config)
 
     def invoke(self, user_input: str, thread_id: str = "default") -> dict[str, Any]:
@@ -73,6 +74,7 @@ class MainAgent:
 
         result = self._agent.invoke(messages, config)  # type: ignore[arg-type]
 
+
         logging.info("[WORKFLOW] <<< 执行完成(到达__end__节点)")
         logging.debug(f"[WORKFLOW] 输出数据:{repr(result)}")
 
@@ -85,10 +87,10 @@ class MainAgent:
     async def process_request(self, user_input: str) -> dict[str, Any]:
         """
         处理用户请求
-        
+
         Args:
             user_input: 用户输入
-            
+
         Returns:
             处理结果
         """
@@ -103,5 +105,5 @@ load_dotenv()
 if __name__ == "__main__":
     agent = MainAgent()
     while True:
-            user_input = input("你:").strip()
-            agent.invoke(user_input, thread_id="user_1")
+        user_input = input("你:").strip()
+        agent.invoke(user_input, thread_id="user_1")

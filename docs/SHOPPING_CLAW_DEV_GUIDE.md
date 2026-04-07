@@ -1259,7 +1259,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: docker/api.Dockerfile
+      dockerfile: docker/api.api.docker-compose.yml
     container_name: api-server
     ports:
       - "5050:5050"
@@ -1278,7 +1278,7 @@ services:
   web:
     build:
       context: ./web
-      dockerfile: ../docker/web.Dockerfile
+      dockerfile: ../docker/web.api.docker-compose.yml
     container_name: web-server
     ports:
       - "5173:5173"

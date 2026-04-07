@@ -34,21 +34,28 @@ def create_main_agent(
         store: BaseStore | None = None,
         backend: BackendProtocol | BackendFactory | None = None,
         interrupt_on: dict[str, bool | InterruptOnConfig] = None,
+        interrupt_before: list[str] | None = None,
+        interrupt_after: list[str] | None = None,
         debug: bool = False,
         name: str | None = None,
         cache: BaseCache | None = None,
 ) -> CompiledStateGraph:
+    import os
+    
+    # 从环境变量获取 Ollama 地址,默认为 localhost
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    
     # 如果传入的是字符串，创建 ChatOllama 实例
     if isinstance(model, str):
         model = ChatOllama(
             model=model,
-            base_url="http://localhost:11434",  # 硬编码地址，不依赖环境变量
+            base_url=ollama_base_url,
         )
     # 如果传入的是 None，使用默认模型
     elif model is None:
         model = ChatOllama(
             model="qwen2.5:3b",
-            base_url="http://localhost:11434",  # 硬编码地址，不依赖环境变量
+            base_url=ollama_base_url,
         )
     if system_prompt is None:
         final_system_prompt = BASE_AGENT_PROMPT
@@ -65,9 +72,20 @@ def create_main_agent(
     else:
         final_system_prompt = system_prompt + "\n\n" + BASE_AGENT_PROMPT
     # 如果传入的是 BaseChatModel 子类实例，直接使用
+    # TODO: system_prompt 需要通过 middleware 或其他方式注入
     return create_agent(  # type: ignore[return-value]
-        model,
-        system_prompt=final_system_prompt,
+        model=model,
+        tools=tools,
+        response_format=response_format,
+        middleware=middleware,
+        context_schema=context_schema,
+        checkpointer=checkpointer,
+        store=store,
+        interrupt_before=interrupt_before,
+        interrupt_after=interrupt_after,
+        debug=debug,
+        name=name,
+        cache=cache,
     )
 
 

@@ -106,54 +106,101 @@ ShoppingClaw/
 │
 ├── tests/                        # 测试用例（待完善）
 │
-├── .env                          # 环境变量配置
-├── requirements.txt              # Python 依赖
-├── setup.py                      # 安装脚本
-├── langgraph.json                # LangGraph 配置
+├── .env.template                 # 环境变量模板
+├── pyproject.toml                # Python 项目配置(UV 依赖管理)
+├── uv.lock                       # UV 锁定文件
+├── docker-compose.yml            # Docker 开发环境编排
 ├── main.py                       # 根目录入口（简单示例）
 └── README.md                     # 项目说明
 ```
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式1: Docker Compose(推荐,最快)
 
-```bash
-pip install -r requirements.txt
+**前置要求**:
+- 安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- 安装 [Ollama](https://ollama.com/) 并启动服务
+
+**Windows 用户注意**: 首次运行脚本前需要允许 PowerShell 执行:
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
-### 2. 配置环境变量
+**快速开始** (推荐):
+```powershell
+# Windows
+.\scripts\init.ps1
 
-复制 `.env.example` 到 `.env` 并配置：
-
-```bash
-# LLM 配置（Ollama 本地部署）
-OLLAMA_BASE_URL=http://localhost:11434
-DEFAULT_MODEL=qwen2.5:3b
-
-# 数据库配置
-POSTGRES_URL=postgresql+asyncpg://user:pass@localhost:5432/shopping_claw
-REDIS_URL=redis://localhost:6379/0
+# Linux/Mac
+chmod +x scripts/init.sh
+./scripts/init.sh
 ```
 
-### 3. 运行 Agent（独立模式）
+**或手动执行**:
 
 ```bash
-cd agents
-python main_agent.py
+# 1. 克隆项目
+git clone <repository-url>
+cd ShoppingClaw
+
+# 2. 配置环境变量
+cp .env.template .env
+# 编辑 .env,确保 OLLAMA_BASE_URL=http://host.docker.internal:11434
+
+# 3. 准备 Ollama 模型
+ollama pull qwen2.5:3b
+
+# 4. 启动所有服务(API + PostgreSQL + Redis)
+docker-compose up -d
+
+# 5. 查看日志确认启动成功
+docker-compose logs -f api
 ```
 
-### 4. 运行 API 服务
+访问 API: http://localhost:5050
+
+### 方式2: 本地开发(适合调试)
+
+**前置要求**:
+- Python 3.12+
+- [UV](https://docs.astral.sh/uv/) 包管理器
+- PostgreSQL 16+
+- Redis 7+
+- Ollama
 
 ```bash
-uvicorn app.main:app --reload
+# 1. 克隆项目
+git clone <repository-url>
+cd ShoppingClaw
+
+# 2. 安装 UV(如果未安装)
+pip install uv
+
+# 3. 创建虚拟环境并安装依赖
+uv sync
+
+# 4. 配置环境变量
+cp .env.template .env
+# 编辑 .env,修改数据库和 Redis 地址为本地
+
+# 5. 启动基础设施(Docker)
+docker-compose up -d postgres redis
+
+# 6. 启动 API 服务(热重载)
+uv run uvicorn server.main:app --reload
 ```
 
-### 5. 运行 Web 界面
+### 验证安装
 
 ```bash
-cd app/web
-streamlit run streamlit_app.py
+# 测试健康检查
+curl http://localhost:5050/api/system/health
+
+# 发送测试请求
+curl -X POST http://localhost:5050/api/chat/agent/MainAgent \
+  -H "Content-Type: application/json" \
+  -d '{"query": "你好", "thread_id": "test-001"}'
 ```
 
 ## 技术架构
