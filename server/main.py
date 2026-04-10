@@ -3,7 +3,10 @@ ShoppingClaw API Server
 FastAPI 应用入口
 """
 import logging
+import sys
 from contextlib import asynccontextmanager
+
+import debugpy
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,7 +103,7 @@ async def test_echo(message: str = "Hello"):
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "server.main:app",
         host="0.0.0.0",

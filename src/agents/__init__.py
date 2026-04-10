@@ -48,9 +48,9 @@ class AgentManager():
 
 agent_manager=AgentManager()
 
-# TODO: 临时手动注册 MainAgent,待 auto_discover_agent 实现后移除
-from src.agents.mainagent.graph import MainAgent
-agent_manager.register_agent(MainAgent)
+# TODO: 临时手动注册 MasterAgent,待 auto_discover_agent 实现后移除
+from src.agents.master_agent.graph import MasterAgent
+agent_manager.register_agent(MasterAgent)
 
 agent_manager.init_all_agents()
 __all__=["agent_manager"]

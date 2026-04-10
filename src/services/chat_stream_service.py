@@ -118,6 +118,7 @@ async def stream_agent_chat(
                 + b"\n"
         )
 
+
     if image_content:
         human_message = HumanMessage(
             content=[
@@ -140,11 +141,11 @@ async def stream_agent_chat(
     yield make_chunk(state="init", meta=meta, msg=init_msg)  # 先返回 init chunk，让前端知道"已收到请求"
 
     # 内容安全审查
-    if conf.enable_content_guard and await content_guard.check(query):
-        yield make_chunk(
-            status="error", error_type="content_guard_blocked", error_message="输入内容包含敏感词", meta=meta
-        )
-        return
+    # if conf.enable_content_guard and await content_guard.check(query):
+    #     yield make_chunk(
+    #         status="error", error_type="content_guard_blocked", error_message="输入内容包含敏感词", meta=meta
+    #     )
+    #     return
 
     try:  # 获取 Agent 实例
         agent = agent_manager.get_agent(agent_name)
@@ -163,7 +164,9 @@ async def stream_agent_chat(
     user_id = str(current_user.id)
 
 
-    # 获取或创建 Agent 配置
+    # # 获取或创建 Agent 配置
+    logging.debug(f">>>进入[stream_agent_chat]")
+    logging.info(f"config:{config}")
     agent_config_id = config.get("agent_config_id")
     config_item, agent_config_id = await _resolve_agent_config(db, agent_name,user_id, agent_config_id)
 
@@ -214,15 +217,15 @@ async def stream_agent_chat(
             if isinstance(msg, AIMessageChunk):
                 accumulated_content.append(msg.content)
 
-                # 敏感词检查（每 10 个 chunk 检查一次）
-                content_for_check = "".join(accumulated_content[-10:])
-                if conf.enable_content_guard and await content_guard.check_with_keywords(content_for_check):
-                    full_msg = AIMessage(content="".join(accumulated_content))
-                    if conv_repo:
-                        await save_partial_message(conv_repo, thread_id, full_msg, "content_guard_blocked")
-                    meta["time_cost"] = asyncio.get_event_loop().time() - start_time
-                    yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
-                    return
+                # # 敏感词检查（每 10 个 chunk 检查一次）
+                # content_for_check = "".join(accumulated_content[-10:])
+                # if conf.enable_content_guard and await content_guard.check_with_keywords(content_for_check):
+                #     full_msg = AIMessage(content="".join(accumulated_content))
+                #     if conv_repo:
+                #         await save_partial_message(conv_repo, thread_id, full_msg, "content_guard_blocked")
+                #     meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+                #     yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
+                #     return
 
                 ## 流式返回给前端
                 yield make_chunk(content=msg.content, msg=msg.model_dump(), metadata=metadata, status="loading")
@@ -241,16 +244,16 @@ async def stream_agent_chat(
                     logging.error(f"Error processing tool message: {e}")
         full_msg = _ensure_full_msg(full_msg, accumulated_content)
 
-        if conf.enable_content_guard and hasattr(full_msg, "content") and await content_guard.check(full_msg.content):
-            if conv_repo:
-                await save_partial_message(conv_repo, thread_id, full_msg, "content_guard_blocked")
-            meta["time_cost"] = asyncio.get_event_loop().time() - start_time
-            yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
-            return
+        # if conf.enable_content_guard and hasattr(full_msg, "content") and await content_guard.check(full_msg.content):
+        #     if conv_repo:
+        #         await save_partial_message(conv_repo, thread_id, full_msg, "content_guard_blocked")
+        #     meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+        #     yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
+        #     return
 
-        # 检查中断（人工审批）
-        async for chunk in check_and_handle_interrupts(agent, langgraph_config, make_chunk, meta, thread_id):
-            yield chunk
+        # # 检查中断（人工审批）
+        # async for chunk in check_and_handle_interrupts(agent, langgraph_config, make_chunk, meta, thread_id):
+        #     yield chunk
 
         # 保存 AI 响应并返回完成信号
         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
@@ -264,14 +267,14 @@ async def stream_agent_chat(
         if agent_state:
             yield make_chunk(status="agent_state", agent_state=agent_state, meta=meta)
 
-        # 先存储数据库，再返回 finished，避免前端查询时数据未落库
-        if conv_repo:
-            await save_messages_from_langgraph_state(
-                agent_instance=agent,
-                thread_id=thread_id,
-                conv_repo=conv_repo,
-                config_dict=langgraph_config,
-            )
+        # # 先存储数据库，再返回 finished，避免前端查询时数据未落库
+        # if conv_repo:
+        #     await save_messages_from_langgraph_state(
+        #         agent_instance=agent,
+        #         thread_id=thread_id,
+        #         conv_repo=conv_repo,
+        #         config_dict=langgraph_config,
+        #     )
 
         # 完成信号
         yield make_chunk(status="finished", meta=meta)

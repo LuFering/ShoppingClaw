@@ -34,12 +34,12 @@ async def chat_agent(
     
     # 临时创建一个假的 db 对象（None），传递给 stream_agent_chat
     db = None
-    
-    logging.info(f"agent_id:{agent_name},query:{query},config:{config},meta:{meta}")
-    logging.info(f"image_content present: {image_content is not None}")
+    logging.debug(f">>>进入[chat_agent]")
+    logging.info(f"[chat_agent] agent_id:{agent_name},query:{query},config:{config},meta:{meta}")
+    logging.info(f"[chat_agent] image_content present: {image_content is not None}")
     if image_content:
-        logging.info(f"image_content length: {len(image_content)}")
-        logging.info(f"image_content preview: {image_content[:50]}...")
+        logging.info(f"[chat_agent] image_content length: {len(image_content)}")
+        logging.info(f"[chat_agent] image_content preview: {image_content[:50]}...")
 
 
     # request_id 用于链路追踪，如果前端没传则自动生成 UUID
@@ -57,6 +57,7 @@ async def chat_agent(
             "has_image": bool(image_content),
         }
     )
+    logging.info(f"[chat_agent] 更新后的meta:{meta}")
 
     # 返回流式响应，媒体类型为 application/json
     """前端会收到多个 JSON 行（NDJSON 格式），每行一个 chunk"""

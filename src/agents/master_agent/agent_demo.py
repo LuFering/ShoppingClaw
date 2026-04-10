@@ -14,12 +14,12 @@ from langgraph.types import Checkpointer
 
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middlleware.subagent import SubAgent, CompiledSubAgent
-from src.agents.mainagent.factory import create_agent
+from src.agents.master_agent.factory import create_agent
 
 BASE_AGENT_PROMPT = (Path(__file__).parent / "BASE_PROMPT.md").read_text(encoding="utf-8")
 
 
-def create_main_agent(
+def create_master_agent(
         model: str | BaseChatModel | None = None,
         tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
         *,
@@ -44,7 +44,7 @@ def create_main_agent(
     
     # 从环境变量获取 Ollama 地址,默认为 localhost
     ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    
+
     # 如果传入的是字符串，创建 ChatOllama 实例
     if isinstance(model, str):
         model = ChatOllama(
@@ -76,6 +76,7 @@ def create_main_agent(
     return create_agent(  # type: ignore[return-value]
         model=model,
         tools=tools,
+        system_prompt=final_system_prompt,
         response_format=response_format,
         middleware=middleware,
         context_schema=context_schema,
@@ -91,6 +92,6 @@ def create_main_agent(
 
 def get_main_agent() -> CompiledStateGraph:
     """为 LangGraph Studio 提供的无参数工厂函数"""
-    return create_main_agent(
+    return create_master_agent(
         model="deepseek-r1:1.5b",
     )

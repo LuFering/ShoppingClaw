@@ -184,7 +184,7 @@ docker inspect shoppingclaw-postgres | grep -A 10 Health
 docker-compose logs api | tail -n 50
 
 # 2. 检查代码是否正确挂载(开发模式)
-docker-compose exec api ls -la /app/src/agents/mainagent/
+docker-compose exec api ls -la /app/src/agents/master_agent/
 
 # 3. 重启 API 服务
 docker-compose restart api
