@@ -108,6 +108,8 @@ class BaseContext:
                 logging.error(f"加载智能体配置文件出错:{e}")
 
             context.update(file_config)
+        if input_context:
+            context.update(input_context)
 
         return context
 

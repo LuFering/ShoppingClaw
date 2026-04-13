@@ -7,6 +7,7 @@ from src.utils.datetime_utils import utc_now_naive
 # 默认配置名称
 DEFAULT_CONFIG_NAME = "初始配置"
 class AgentConfigRepository:
+    """数据访问层（Repository），封装对 agent_configs 表的 CRUD 操作"""
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
 

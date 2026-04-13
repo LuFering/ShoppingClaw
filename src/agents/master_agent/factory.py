@@ -3,6 +3,7 @@ from dataclasses import field, dataclass
 from typing import Sequence, Any, Callable, Awaitable, Generic, get_type_hints, Required, NotRequired, get_args, \
     Annotated
 
+import langchain
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware, ModelResponse, ExtendedModelResponse
 from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest, OmitFromSchema
@@ -27,7 +28,7 @@ from typing import TypedDict
 from typing_extensions import get_origin
 import logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("langsmith").setLevel(logging.WARNING)
@@ -45,12 +46,14 @@ class _ComposedExtendedModelResponse(Generic[ResponseT]):
 def _get_binding_model(
         request: ModelRequest,
         tool_node: ToolNode,
+        structured_output_tools: dict[str, OutputToolBinding[Any]],
 ) -> tuple[Runnable[Any, Any], ResponseFormat | None]:
     """获取绑定后的 model 和响应格式
 
     Args:
         request: 模型请求，包含 model、tools、response_format 等
         tool_node: 工具节点，包含可用的工具
+        structured_output_tools: 结构化输出工具字典
 
     Returns:
         (bound_model, effective_response_format) 元组
@@ -60,172 +63,110 @@ def _get_binding_model(
     # 从 tool_node 获取可用工具
     available_tools = list(tool_node.tools_by_name.values()) if tool_node else []
 
+    # 合并结构化输出工具
+    final_tools = available_tools + [info.tool for info in structured_output_tools.values()]
+
     # 获取请求中的 response_format
     response_format = request.response_format
-
-    # 确定有效的 response_format（简化处理，直接使用请求的 format）
     effective_response_format: ResponseFormat | None = response_format
 
     # 根据 response_format 类型绑定模型
-    if response_format is None:
-        # 没有结构化输出，只绑定普通 tools
-        if available_tools:
-            bound_model = request.model.bind_tools(available_tools)
+    if isinstance(response_format, ProviderStrategy):
+        kwargs = response_format.to_model_kwargs()
+        bound_model = request.model.bind_tools(final_tools, strict=True, **kwargs)
+    elif isinstance(response_format, ToolStrategy):
+        tool_choice = "any" if structured_output_tools else request.tool_choice
+        bound_model = request.model.bind_tools(final_tools, tool_choice=tool_choice)
+    else:
+        if final_tools:
+            bound_model = request.model.bind_tools(final_tools, tool_choice=request.tool_choice)
         else:
             bound_model = request.model
-    else:
-        # 有结构化输出需求，需要绑定 tools 和 response_format
-        # ToolStrategy: 使用 tool calling 进行结构化输出
-        # ProviderStrategy: 使用 provider 的原生结构化输出
-        # AutoStrategy: 自动检测最佳策略
-        bound_model = request.model.bind_tools(available_tools)
 
     return bound_model, effective_response_format
 
 
 def _handle_model_output(
         output: AIMessage,
-        effective_response_format: ResponseFormat | None
+        effective_response_format: ResponseFormat | None,
+        structured_output_tools: dict[str, OutputToolBinding[Any]]
 ) -> dict[str, Any]:
-    """处理模型输出，提取结构化响应
-
-    Args:
-        output: 模型输出的 AI 消息
-        effective_response_format: 实际使用的响应格式策略
-
-    Returns:
-        包含 messages 和 structured_response 的字典
-        - messages: 消息列表（至少包含 output）
-        - structured_response: 结构化响应（如果有）
-
-    简化处理逻辑：
-    1. 如果是 ProviderStrategy → 尝试从 tool_calls 解析结构化响应
-    2. 如果是 ToolStrategy → 尝试从匹配的 tool_call 解析结构化响应
-    3. 其他情况 → 只返回 messages
-    """
-    from langchain_core.messages import ToolMessage
+    """处理模型输出，提取结构化响应"""
     from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
 
-    # 情况 1: ProviderStrategy - 使用 provider 原生结构化输出
+    # 情况 1: ProviderStrategy
     if isinstance(effective_response_format, ProviderStrategy):
-        if output.tool_calls:
-            # 有 tool calls，尝试解析结构化响应
+        if not output.tool_calls:
+            return {"messages": [output]}
+        try:
+            binding = ProviderStrategyBinding.from_schema_spec(effective_response_format.schema_spec)
+            structured_response = binding.parse(output)
+            return {"messages": [output], "structured_response": structured_response}
+        except Exception as exc:
+            schema_name = getattr(effective_response_format.schema_spec.schema, "__name__", "response_format")
+            raise ValueError(f"Failed to parse structured response for {schema_name}: {exc}") from exc
+
+    # 情况 2: ToolStrategy
+    if isinstance(effective_response_format, ToolStrategy) and output.tool_calls:
+        structured_tool_calls = [tc for tc in output.tool_calls if tc["name"] in structured_output_tools]
+        if structured_tool_calls:
+            tool_call = structured_tool_calls[0]
             try:
-                binding = ProviderStrategyBinding.from_schema_spec(
-                    effective_response_format.schema_spec
-                )
-                # 从第一个 tool_call 解析
-                # 简化处理：直接访问 args 属性
-                first_tool_call = output.tool_calls[0]
-                # 类型忽略：parse() 返回 dict，但这正是我们需要的结构化响应
-                structured_response: Any = binding.parse(first_tool_call.get("args", {}))  # type: ignore[assignment]
+                binding = structured_output_tools[tool_call["name"]]
+                structured_response = binding.parse(tool_call["args"])
+                tool_message_content = effective_response_format.tool_message_content or f"Returning structured response: {structured_response}"
                 return {
-                    "messages": [output],
-                    "structured_response": structured_response
+                    "messages": [
+                        output,
+                        ToolMessage(content=tool_message_content, tool_call_id=tool_call["id"], name=tool_call["name"]),
+                    ],
+                    "structured_response": structured_response,
                 }
             except Exception as exc:
-                # 解析失败，抛出异常
-                schema_name = getattr(
-                    effective_response_format.schema_spec.schema,
-                    "__name__",
-                    "response_format"
-                )
-                raise ValueError(f"Failed to parse structured response for {schema_name}: {exc}") from exc
-        # 没有 tool_calls，只返回 messages
-        return {"messages": [output]}
+                error_msg = f"Error: {exc}\n Please fix your mistakes."
+                return {
+                    "messages": [
+                        output,
+                        ToolMessage(content=error_msg, tool_call_id=tool_call["id"], name=tool_call["name"]),
+                    ],
+                }
 
-    # 情况 2: ToolStrategy - 使用 tool calling 进行结构化输出
-    if isinstance(effective_response_format, ToolStrategy) and output.tool_calls:
-        # 查找匹配的结构化输出工具
-        # 注意：这里简化处理，假设第一个 tool_call 就是我们要的
-        first_tool_call = output.tool_calls[0]
-        # 使用 .get() 方法避免类型错误
-        tool_call_id = first_tool_call.get("id", "")
-        tool_call_name = first_tool_call.get("name", "")
-        tool_call_args: Any = first_tool_call.get("args", {})  # type: ignore[assignment]
-
-        # 构建 ToolMessage 作为回应
-        tool_message_content = (
-                effective_response_format.tool_message_content
-                or f"Returning structured response with args: {tool_call_args}"
-        )
-
-        return {
-            "messages": [
-                output,
-                ToolMessage(
-                    content=tool_message_content,
-                    tool_call_id=tool_call_id,
-                    name=tool_call_name,
-                ),
-            ],
-            # 简化：直接返回 args 作为结构化响应
-            "structured_response": tool_call_args
-        }
-
-    # 默认情况：没有结构化输出，只返回 messages
     return {"messages": [output]}
 
 
 def _sync_execute_model(
         request: ModelRequest,
         tool_node: ToolNode,
+        structured_output_tools: dict[str, OutputToolBinding[Any]],
 ) -> ModelResponse:
-    model, effective_response = _get_binding_model(request, tool_node)  # 将外置配置绑定于model当中
+    model, effective_response = _get_binding_model(request, tool_node, structured_output_tools)
     messages = request.messages
     if request.system_message:
-        messages = [request.system_message, *messages]  # 整理 messages
+        messages = [request.system_message, *messages]
     output = model.invoke(messages)
-    handled_response = _handle_model_output(output, effective_response)  # 处理输出
-    messages_list = handled_response["messages"]
-    structured_response = handled_response.get("structured_response")
-
+    handled_response = _handle_model_output(output, effective_response, structured_output_tools)
     return ModelResponse(
-        result=messages_list,
-        structured_response=structured_response
+        result=handled_response["messages"],
+        structured_response=handled_response.get("structured_response")
     )
 
 
 async def _async_execute_model(
         request: ModelRequest,
         tool_node: ToolNode,
+        structured_output_tools: dict[str, OutputToolBinding[Any]],
 ) -> ModelResponse:
-    """异步执行模型调用并返回响应
-
-    Args:
-        request: 模型请求对象，包含 model、messages、response_format 等
-
-    Returns:
-        ModelResponse 对象，包含 messages 列表和可选的 structured_response
-
-    简化处理逻辑：
-    1. 调用 _get_binding_model 获取绑定后的模型和响应格式
-    2. 整理 messages（如果有 system_message）
-    3. 异步调用模型的 ainvoke 方法
-    4. 使用 _handle_model_output 处理输出
-    5. 构造并返回 ModelResponse
-    """
-    # 获取绑定后的模型和响应格式
-    bound_model, effective_response = _get_binding_model(request, tool_node)
-
-    # 准备 messages 列表
+    """异步执行模型调用并返回响应"""
+    bound_model, effective_response = _get_binding_model(request, tool_node, structured_output_tools)
     messages = request.messages
     if request.system_message:
-        # 如果有 system_message，放在消息列表最前面
         messages = [request.system_message, *messages]
-
-    # 异步调用模型（非阻塞）
     output = await bound_model.ainvoke(messages)
-
-    # 处理模型输出，提取结构化响应
-    handled_response = _handle_model_output(output, effective_response)
-    messages_list = handled_response["messages"]
-    structured_response = handled_response.get("structured_response")
-
-    # 构造 ModelResponse 返回
+    logging.debug(f"[MODEL] output:{repr(output)}")
+    handled_response = _handle_model_output(output, effective_response, structured_output_tools)
     return ModelResponse(
-        result=messages_list,
-        structured_response=structured_response
+        result=handled_response["messages"],
+        structured_response=handled_response.get("structured_response")
     )
 
 
@@ -369,11 +310,11 @@ async def amodel_node(
 
     if async_handler is None:  # 没有中间件处理器
         # 直接异步调用模型
-        model_response = await _async_execute_model(request, tool_node)
+        model_response = await _async_execute_model(request, tool_node, {})
         return _build_commands(model_response)
 
     # 有中间件处理器，通过它来调用
-    result = await async_handler(request, lambda req: _async_execute_model(request, tool_node))
+    result = await async_handler(request, lambda req: _async_execute_model(req, tool_node, {}))
     return _build_commands(result.model_response, result.commands)
 
 
@@ -941,6 +882,8 @@ def __merged_schema(schemas: set[type], schema_name: str, omit_flag: str | None 
 def _get_schema(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]]
 ):
+    import operator  # ← 新增导入
+    from typing import List, Annotated  # ← 新增 Annotated
     from typing import List
     from langchain_core.messages import AnyMessage
 
@@ -956,7 +899,8 @@ def _get_schema(
             "messages": List[AnyMessage]
         })
         StateSchema = TypedDict("StateSchema", {
-            "messages": List[AnyMessage]
+            # ↓ 修改这里：添加 operator.add 启用追加模式
+            "messages": Annotated[List[AnyMessage], operator.add]  # 通过类型注解把 operator.add 函数注册为 messages 字段的合并策略
         })
         return (state_schemas, StateSchema,
                 InputSchema, OutputSchema)
@@ -1351,6 +1295,8 @@ def create_agent(
     """添加 model 节点"""
 
     def model_node_wrapper(state: AgentState[Any], runtime: Runtime[ContextT]) -> list[Command[Any]]:
+        logging.info("[MODEL] >>> 进入model节点")
+
         return model_node(
             model=model,
             tool_node=tool_node,
@@ -1362,6 +1308,7 @@ def create_agent(
         )
 
     async def amodel_node_wrapper(state: AgentState[Any], runtime: Runtime[ContextT]) -> list[Command[Any]]:
+        logging.info("[MODEL] >>> 进入model节点")
         return await amodel_node(
             model=model,
             tool_node=tool_node,
@@ -1393,7 +1340,7 @@ def create_agent(
                 structured_output_tools=structured_output_tools,
                 end_destination=exit_node,
             ),
-            trace=False,
+            trace=True,
         ),
         tools_to_model_destinations,  # 目标节点列表
     )

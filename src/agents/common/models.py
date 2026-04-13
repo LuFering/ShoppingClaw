@@ -33,12 +33,11 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
     elif provider in["ollama"]:
         from langchain_ollama import ChatOllama
 
-        # 从环境变量获取 Ollama 地址,默认为 localhost
-        ollama_base_url = os.getenv("OLLAMA_BASE_URL")
+
 
         return ChatOllama(
             model=model,
-            base_url=ollama_base_url
+            base_url=base_url
         )
     else:
         try:
