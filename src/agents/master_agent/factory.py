@@ -9,7 +9,7 @@ from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest
 from langchain.agents.structured_output import OutputToolBinding, ResponseFormat, ToolStrategy, ProviderStrategy, \
     AutoStrategy, ProviderStrategyBinding
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import ToolMessage, AIMessage
+from langchain_core.messages import ToolMessage, AIMessage, SystemMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph._internal._runnable import RunnableCallable  # type: ignore[import-not-top-level]
@@ -23,8 +23,17 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Command, Checkpointer
 from langgraph.typing import ContextT, NodeInputT
-from mypyc.irbuild.util import TypedDict
+from typing import TypedDict
 from typing_extensions import get_origin
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("langsmith").setLevel(logging.WARNING)
+logging.getLogger("langchain").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 @dataclass  # 类似java的@data,自动创建__init__构造函数
@@ -38,11 +47,11 @@ def _get_binding_model(
         tool_node: ToolNode,
 ) -> tuple[Runnable[Any, Any], ResponseFormat | None]:
     """获取绑定后的 model 和响应格式
-    
+
     Args:
         request: 模型请求，包含 model、tools、response_format 等
         tool_node: 工具节点，包含可用的工具
-    
+
     Returns:
         (bound_model, effective_response_format) 元组
         - bound_model: 绑定了 tools 的模型
@@ -79,16 +88,16 @@ def _handle_model_output(
         effective_response_format: ResponseFormat | None
 ) -> dict[str, Any]:
     """处理模型输出，提取结构化响应
-    
+
     Args:
         output: 模型输出的 AI 消息
         effective_response_format: 实际使用的响应格式策略
-    
+
     Returns:
         包含 messages 和 structured_response 的字典
         - messages: 消息列表（至少包含 output）
         - structured_response: 结构化响应（如果有）
-    
+
     简化处理逻辑：
     1. 如果是 ProviderStrategy → 尝试从 tool_calls 解析结构化响应
     2. 如果是 ToolStrategy → 尝试从匹配的 tool_call 解析结构化响应
@@ -182,13 +191,13 @@ async def _async_execute_model(
         tool_node: ToolNode,
 ) -> ModelResponse:
     """异步执行模型调用并返回响应
-    
+
     Args:
         request: 模型请求对象，包含 model、messages、response_format 等
-    
+
     Returns:
         ModelResponse 对象，包含 messages 列表和可选的 structured_response
-    
+
     简化处理逻辑：
     1. 调用 _get_binding_model 获取绑定后的模型和响应格式
     2. 整理 messages（如果有 system_message）
@@ -225,14 +234,14 @@ def _build_commands(
         middleware_commands: list[Command[Any]] | None = None
 ) -> list[Command[Any]]:
     """将模型响应转换为 Command 列表
-    
+
     Args:
         model_response: 模型响应，包含 messages 和可选的 structured_response
         middleware_commands: 中间件积累的额外 commands（可选）
-    
+
     Returns:
         Command 对象列表，第一个 Command 包含模型响应的状态更新
-    
+
     简化处理逻辑：
     1. 从 model_response.result 提取 messages
     2. 如果有 structured_response，也加入状态
@@ -259,16 +268,38 @@ def _build_commands(
 def model_node(
         model: str | BaseChatModel,
         tool_node: ToolNode,
+        system_messages: SystemMessage,
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
         initial_response_format: ToolStrategy[Any] | ProviderStrategy[Any] | AutoStrategy[Any] | None,
         state: AgentState[Any],
         runtime: Runtime[ContextT],
 ) -> list[Command[Any]]:
-    """定义model_node"""
+    """定义 model_node"""
+    logging.info("[MODEL NODE] >>> 进入 model 节点")
+
+    #  验证 system_message
+    if system_messages:
+        logging.info(f"[MODEL NODE]  SystemMessage 已加载，长度:{len(system_messages.content)} 字符")
+        logging.info(f"[MODEL NODE] SystemMessage 前 200 字符预览:\n{system_messages.content[:200]}...")
+    else:
+        logging.warning("[MODEL NODE]  SystemMessage 为空!")
+
+    logging.debug(f"[MODEL NODE] 参数格式 model:{type(model)},tool_node {type(tool_node)},"
+                  f"middleware:{type(middleware)},initial_response_format:{type(state)},"
+                  f"state:{type(state)},runtime:{type(runtime)} ")
+    logging.debug(f"[MODEL NODE] 输入消息数量:{len(state['messages'])}")
+    logging.debug(f"[MODEL NODE] 输入消息格式:{repr(state['messages'])}")
+    if state['messages']:
+        last_msg = state['messages'][-1]
+        logging.debug(f"[MODEL NODE] 最后一条消息类型：{type(last_msg).__name__}")
+        logging.debug(f"[MODEL NODE] 最后一条消息内容：{str(last_msg.content)[:100]}")
+        logging.debug(f"[MODEL NODE] 最后一条消息完整格式：{repr(last_msg)}")
+
     default_tools = []
     request = ModelRequest(  # 发送给LLM的标准数据包
         model=model,
         tools=default_tools,
+        system_message=system_messages,
         response_format=initial_response_format,
         messages=state["messages"],
         tool_choice=None,
@@ -278,7 +309,14 @@ def model_node(
 
     if _get_model_call(middleware) is None:  # 如果 model_call_handler 是 None
         model_response = _sync_execute_model(request, tool_node)  # 调用模型，执行操作，返回模型结果
-        return _build_commands(model_response)  # 把模型输出转换成 Agent 能执行的动作
+        commands = _build_commands(model_response)
+
+        logging.debug(f"[MODEL NODE] 模型响应消息数量:{len(model_response.result)}")
+        logging.debug(f"[MODEL NODE] 模型响应消息格式:{repr(model_response)}")
+        logging.debug(f"[MODEL NODE] 返回Commands完整格式:{repr(commands)}")
+        logging.info(f"[MODEL NODE] <<< 离开model节点")
+
+        return commands  # 把模型输出转换成 Agent 能执行的动作
 
     # 使用 lambda 包装，固定 middleware 和 tool_node 参数
     result = _get_model_call(middleware)(request, lambda req: _sync_execute_model(req, tool_node))
@@ -288,23 +326,24 @@ def model_node(
 async def amodel_node(
         model: str | BaseChatModel,
         tool_node: ToolNode,
+        system_messages: SystemMessage,
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
         initial_response_format: ToolStrategy[Any] | ProviderStrategy[Any] | AutoStrategy[Any] | None,
         state: AgentState[Any],
         runtime: Runtime[ContextT],
 ) -> list[Command[Any]]:
     """model_node 的异步函数
-    
+
     Args:
         model: 模型实例或模型字符串
         middleware: 中间件列表
         initial_response_format: 初始响应格式策略
         state: agent 状态，包含 messages 等信息
         runtime: 运行时上下文
-    
+
     Returns:
         Command 对象列表，包含状态更新和可选的结构化响应
-    
+
     简化处理逻辑：
     1. 构建 ModelRequest 对象
     2. 检查是否有异步中间件处理器
@@ -312,10 +351,12 @@ async def amodel_node(
     4. 如果有 → 通过中间件处理器调用
     5. 使用 _build_commands 转换为标准格式
     """
+
     default_tools = []
     request = ModelRequest(  # 发送给 LLM 的标准数据包
         model=model,
         tools=default_tools,
+        system_message=system_messages,
         response_format=initial_response_format,
         messages=state["messages"],
         tool_choice=None,
@@ -505,19 +546,21 @@ def _get_tool_call(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ):
     wrap_tool_call_wrapper = None  # 修复报错：局部变量 'wrap_tool_call_wrapper' 可能在赋值前引用
-    middleware_tool_call = [
-        m for m in middleware
-        if m.__class__.wrap_tool_call is not AgentMiddleware.wrap_tool_call
-           or m.__class__.awrap_tool_call is not AgentMiddleware.awrap_tool_call
-    ]
-    if middleware_tool_call:
-        wrapper = [
-            m.wrap_tool_call
-            for m in middleware_tool_call
+    if middleware:
+        middleware_tool_call = [
+            m for m in middleware
+            if m.__class__.wrap_tool_call is not AgentMiddleware.wrap_tool_call
+               or m.__class__.awrap_tool_call is not AgentMiddleware.awrap_tool_call
         ]
-        wrap_tool_call_wrapper = _chain_tool_call(wrapper)
-    # wrap_tool_call_wrapper 是包裹tool的wrapper层，用于在tool执行的前，中，后阶段，对调用过程进行控制，增强或拦截等操作
-    return wrap_tool_call_wrapper
+        if middleware_tool_call:
+            wrapper = [
+                m.wrap_tool_call
+                for m in middleware_tool_call
+            ]
+            wrap_tool_call_wrapper = _chain_tool_call(wrapper)
+        # wrap_tool_call_wrapper 是包裹tool的wrapper层，用于在tool执行的前，中，后阶段，对调用过程进行控制，增强或拦截等操作
+        return wrap_tool_call_wrapper
+    return None
 
 
 def _normalize_to_model_response(
@@ -849,6 +892,9 @@ def _get_tools(
         tools: Sequence[BaseTool | Callable[..., Any] | dict[str, Any]] | None,
 ) -> (list, list, list, list):
     middleware_tools = [t for m in middleware for t in getattr(m, "tools", [])]  # 从middleware取出tools属性，其是个list
+    # 处理 tools 为 None 的情况
+    if tools is None:
+        tools = []
     llm_tools = [t for t in tools if isinstance(t, dict)]
     external_tools = [t for t in tools if not isinstance(t, dict)]
     available_tools = middleware_tools + external_tools
@@ -895,10 +941,29 @@ def __merged_schema(schemas: set[type], schema_name: str, omit_flag: str | None 
 def _get_schema(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]]
 ):
+    from typing import List
+    from langchain_core.messages import AnyMessage
+
     state_schemas: set[type] = {m.state_schema for m in middleware}
-    merged_state_schema = __merged_schema(state_schemas, "StateSchema", None)  # 合并所有state_schema
-    input_schema = __merged_schema(state_schemas, "InputSchema", "input")  # 挑出输入
-    output_schema = __merged_schema(state_schemas, "OutputSchema", "output")  # 挑出输出
+
+    # 如果没有中间件，使用默认的 messages schema
+    if not state_schemas:
+        # 创建默认的 input/output/state schema，都包含 messages 字段
+        InputSchema = TypedDict("InputSchema", {
+            "messages": List[AnyMessage]
+        })
+        OutputSchema = TypedDict("OutputSchema", {
+            "messages": List[AnyMessage]
+        })
+        StateSchema = TypedDict("StateSchema", {
+            "messages": List[AnyMessage]
+        })
+        return (state_schemas, StateSchema,
+                InputSchema, OutputSchema)
+    else:
+        merged_state_schema = __merged_schema(state_schemas, "StateSchema", None)
+        input_schema = __merged_schema(state_schemas, "InputSchema", "input")
+        output_schema = __merged_schema(state_schemas, "OutputSchema", "output")
 
     return (state_schemas, merged_state_schema,
             input_schema, output_schema)
@@ -911,16 +976,16 @@ def _choose_tools_model_edge(
         end_destination: str
 ) -> Callable[[dict[str, Any]], str | None]:
     """创建从 tools 节点到 model 节点的路由函数
-    
+
     Args:
         tool_node: 工具节点，用于检查工具是否已执行
         model_destinations: model 方向的目的地
         structured_output_tools: 结构化输出工具字典
         end_destination: 结束方向的目的地
-    
+
     Returns:
         路由函数，根据工具执行情况决定下一个目的地
-    
+
     简化处理逻辑：
     1. 检查是否有 jump_to → 有则跳转
     2. 检查所有执行的工具是否都有 return_direct=True → 是则结束
@@ -992,15 +1057,15 @@ def _choose_model_to_tools_edge(
         end_destination: str
 ) -> Callable[[dict[str, Any]], str | None]:
     """创建从 model 节点到 tools 节点的路由函数
-    
+
     Args:
         model_destinations: model 方向的目的地（用于重试或继续循环）
         structured_output_tools: 结构化输出工具字典
         end_destination: 结束方向的目的地
-    
+
     Returns:
         路由函数，根据模型输出决定下一个目的地
-    
+
     简化处理逻辑：
     1. 检查是否有 jump_to → 有则跳转
     2. 检查是否有结构化响应 → 有则结束
@@ -1079,14 +1144,14 @@ def _get_can_jump_to(
         param
 ) -> list[str] | None:
     """获取中间件节点可以跳转的目的地列表
-    
+
     Args:
         m1: 中间件实例
         param: hook 类型 ('before_agent', 'before_model', 'after_model', 'after_agent')
-    
+
     Returns:
         可跳转的目的地列表，如 ['model', 'end']，如果不能跳转则返回 None
-    
+
     简化处理：
     - 检查中间件是否有 jump_to 属性
     - 如果有，返回对应的目的地列表
@@ -1115,7 +1180,7 @@ def _add_middleware_edge(
         can_jump_to: list[str] | None,
 ) -> None:
     """为中间件节点添加边到 graph
-    
+
     Args:
         graph: StateGraph 对象
         name: 中间件节点的名称
@@ -1123,7 +1188,7 @@ def _add_middleware_edge(
         model_destination: model 方向的目的地
         end_destination: 结束方向的目的地
         can_jump_to: 允许跳转的目的地列表，如 ['model', 'end']
-    
+
     简化处理逻辑：
     1. 如果 can_jump_to 为 None → 添加普通边（固定路径）
     2. 如果 can_jump_to 不为 None → 添加条件边（根据 jump_to 字段动态决定路径）
@@ -1171,10 +1236,28 @@ def _add_middleware_edge(
         )
 
 
+def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
+    """ToolNode的包装器,用于添加日志"""
+    logging.info("[TOOLS] >>> 进入tools节点")
+    logging.debug(f"[TOOLS] 输入消息:{repr(state['messages'])}")
+    logging.debug(f"[TOOLS] state完整信息:{repr(state)}")
+
+    # 执行ToolNode
+    result = tool_node.invoke(state)
+
+    logging.info("[TOOLS] <<< 离开tools节点")
+    logging.debug(f"[TOOLS] 输出消息:{repr(result.get('messages'))}")
+    logging.debug(f"[TOOLS] 输出格式:{type(result)}")
+    logging.debug(f"[TOOLS] 输出完整信息{repr(result)}")
+
+    return result
+
+
 def create_agent(
         model: str | BaseChatModel,
-        tools: Sequence[BaseTool | Callable[..., Any] | dict[str, Any]] | None = None,
+        tools: Sequence[BaseTool | Callable[..., Any] | dict[str, Any]] = [],
         *,
+        system_prompt: str | SystemMessage | None = None,
         response_format: ResponseFormat[ResponseT] | type[ResponseT] | dict[str, Any] | None = None,
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]] = (),
         # StateT_co是协变变量，如果 A 是 B 的子类，那么 Container[A] 也是 Container[B] 的子类
@@ -1188,6 +1271,13 @@ def create_agent(
         cache: BaseCache[Any] | None = None,
 ) -> CompiledStateGraph:
     """工作流搭建"""
+    """系统提示词加载"""
+    system_messages: SystemMessage | None = None
+    if system_prompt:
+        if isinstance(system_prompt, SystemMessage):
+            system_messages = system_prompt
+        else:
+            system_messages = SystemMessage(content=system_prompt)
     """四大中间件列表[hook]"""
     (middleware_before_agent, middleware_before_model,
      middleware_after_model, middleware_after_agent) = _get_real_middleware_list(middleware)
@@ -1231,13 +1321,15 @@ def create_agent(
             awrap_tool_call=async_wrap_tool_call_wrapper,
         ))
 
-    """tool节点之后的节点方向"""
-    tools_to_model_destinations = [loop_entry_node]
+    """tool 节点之后的节点方向"""
+    # exit_node 必须始终包含在 destinations 中，因为 jump_to 可能指向它
+    tools_to_model_destinations = [loop_entry_node, exit_node]
     if (
             any(tool.return_direct for tool in tool_node.tools_by_name.values())
             or structured_output_tools
     ):
-        tools_to_model_destinations.append(exit_node)
+        # 已经有 exit_node 了，不需要重复添加
+        pass
 
     """model节点之后的节点方向"""
     model_to_tools_destinations = ["tools", exit_node]
@@ -1256,11 +1348,34 @@ def create_agent(
         context_schema=context_schema,
     )
 
-    """添加model节点"""
-    graph.add_node("model", RunnableCallable(model_node, amodel_node))
+    """添加 model 节点"""
+
+    def model_node_wrapper(state: AgentState[Any], runtime: Runtime[ContextT]) -> list[Command[Any]]:
+        return model_node(
+            model=model,
+            tool_node=tool_node,
+            system_messages=system_messages,
+            middleware=middleware,
+            initial_response_format=response_format,
+            state=state,
+            runtime=runtime
+        )
+
+    async def amodel_node_wrapper(state: AgentState[Any], runtime: Runtime[ContextT]) -> list[Command[Any]]:
+        return await amodel_node(
+            model=model,
+            tool_node=tool_node,
+            system_messages=system_messages,
+            middleware=middleware,
+            initial_response_format=response_format,
+            state=state,
+            runtime=runtime
+        )
+
+    graph.add_node("model", RunnableCallable(model_node_wrapper, amodel_node_wrapper))
 
     """添加tools节点"""
-    graph.add_node("tools", tool_node)
+    graph.add_node("tools", lambda state: tool_node_wrapper(state, tool_node))
 
     """添加 middleware 节点"""
     middleware_node(graph, merged_state_schema, middleware)  # type: ignore[arg-type]
@@ -1283,21 +1398,7 @@ def create_agent(
         tools_to_model_destinations,  # 目标节点列表
     )
 
-    """构建从loop_exit_node到出点的条件边"""
-    graph.add_conditional_edges(
-        loop_exit_node,
-        RunnableCallable(  # type: ignore[arg-type]
-            _choose_model_to_tools_edge(
-                model_destinations=loop_entry_node,
-                structured_output_tools=structured_output_tools,
-                end_destination=exit_node
-            ),
-            trace=False,
-        ),
-        tools_to_model_destinations,
-    )
-
-    """构建before_agent middleware 边"""
+    """构建 before_agent middleware 边"""
     for m1, m2 in itertools.pairwise(middleware_before_agent):  # 输入[A, B, C, D]，会输出(A, B), (B, C), (C, D)
         _add_middleware_edge(  # 两两连接中间件node
             graph,
@@ -1307,14 +1408,15 @@ def create_agent(
             end_destination=exit_node,
             can_jump_to=_get_can_jump_to(m1, "before_agent"),
         )
-    _add_middleware_edge(  # 将最后一个middleware node和loop_entry_node连接
-        graph,
-        name=f"{middleware_before_agent[-1].name}.before_agent",
-        default_destination=loop_entry_node,
-        model_destination=loop_entry_node,
-        end_destination=exit_node,
-        can_jump_to=_get_can_jump_to(middleware_before_agent[-1], "before_agent"),
-    )
+    if middleware_before_agent:
+        _add_middleware_edge(  # 将最后一个middleware node和loop_entry_node连接
+            graph,
+            name=f"{middleware_before_agent[-1].name}.before_agent",
+            default_destination=loop_entry_node,
+            model_destination=loop_entry_node,
+            end_destination=exit_node,
+            can_jump_to=_get_can_jump_to(middleware_before_agent[-1], "before_agent"),
+        )
 
     """构建before_model middleware 边"""
     for m1, m2 in itertools.pairwise(middleware_before_model):
@@ -1326,16 +1428,31 @@ def create_agent(
             end_destination=exit_node,
             can_jump_to=_get_can_jump_to(m1, "before_model"),
         )
-    _add_middleware_edge(
-        graph,
-        name=f"{middleware_before_model[-1].name}.before_model",
-        default_destination="model",
-        model_destination=loop_entry_node,
-        end_destination=exit_node,
-        can_jump_to=_get_can_jump_to(middleware_before_model[-1], "before_model"),
+    if middleware_before_model:
+        _add_middleware_edge(
+            graph,
+            name=f"{middleware_before_model[-1].name}.before_model",
+            default_destination="model",
+            model_destination=loop_entry_node,
+            end_destination=exit_node,
+            can_jump_to=_get_can_jump_to(middleware_before_model[-1], "before_model"),
+        )
+
+    """构建从 model 到 tools 的条件边"""
+    graph.add_conditional_edges(
+        "model",
+        RunnableCallable(  # type: ignore[arg-type]
+            _choose_model_to_tools_edge(
+                model_destinations=loop_entry_node,
+                structured_output_tools=structured_output_tools,
+                end_destination=exit_node
+            ),
+            trace=False,
+        ),
+        model_to_tools_destinations,  # 使用正确的目标列表
     )
 
-    """构建after_model middleware 边"""
+    """构建 after_model middleware 边"""
     for idx in range(len(middleware_after_model) - 1, 0, -1):  # 手写倒序，输入[A,B,C],输出[C,B],[B,A]
         m1 = middleware_after_model[idx]
         m2 = middleware_after_model[idx - 1]
@@ -1347,8 +1464,9 @@ def create_agent(
             end_destination=exit_node,
             can_jump_to=_get_can_jump_to(m1, "after_model"),
         )
-    # Model节点不具备重新回到model节点和直接退出的功能，否则过于冗余
-    graph.add_edge("model", f"{middleware_after_model[-1].name}.after_model")
+    # Model 节点不具备重新回到 model 节点和直接退出的功能，否则过于冗余
+    if middleware_after_model:
+        graph.add_edge("model", f"{middleware_after_model[-1].name}.after_model")
 
     """构建after_agent middleware 边"""
     for idx in range(len(middleware_after_agent) - 1, 0, -1):
@@ -1362,18 +1480,29 @@ def create_agent(
             end_destination=exit_node,
             can_jump_to=_get_can_jump_to(m1, "after_agent"),
         )
-    _add_middleware_edge(
-        graph,
-        name=f"{middleware_after_agent[0].name}.after_agent",
-        default_destination=END,
-        model_destination=loop_entry_node,
-        end_destination=exit_node,
-        can_jump_to=_get_can_jump_to(middleware_after_agent[0], "after_agent"),
-    )
+    if middleware_after_agent:
+        _add_middleware_edge(
+            graph,
+            name=f"{middleware_after_agent[0].name}.after_agent",
+            default_destination=END,
+            model_destination=loop_entry_node,
+            end_destination=exit_node,
+            can_jump_to=_get_can_jump_to(middleware_after_agent[0], "after_agent"),
+        )
 
     config: RunnableConfig = {"recursion_limit": 10000}
     if name:
         config["metadata"] = {"agent_name": name}
+
+    # 添加 LangSmith tracer（如果启用了 tracing）
+    import os
+    if os.getenv("LANGSMITH_TRACING") == "true":
+        try:
+            from langchain_core.tracers import LangChainTracer
+            config["callbacks"] = [LangChainTracer()]
+        except:
+            pass
+
     return graph.compile(  # type: ignore[return-value]
         checkpointer=checkpointer,
         store=store,
