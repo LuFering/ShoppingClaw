@@ -124,15 +124,17 @@ class MasterAgent(BaseAgent):
             model=model,
             context_schema=MasterContext,  # ← 传入 Context Schema 类
             tools=tools,
-            # middleware=[
+            middleware=[
+                PatchToolCallsMiddleware(),  # 修复不同模型的工具调用格式差异
+                ToolCallLimitMiddleware(run_limit=10,thread_limit=20, exit_behavior="end"),  # 安全锁：防止死循环
+                TodoListMiddleware(),  # 赋予 Agent 拆解任务的能力
+
             #     FilesystemMiddleware(backend=_create_fs_backend),  # 赋予 Agent 读写文件能力
             #     # SkillsMiddleware(),  # 暂时禁用：需要配置 backend 和 sources
-            #     TodoListMiddleware(), # 赋予 Agent 拆解任务的能力
-            #     PatchToolCallsMiddleware(), # 修复不同模型的工具调用格式差异
             #     subagents_middleware,       # 注入子智能体调度能力
             #     summary_middleware,         # 注入长对话压缩能力
-            #     ToolCallLimitMiddleware(run_limit=50, exit_behavior="end"), # 安全锁：防止死循环
-            # ],
+
+            ],
             # checkpointer=await self._get_checkpointer(),
         )
         

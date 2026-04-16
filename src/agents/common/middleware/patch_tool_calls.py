@@ -23,6 +23,11 @@ class PatchToolCallsMiddleware(AgentMiddleware):
             patched_messages.append(msg)
             if msg.type == "ai" and msg.tool_calls:
                 for tool_call in msg.tool_calls:
+                    # 修复：如果 tool_call.id 为空，生成唯一 ID
+                    if not tool_call.get("id"):
+                        import uuid
+                        tool_call["id"] = str(uuid.uuid4())
+                    
                     corresponding_tool_msg = next(
                         (msg for msg in messages[i:] if msg.type == "tool" and msg.tool_call_id == tool_call["id"]),  # ty: ignore[possibly-missing-attribute]
                         None,

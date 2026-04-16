@@ -21,7 +21,7 @@ class Config(BaseModel):
 
     #模型配置
     default_model:str=Field(
-        default="ollama/qwen2.5:3b",
+        default="aliyun/tongyi-xiaomi-analysis-flash",
         description="默认对话模型",
     )
     # 模型信息（只读，不持久化）
