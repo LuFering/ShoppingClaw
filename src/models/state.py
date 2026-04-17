@@ -27,6 +27,7 @@ class ShoppingState(TypedDict):
 
     # --- 数据层：搜索 / 过滤 / 排序节点逐步写入 ---
     products: NotRequired[List[Product]]  # 中间商品列表
+    analysis_report: NotRequired[str]     # 市场分析报告 (由 analysis_agent 写入)
 
     # --- 输出层：出口节点写入 ---
     recommendations: NotRequired[List[Product]]  # 最终推荐列表
