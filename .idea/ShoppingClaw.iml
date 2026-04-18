@@ -7,7 +7,7 @@
       <excludeFolder url="file://$MODULE_DIR$/deepagents" />
       <excludeFolder url="file://$MODULE_DIR$/agents" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.10 (ShoppingClaw) (2)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.12 (base)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
