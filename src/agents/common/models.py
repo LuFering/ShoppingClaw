@@ -7,6 +7,8 @@ from pydantic import SecretStr
 
 from src.config import config
 from src.utils import get_docker_safe_url
+from dotenv import load_dotenv
+load_dotenv()
 
 
 #siliconflow/Pro/deepseek-ai/DeepSeek-V3.2
@@ -20,11 +22,12 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
     if not model_info:
         raise ValueError(f"Unknown model provider:{provider}")
 
-    #  env_var=model_info.env
+    env_var=model_info.env
     #
-    #  api_key=os.getenv(env_var) or env_var
+    api_key=os.getenv(env_var) or env_var
     #
     base_url=get_docker_safe_url(model_info.base_url)
+    logging.debug(f"api_key:{api_key}")
 
     if provider in ["openai","deepseek"]:
         model_spec=f"{provider}:{model}"
@@ -33,20 +36,19 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
     elif provider in["ollama"]:
         from langchain_ollama import ChatOllama
 
-        # 从环境变量获取 Ollama 地址,默认为 localhost
-        ollama_base_url = os.getenv("OLLAMA_BASE_URL")
+
 
         return ChatOllama(
             model=model,
-            base_url=ollama_base_url
+            base_url=base_url
         )
     else:
         try:
             from langchain_openai import ChatOpenAI
             return ChatOpenAI(
                 model=model,
-                # api_key=SecretStr(api_key),
-                # base_url=base_url,
+                api_key=api_key,
+                base_url=base_url,
                 stream_usage=True,
             )
         except Exception as e:

@@ -40,5 +40,13 @@ DEFAULT_CHAT_MODEL_PROVIDERS:dict[str,ChatModelProvider]={
         env="",
         models=["gemma4:e2b","qwen2.5:3b"],
     ),
+    "aliyun":ChatModelProvider(
+            name="Aliyun",
+            url="https://dashscope.aliyuncs.com/",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            default="tongyi-xiaomi-analysis-flash",
+            env="DASHSCOPE_API_KEY",
+            models=["tongyi-xiaomi-analysis-flash", "qwen3-max-2026-01-23"],
+        ),
 }
 
