@@ -47,7 +47,10 @@ class AgentManager():
         pass
 
 agent_manager=AgentManager()
-agent_manager.auto_discover_agent()
+
+# TODO: 临时手动注册 MasterAgent,待 auto_discover_agent 实现后移除
+from src.agents.master_agent.graph import MasterAgent
+agent_manager.register_agent(MasterAgent)
 
 agent_manager.init_all_agents()
 __all__=["agent_manager"]
