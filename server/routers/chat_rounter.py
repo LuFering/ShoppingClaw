@@ -1,11 +1,11 @@
 import logging
 import uuid
 
-from aiohttp.web_response import StreamResponse
 from fastapi import APIRouter, Body, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import StreamingResponse
 
-from server.utils.auth_middleware import get_required_user, get_db
+from server.utils.auth_middleware import get_current_user, get_db
 from src.services.chat_stream_service import stream_agent_chat
 from src.storage.postgres.models_business import User
 
@@ -14,19 +14,32 @@ chat = APIRouter(prefix="/chat", tags=["chat"])
 
 @chat.post("/agent/{agent_name}")
 async def chat_agent(
-        agent_name: str,  # 智能体 ID，从 URL 路径获取
+        agent_name: str,  # 智能体 ID,从 URL 路径获取
         query: str = Body(...),  # 用户问题
-        config: dict = Body({}),  # 配置项：thread_id, model, agent_config_id
-        meta: dict = Body(None),  # 元数据：request_id, model_provider
+        config: dict = Body({}),  # 配置项:thread_id, model, agent_config_id
+        meta: dict = Body(None),  # 元数据:request_id, model_provider
         image_content: str | None = Body(None),  # ← base64 图片
-        current_user: User = Depends(get_required_user),  # ← 认证用户
-        db: AsyncSession = Depends(get_db),               # ← 数据库会话
+        current_user: User | None = Depends(get_current_user),  # ← 允许匿名用户
+        # db: AsyncSession = Depends(get_db),  # ← 临时注释，跳过数据库
 ):
-    logging.info(f"agent_id:{agent_name},query:{query},config:{config},meta:{meta}")
-    logging.info(f"image_content present: {image_content is not None}")
+    # TODO: 临时测试代码 - 创建匿名用户
+    from src.storage.postgres.models_business import User as UserModel
+    if current_user is None:
+        current_user = UserModel(
+            user_name="anonymous",
+            user_id="test-user",
+            phone_number="00000000000",
+            password_hash="dummy_hash"
+        )
+    
+    # 临时创建一个假的 db 对象（None），传递给 stream_agent_chat
+    db = None
+    logging.debug(f">>>进入[chat_agent]")
+    logging.info(f"[chat_agent] agent_id:{agent_name},query:{query},config:{config},meta:{meta}")
+    logging.info(f"[chat_agent] image_content present: {image_content is not None}")
     if image_content:
-        logging.info(f"image_content length: {len(image_content)}")
-        logging.info(f"image_content preview: {image_content[:50]}...")
+        logging.info(f"[chat_agent] image_content length: {len(image_content)}")
+        logging.info(f"[chat_agent] image_content preview: {image_content[:50]}...")
 
 
     # request_id 用于链路追踪，如果前端没传则自动生成 UUID
@@ -44,10 +57,11 @@ async def chat_agent(
             "has_image": bool(image_content),
         }
     )
+    logging.info(f"[chat_agent] 更新后的meta:{meta}")
 
     # 返回流式响应，媒体类型为 application/json
     """前端会收到多个 JSON 行（NDJSON 格式），每行一个 chunk"""
-    return StreamResponse(#打字机效果
+    return StreamingResponse(#打字机效果
         stream_agent_chat(
             agent_name=agent_name,
             query=query,

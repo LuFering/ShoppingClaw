@@ -1,0 +1,85 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: shoppingclaw-api:latest
+    container_name: shoppingclaw-api
+    working_dir: /app
+    volumes:
+      # 开发模式:挂载源代码实现热重载
+      - ./server:/app/server
+      - ./src:/app/src
+      - ./agents:/app/agents
+      - ./deepagents:/app/deepagents
+      - ./.env:/app/.env
+    ports:
+      - "5050:5050"
+    networks:
+      - app-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      - HOST_IP=${HOST_IP:-}
+      - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-shoppingclaw}}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - MODEL_DIR_IN_DOCKER=/models
+      - RUNNING_IN_DOCKER=true
+      - NO_PROXY=localhost,127.0.0.1,postgres,redis
+      - no_proxy=localhost,127.0.0.1,postgres,redis
+    command: uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050 --reload
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5050/api/system/health || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    container_name: shoppingclaw-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-shoppingclaw}
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - ./docker/volumes/postgresql:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-shoppingclaw} || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: shoppingclaw-redis
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./docker/volumes/redis:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
