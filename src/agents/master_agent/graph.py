@@ -2,8 +2,10 @@ from pathlib import Path
 
 import yaml
 from langchain.agents.middleware import ToolCallLimitMiddleware, TodoListMiddleware
+from langgraph.checkpoint.memory import MemorySaver
 
 from src.agents.common.base import BaseAgent
+from src.agents.common.backends import StateBackend
 from src.agents.common.middleware.filesystem import FilesystemMiddleware
 from src.agents.common.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from src.agents.common.middleware.skills import SkillsMiddleware
@@ -17,22 +19,43 @@ from src.agents.master_agent.agent_demo import create_master_agent
 # 导入硬编码工具模块，触发 @tool 装饰器的自动注册逻辑
 import src.agents.common.toolkits.buildin.tools
 
-def load_subagent(config_path:Path)->list:
-    with open(config_path) as f:
+def _get_tool_by_name(tool_name: str):
+    """根据名称从全局注册表中查找工具实例"""
+    all_tools = get_all_tool_instances()
+    for tool in all_tools:
+        if hasattr(tool, 'name') and tool.name == tool_name:
+            return tool
+    return None
+
+def load_subagent(config_path:Path, default_model)->list:
+    """从 YAML 加载子智能体配置并映射工具"""
+    with open(config_path, encoding='utf-8') as f:
         config=yaml.safe_load(f)
     subagents=[]
     for name,spec in config.items():
+        # 1. 解析工具列表
+        tool_names = spec.get("tools", [])
+        resolved_tools = []
+        for t_name in tool_names:
+            tool_obj = _get_tool_by_name(t_name)
+            if tool_obj:
+                resolved_tools.append(tool_obj)
+            else:
+                print(f"Warning: Tool '{t_name}' not found for subagent '{name}'")
+        
         subagent={
             "name":name,
-            "description":spec["description"],
-            "system_prompt":spec["system_prompt"],
+            "description":spec.get("description", ""),
+            "system_prompt":spec.get("system_prompt", ""),
+            "tools": resolved_tools,  # 2. 注入真正的工具对象
+            "model": default_model,   # 3. 直接使用已初始化的模型实例，避免字符串解析错误
         }
-        if "model" in spec:
-            subagent["model"]=spec["model"]
-        if "tools" in spec:
-            subagent["tools"]=spec["tools"]
         subagents.append(subagent)
     return subagents
+
+def _create_fs_backend(runtime):
+    """为 FilesystemMiddleware 创建 StateBackend 实例"""
+    return StateBackend(runtime)
 
 class MasterAgent(BaseAgent):
     name="核心智能体"
@@ -48,19 +71,30 @@ class MasterAgent(BaseAgent):
     async def get_tools(self):
         """获取所有已注册的硬编码工具实例"""
         return get_all_tool_instances()
+
+    async def _get_checkpointer(self):
+        """获取检查点器（目前使用内存存储）"""
+        if self.checkpointer is None:
+            self.checkpointer = MemorySaver()
+        return self.checkpointer
     
     async def get_graph(self, **kwargs):
         """获取或创建 Agent 图"""
 
-        #获取上下文配置
+        # 1. 获取上下文配置
         context=self.context_schema.from_file(module_name=self.module_name)
 
+        # 2. 初始化模型
         model=load_chat_model(context.model)
         sub_model=load_chat_model(context.subagents_model)
-        # tools=await self.get_tools()
-        # subagents = load_subagent(Path(__file__).parent.parent / "subagents" / "subagents.yaml")
+        
+        # 3. 获取工具与子智能体
+        tools=await self.get_tools()
+        # subagents = load_subagent(Path(__file__).parent.parent / "subagents" / "subagents.yaml", sub_model)
         #
-        # # 主 Agent 上下文优化：90k tokens 触发压缩（128k context window 的 70%）
+        # # 4. 配置中间件 (Middleware)
+        #
+        # # A. 摘要压缩：防止上下文溢出 (90k tokens 触发)
         # summary_middleware = SummaryOffloadMiddleware(
         #     model=model,
         #     trigger=("tokens", 90000),
@@ -68,63 +102,39 @@ class MasterAgent(BaseAgent):
         #     summary_offload_threshold=500,
         #     max_retention_ratio=0.5,
         # )
-        # # 子 Agent 独立的上下文优化：更激进的压缩策略
-        # sub_summary_middleware = SummaryOffloadMiddleware(
-        #     model=sub_model,
-        #     trigger=("tokens", 50000),
-        #     trim_tokens_to_summarize=2000,
-        #     summary_offload_threshold=300,
-        #     max_retention_ratio=0.4,
-        # )
+        #
+        # # B. 子智能体管理：MasterAgent 的核心调度器
         # subagents_middleware = SubAgentMiddleware(
         #     default_model=sub_model,
-        #     default_tools=search_tools,
+        #     default_tools=[],  # 子智能体默认不继承主智能体的工具，保持纯净
         #     subagents=subagents,
         #     default_middleware=[
-        #         RuntimeConfigMiddleware(
-        #             model_context_name="subagents_model",
-        #             enable_model_override=True,
-        #             enable_system_prompt_override=False,
-        #             enable_tools_override=False,
-        #         ),
         #         PatchToolCallsMiddleware(),
-        #         sub_summary_middleware,
-        #         # 子 Agent 搜索工具限制：tavily_search 最多 8 次
-        #         ToolCallLimitMiddleware(
-        #             tool_name="tavily_search",
-        #             run_limit=8,
-        #             exit_behavior="continue",
+        #         SummaryOffloadMiddleware(
+        #             model=sub_model,
+        #             trigger=("tokens", 50000), # 子智能体更激进的压缩
+        #             trim_tokens_to_summarize=2000,
         #         ),
         #     ],
         #     general_purpose_agent=True,
         # )
 
-
-        # 调用工厂函数创建 graph
+        # 5. 组装 Graph
         graph = create_master_agent(
             model=model,
-            # tools=tools,
-            # middleware=[
-            #     FilesystemMiddleware(backend=_create_fs_backend),  # 文件系统后端
-            #     RuntimeConfigMiddleware(extra_tools=all_mcp_tools),
-            #     SkillsMiddleware(),  # Skills 中间件（提示词注入、依赖展开、动态激活）
-            #     save_attachments_to_fs,  # 附件注入提示词
-            #     TodoListMiddleware(),
-            #     PatchToolCallsMiddleware(),
-            #     subagents_middleware,
-            #     summary_middleware,
-            #     # 工具调用限制：tavily_search 总调用最多 20 次
-            #     ToolCallLimitMiddleware(
-            #         tool_name="tavily_search",
-            #         thread_limit=20,
-            #         exit_behavior="continue",
-            #     ),
-            #     # 总工具调用轮次限制：防止单次运行无限循环
-            #     ToolCallLimitMiddleware(
-            #         run_limit=50,
-            #         exit_behavior="end",
-            #     ),
-            # ],
+            context_schema=MasterContext,  # ← 传入 Context Schema 类
+            tools=tools,
+            middleware=[
+                PatchToolCallsMiddleware(),  # 修复不同模型的工具调用格式差异
+                ToolCallLimitMiddleware(run_limit=10,thread_limit=20, exit_behavior="end"),  # 安全锁：防止死循环
+                TodoListMiddleware(),  # 赋予 Agent 拆解任务的能力
+
+            #     FilesystemMiddleware(backend=_create_fs_backend),  # 赋予 Agent 读写文件能力
+            #     # SkillsMiddleware(),  # 暂时禁用：需要配置 backend 和 sources
+            #     subagents_middleware,       # 注入子智能体调度能力
+            #     summary_middleware,         # 注入长对话压缩能力
+
+            ],
             # checkpointer=await self._get_checkpointer(),
         )
         

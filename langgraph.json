@@ -2,10 +2,10 @@
   "python": "D:\\ShoppingClaw\\.venv\\Scripts\\python.exe",
   "pip_install": "D:\\ShoppingClaw\\.venv\\Scripts\\pip.exe install -e .",
   "dependencies": [
-    "src.agents.agent_demo:get_main_agent"
+    "./src/agents/master_agent/agent_demo.py:get_main_agent"
   ],
   "graphs": {
-    "main_agent": "src.agents.agent_demo:get_main_agent"
+    "main_agent":  "./src/agents/master_agent/agent_demo.py:get_main_agent"
   },
   "env": ".env",
   "port": 2024,

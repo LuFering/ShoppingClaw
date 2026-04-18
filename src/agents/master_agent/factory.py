@@ -3,6 +3,7 @@ from dataclasses import field, dataclass
 from typing import Sequence, Any, Callable, Awaitable, Generic, get_type_hints, Required, NotRequired, get_args, \
     Annotated
 
+import langchain
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware, ModelResponse, ExtendedModelResponse
 from langchain.agents.middleware.types import StateT_co, ResponseT, ModelRequest, OmitFromSchema
@@ -27,7 +28,7 @@ from typing import TypedDict
 from typing_extensions import get_origin
 import logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("langsmith").setLevel(logging.WARNING)
@@ -45,12 +46,14 @@ class _ComposedExtendedModelResponse(Generic[ResponseT]):
 def _get_binding_model(
         request: ModelRequest,
         tool_node: ToolNode,
+        structured_output_tools: dict[str, OutputToolBinding[Any]],
 ) -> tuple[Runnable[Any, Any], ResponseFormat | None]:
     """获取绑定后的 model 和响应格式
 
     Args:
         request: 模型请求，包含 model、tools、response_format 等
         tool_node: 工具节点，包含可用的工具
+        structured_output_tools: 结构化输出工具字典
 
     Returns:
         (bound_model, effective_response_format) 元组
@@ -60,172 +63,110 @@ def _get_binding_model(
     # 从 tool_node 获取可用工具
     available_tools = list(tool_node.tools_by_name.values()) if tool_node else []
 
+    # 合并结构化输出工具
+    final_tools = available_tools + [info.tool for info in structured_output_tools.values()]
+
     # 获取请求中的 response_format
     response_format = request.response_format
-
-    # 确定有效的 response_format（简化处理，直接使用请求的 format）
     effective_response_format: ResponseFormat | None = response_format
 
     # 根据 response_format 类型绑定模型
-    if response_format is None:
-        # 没有结构化输出，只绑定普通 tools
-        if available_tools:
-            bound_model = request.model.bind_tools(available_tools)
+    if isinstance(response_format, ProviderStrategy):
+        kwargs = response_format.to_model_kwargs()
+        bound_model = request.model.bind_tools(final_tools, strict=True, **kwargs)
+    elif isinstance(response_format, ToolStrategy):
+        tool_choice = "any" if structured_output_tools else request.tool_choice
+        bound_model = request.model.bind_tools(final_tools, tool_choice=tool_choice)
+    else:
+        if final_tools:
+            bound_model = request.model.bind_tools(final_tools, tool_choice=request.tool_choice)
         else:
             bound_model = request.model
-    else:
-        # 有结构化输出需求，需要绑定 tools 和 response_format
-        # ToolStrategy: 使用 tool calling 进行结构化输出
-        # ProviderStrategy: 使用 provider 的原生结构化输出
-        # AutoStrategy: 自动检测最佳策略
-        bound_model = request.model.bind_tools(available_tools)
 
     return bound_model, effective_response_format
 
 
 def _handle_model_output(
         output: AIMessage,
-        effective_response_format: ResponseFormat | None
+        effective_response_format: ResponseFormat | None,
+        structured_output_tools: dict[str, OutputToolBinding[Any]]
 ) -> dict[str, Any]:
-    """处理模型输出，提取结构化响应
-
-    Args:
-        output: 模型输出的 AI 消息
-        effective_response_format: 实际使用的响应格式策略
-
-    Returns:
-        包含 messages 和 structured_response 的字典
-        - messages: 消息列表（至少包含 output）
-        - structured_response: 结构化响应（如果有）
-
-    简化处理逻辑：
-    1. 如果是 ProviderStrategy → 尝试从 tool_calls 解析结构化响应
-    2. 如果是 ToolStrategy → 尝试从匹配的 tool_call 解析结构化响应
-    3. 其他情况 → 只返回 messages
-    """
-    from langchain_core.messages import ToolMessage
+    """处理模型输出，提取结构化响应"""
     from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
 
-    # 情况 1: ProviderStrategy - 使用 provider 原生结构化输出
+    # 情况 1: ProviderStrategy
     if isinstance(effective_response_format, ProviderStrategy):
-        if output.tool_calls:
-            # 有 tool calls，尝试解析结构化响应
+        if not output.tool_calls:
+            return {"messages": [output]}
+        try:
+            binding = ProviderStrategyBinding.from_schema_spec(effective_response_format.schema_spec)
+            structured_response = binding.parse(output)
+            return {"messages": [output], "structured_response": structured_response}
+        except Exception as exc:
+            schema_name = getattr(effective_response_format.schema_spec.schema, "__name__", "response_format")
+            raise ValueError(f"Failed to parse structured response for {schema_name}: {exc}") from exc
+
+    # 情况 2: ToolStrategy
+    if isinstance(effective_response_format, ToolStrategy) and output.tool_calls:
+        structured_tool_calls = [tc for tc in output.tool_calls if tc["name"] in structured_output_tools]
+        if structured_tool_calls:
+            tool_call = structured_tool_calls[0]
             try:
-                binding = ProviderStrategyBinding.from_schema_spec(
-                    effective_response_format.schema_spec
-                )
-                # 从第一个 tool_call 解析
-                # 简化处理：直接访问 args 属性
-                first_tool_call = output.tool_calls[0]
-                # 类型忽略：parse() 返回 dict，但这正是我们需要的结构化响应
-                structured_response: Any = binding.parse(first_tool_call.get("args", {}))  # type: ignore[assignment]
+                binding = structured_output_tools[tool_call["name"]]
+                structured_response = binding.parse(tool_call["args"])
+                tool_message_content = effective_response_format.tool_message_content or f"Returning structured response: {structured_response}"
                 return {
-                    "messages": [output],
-                    "structured_response": structured_response
+                    "messages": [
+                        output,
+                        ToolMessage(content=tool_message_content, tool_call_id=tool_call["id"], name=tool_call["name"]),
+                    ],
+                    "structured_response": structured_response,
                 }
             except Exception as exc:
-                # 解析失败，抛出异常
-                schema_name = getattr(
-                    effective_response_format.schema_spec.schema,
-                    "__name__",
-                    "response_format"
-                )
-                raise ValueError(f"Failed to parse structured response for {schema_name}: {exc}") from exc
-        # 没有 tool_calls，只返回 messages
-        return {"messages": [output]}
+                error_msg = f"Error: {exc}\n Please fix your mistakes."
+                return {
+                    "messages": [
+                        output,
+                        ToolMessage(content=error_msg, tool_call_id=tool_call["id"], name=tool_call["name"]),
+                    ],
+                }
 
-    # 情况 2: ToolStrategy - 使用 tool calling 进行结构化输出
-    if isinstance(effective_response_format, ToolStrategy) and output.tool_calls:
-        # 查找匹配的结构化输出工具
-        # 注意：这里简化处理，假设第一个 tool_call 就是我们要的
-        first_tool_call = output.tool_calls[0]
-        # 使用 .get() 方法避免类型错误
-        tool_call_id = first_tool_call.get("id", "")
-        tool_call_name = first_tool_call.get("name", "")
-        tool_call_args: Any = first_tool_call.get("args", {})  # type: ignore[assignment]
-
-        # 构建 ToolMessage 作为回应
-        tool_message_content = (
-                effective_response_format.tool_message_content
-                or f"Returning structured response with args: {tool_call_args}"
-        )
-
-        return {
-            "messages": [
-                output,
-                ToolMessage(
-                    content=tool_message_content,
-                    tool_call_id=tool_call_id,
-                    name=tool_call_name,
-                ),
-            ],
-            # 简化：直接返回 args 作为结构化响应
-            "structured_response": tool_call_args
-        }
-
-    # 默认情况：没有结构化输出，只返回 messages
     return {"messages": [output]}
 
 
 def _sync_execute_model(
         request: ModelRequest,
         tool_node: ToolNode,
+        structured_output_tools: dict[str, OutputToolBinding[Any]],
 ) -> ModelResponse:
-    model, effective_response = _get_binding_model(request, tool_node)  # 将外置配置绑定于model当中
+    model, effective_response = _get_binding_model(request, tool_node, structured_output_tools)
     messages = request.messages
     if request.system_message:
-        messages = [request.system_message, *messages]  # 整理 messages
+        messages = [request.system_message, *messages]
     output = model.invoke(messages)
-    handled_response = _handle_model_output(output, effective_response)  # 处理输出
-    messages_list = handled_response["messages"]
-    structured_response = handled_response.get("structured_response")
-
+    handled_response = _handle_model_output(output, effective_response, structured_output_tools)
     return ModelResponse(
-        result=messages_list,
-        structured_response=structured_response
+        result=handled_response["messages"],
+        structured_response=handled_response.get("structured_response")
     )
 
 
 async def _async_execute_model(
         request: ModelRequest,
         tool_node: ToolNode,
+        structured_output_tools: dict[str, OutputToolBinding[Any]],
 ) -> ModelResponse:
-    """异步执行模型调用并返回响应
-
-    Args:
-        request: 模型请求对象，包含 model、messages、response_format 等
-
-    Returns:
-        ModelResponse 对象，包含 messages 列表和可选的 structured_response
-
-    简化处理逻辑：
-    1. 调用 _get_binding_model 获取绑定后的模型和响应格式
-    2. 整理 messages（如果有 system_message）
-    3. 异步调用模型的 ainvoke 方法
-    4. 使用 _handle_model_output 处理输出
-    5. 构造并返回 ModelResponse
-    """
-    # 获取绑定后的模型和响应格式
-    bound_model, effective_response = _get_binding_model(request, tool_node)
-
-    # 准备 messages 列表
+    """异步执行模型调用并返回响应"""
+    bound_model, effective_response = _get_binding_model(request, tool_node, structured_output_tools)
     messages = request.messages
     if request.system_message:
-        # 如果有 system_message，放在消息列表最前面
         messages = [request.system_message, *messages]
-
-    # 异步调用模型（非阻塞）
     output = await bound_model.ainvoke(messages)
-
-    # 处理模型输出，提取结构化响应
-    handled_response = _handle_model_output(output, effective_response)
-    messages_list = handled_response["messages"]
-    structured_response = handled_response.get("structured_response")
-
-    # 构造 ModelResponse 返回
+    logging.debug(f"[MODEL] output:{repr(output)}")
+    handled_response = _handle_model_output(output, effective_response, structured_output_tools)
     return ModelResponse(
-        result=messages_list,
-        structured_response=structured_response
+        result=handled_response["messages"],
+        structured_response=handled_response.get("structured_response")
     )
 
 
@@ -369,18 +310,26 @@ async def amodel_node(
 
     if async_handler is None:  # 没有中间件处理器
         # 直接异步调用模型
-        model_response = await _async_execute_model(request, tool_node)
+        model_response = await _async_execute_model(request, tool_node, {})
         return _build_commands(model_response)
 
     # 有中间件处理器，通过它来调用
-    result = await async_handler(request, lambda req: _async_execute_model(request, tool_node))
-    return _build_commands(result.model_response, result.commands)
+    result = await async_handler(request, lambda req: _async_execute_model(req, tool_node, {}))
+    
+    # 兼容处理：如果返回的是原生 ModelResponse，则没有 model_response 属性
+    if hasattr(result, 'model_response'):
+        return _build_commands(result.model_response, result.commands)
+    else:
+        # 原生 ModelResponse 或 AIMessage
+        return _build_commands(result)
 
 
 def _get_real_middleware_list(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> (list, list, list, list):
     """hook函数列表"""
+    logging.info(f">>>>>>>>>>>>进入【_get_real_middleware_list】")
+    logging.debug(f"输入参数middleware:{repr(middleware)}")
     before_agent = [
         m for m in middleware
         if m.__class__.before_agent is not AgentMiddleware.before_agent
@@ -401,6 +350,12 @@ def _get_real_middleware_list(
         if m.__class__.after_model is not AgentMiddleware.after_model
            or m.__class__.aafter_model is not AgentMiddleware.aafter_model
     ]
+    logging.debug(f"输出结果before_agent:{repr(before_agent)}")
+    logging.debug(f"输出结果before_agent:{repr(before_model)}")
+    logging.debug(f"输出结果before_agent:{repr(after_model)}")
+    logging.debug(f"输出结果before_agent:{repr(after_agent)}")
+    logging.info(f"<<<<<<<<<<<<离开【_get_real_middleware_list】")
+
 
     return (before_agent, before_model,
             after_model, after_agent)
@@ -410,6 +365,10 @@ def _get_entry_node(
         before_agent: Sequence[AgentMiddleware[StateT_co, ContextT]],
         before_model: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> str:
+    logging.info(f">>>>>>>>>>>>进入【_get_entry_node】")
+    logging.debug(f"输入参数before_agent:{repr(before_agent)}")
+    logging.debug(f"输入参数before_agent:{repr(before_model)}")
+
     """entry_node节点判断"""
     if before_agent:
         entry_node = f"{before_agent[0].name}.before_agent"
@@ -417,7 +376,8 @@ def _get_entry_node(
         entry_node = f"{before_model[0].name}.before_model"
     else:
         entry_node = "model"
-
+    logging.debug(f"输出结果before_agent:{repr(entry_node)}")
+    logging.info(f"<<<<<<<<<<<<离开【_get_entry_node】")
     return entry_node
 
 
@@ -449,10 +409,14 @@ def _get_exit_node(
         after_agent: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> str:
     """exit节点判断"""
+    logging.info(f">>>>>>>>>>>>进入【_get_exit_node】")
+    logging.debug(f"输入参数after_agent:{repr(after_agent)}")
     if after_agent:
         exit_node = f"{after_agent[-1].name}.after_agent"
     else:
         exit_node = END
+    logging.debug(f"输出结果exit_node:{repr(exit_node)}")
+    logging.info(f"<<<<<<<<<<<<离开【_get_exit_node】")
 
     return exit_node
 
@@ -593,17 +557,22 @@ def _chain_model_call(
             extra_commands: list[Command[Any]] | None = None,
     ) -> _ComposedExtendedModelResponse:
         """为result统一格式"""
-        commands: list[Command[Any]] = list(extra_commands or [])  # 如果 extra_commands 存在 → 复制一份,如果没有 → 空列表 []
-        if isinstance(result, _ComposedExtendedModelResponse):  # 有commands
+        commands: list[Command[Any]] = list(extra_commands or [])
+        
+        # 1. 处理自定义的组合响应
+        if isinstance(result, _ComposedExtendedModelResponse):
             commands.extend(result.commands)
             model_response = result.model_response
-        elif isinstance(result, ExtendedModelResponse):  # 可能有commands，可能是没有
+        # 2. 处理扩展响应
+        elif isinstance(result, ExtendedModelResponse):
             model_response = result.model_response
             if result.command is not None:
                 commands.append(result.command)
+        # 3. 处理标准的 ModelResponse 或 AIMessage
         else:
             model_response = _normalize_to_model_response(result)
-        return _ComposedExtendedModelResponse(model_response=model_response, commands=commands)  # 创建统一实例
+            
+        return _ComposedExtendedModelResponse(model_response=model_response, commands=commands)
 
     def composed_two(
             outer: Callable[
@@ -651,6 +620,11 @@ def _chain_model_call(
             )
 
         return composed
+
+    if len(sync_handlers) == 0:
+        return None
+    if len(sync_handlers) == 1:
+        return sync_handlers[0]
 
     composed_handler = composed_two(sync_handlers[-2], sync_handlers[-1])  # 列表最后一个和最后第二个进行链接
     for h in reversed(sync_handlers[:-2]):
@@ -733,6 +707,11 @@ def _chain_async_model_call(
 
         return composed
 
+    if len(async_handlers) == 0:
+        return None
+    if len(async_handlers) == 1:
+        return async_handlers[0]
+
     composed_handler = composed_two(async_handlers[-2], async_handlers[-1])  # 列表最后一个和最后第二个进行链接
     for h in reversed(async_handlers[:-2]):
         composed_handler = composed_two(h, composed_handler)
@@ -782,10 +761,15 @@ def middleware_node(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> None:
     """添加middleware节点"""
+    logging.info(f">>>>>>>>>>>>进入【middleware_node】")
+    logging.debug(f"输入参数 middleware:{repr(middleware)}")
+    
     for m in middleware:
+        logging.debug(f"正在处理中间件: {m.name}")
+        # before_agent
         if (
                 m.__class__.before_agent is not AgentMiddleware.before_agent
-                or m.__class__.before_agent is not AgentMiddleware.before_agent
+                or m.__class__.abefore_agent is not AgentMiddleware.abefore_agent
         ):
             sync_before_agent = (
                 m.before_agent
@@ -798,12 +782,14 @@ def middleware_node(
                 else None
             )
             before_agent_node = RunnableCallable(sync_before_agent, async_before_agent)
+            logging.debug(f"-> 添加节点: {m.name}.before_agent")
             graph.add_node(
                 f"{m.name}.before_agent",
                 before_agent_node,
                 input_schema=merged_state_schema
             )
 
+        # before_model
         if (
                 m.__class__.before_model is not AgentMiddleware.before_model
                 or m.__class__.abefore_model is not AgentMiddleware.abefore_model
@@ -819,15 +805,17 @@ def middleware_node(
                 else None
             )
             before_model_node = RunnableCallable(sync_before_model, async_before_model)
+            logging.debug(f"-> 添加节点: {m.name}.before_model")
             graph.add_node(
                 f"{m.name}.before_model",
                 before_model_node,
                 input_schema=merged_state_schema
             )
 
+        # after_agent
         if (
                 m.__class__.after_agent is not AgentMiddleware.after_agent
-                or m.__class__.after_agent is not AgentMiddleware.after_agent
+                or m.__class__.aafter_agent is not AgentMiddleware.aafter_agent
         ):
             sync_after_agent = (
                 m.after_agent
@@ -840,12 +828,14 @@ def middleware_node(
                 else None
             )
             after_agent_node = RunnableCallable(sync_after_agent, async_after_agent)
+            logging.debug(f"-> 添加节点: {m.name}.after_agent")
             graph.add_node(
                 f"{m.name}.after_agent",
                 after_agent_node,
                 input_schema=merged_state_schema
             )
 
+        # after_model
         if (
                 m.__class__.after_model is not AgentMiddleware.after_model
                 or m.__class__.aafter_model is not AgentMiddleware.aafter_model
@@ -861,11 +851,14 @@ def middleware_node(
                 else None
             )
             after_model_node = RunnableCallable(sync_after_model, async_after_model)
+            logging.debug(f"-> 添加节点: {m.name}.after_model")
             graph.add_node(
-                f"{m.name}.before_model",
+                f"{m.name}.after_model",
                 after_model_node,
                 input_schema=merged_state_schema
             )
+    
+    logging.info(f"<<<<<<<<<<<<离开【middleware_node】")
 
 
 def _get_async_tool_call(
@@ -921,30 +914,50 @@ def _extract_metadata(field_type: type) -> list[Any]:
 
 
 def __merged_schema(schemas: set[type], schema_name: str, omit_flag: str | None = None) -> type:
+    logging.info(f">>>>>>>>>>>>进入【__merged_schema】")
+    logging.debug(f"输入参数 schemas:{repr(schemas)}")
+    logging.debug(f"输入参数 schema_name:{schema_name}, omit_flag:{omit_flag}")
+    
+    from langchain.agents.middleware.types import OmitFromSchema
+    
     all_annotations = {}
     for schema in schemas:
-        hints = get_type_hints(schema, include_extras=True)  # 拿到 schema 里的字段定义（包括 Annotated 的 metadata）
-        for field_name, field_type in hints.items():  # 遍历每一个字段，把合适的字段添加至all_annotations
-            should_omit = False  # 默认设置不忽略
+        hints = get_type_hints(schema, include_extras=True)
+        for field_name, field_type in hints.items():
+            should_omit = False
             if omit_flag:
-                metadata = _extract_metadata(field_type)  # 提取metadata
+                metadata = _extract_metadata(field_type)
                 for meta in metadata:
-                    if isinstance(meta, OmitFromSchema) or getattr(meta,
-                                                                   omit_flag) is True:  # 判断是否是OmitFromSchema，是否匹配omit_flag
+                    # 1. 过滤 PrivateStateAttr (使用名称检查兼容不同版本)
+                    if type(meta).__name__ == 'PrivateStateAttr':
                         should_omit = True
                         break
+                    
+                    # 2. 过滤 OmitFromSchema (安全获取属性)
+                    if isinstance(meta, OmitFromSchema):
+                        if getattr(meta, omit_flag, False):
+                            should_omit = True
+                            break
             if not should_omit:
                 all_annotations[field_name] = field_type
+                
+    logging.debug(f"合并结果 all_annotations:{all_annotations}")
+    logging.info(f"<<<<<<<<<<<<离开【__merged_schema】")
     return TypedDict(schema_name, all_annotations)
 
 
 def _get_schema(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]]
 ):
+    logging.info(f">>>>>>>>>>>>进入【_get_schema】")
+    logging.debug(f"输入参数 middleware:{repr(middleware)}")
+    import operator  # ← 新增导入
+    from typing import List, Annotated  # ← 新增 Annotated
     from typing import List
     from langchain_core.messages import AnyMessage
 
     state_schemas: set[type] = {m.state_schema for m in middleware}
+    logging.debug(f"提取的中间件 schemas:{state_schemas}")
 
     # 如果没有中间件，使用默认的 messages schema
     if not state_schemas:
@@ -956,15 +969,21 @@ def _get_schema(
             "messages": List[AnyMessage]
         })
         StateSchema = TypedDict("StateSchema", {
-            "messages": List[AnyMessage]
+            # ↓ 修改这里：添加 operator.add 启用追加模式
+            "messages": Annotated[List[AnyMessage], operator.add]  # 通过类型注解把 operator.add 函数注册为 messages 字段的合并策略
         })
+        logging.info(f"<<<<<<<<<<<<离开【_get_schema】（无中间件模式）")
         return (state_schemas, StateSchema,
                 InputSchema, OutputSchema)
     else:
         merged_state_schema = __merged_schema(state_schemas, "StateSchema", None)
         input_schema = __merged_schema(state_schemas, "InputSchema", "input")
         output_schema = __merged_schema(state_schemas, "OutputSchema", "output")
+        logging.debug(f"生成 merged_state_schema:{merged_state_schema}")
+        logging.debug(f"生成 input_schema:{input_schema}")
+        logging.debug(f"生成 output_schema:{output_schema}")
 
+    logging.info(f"<<<<<<<<<<<<离开【_get_schema】")
     return (state_schemas, merged_state_schema,
             input_schema, output_schema)
 
@@ -1143,31 +1162,23 @@ def _get_can_jump_to(
         m1,
         param
 ) -> list[str] | None:
-    """获取中间件节点可以跳转的目的地列表
+    """获取中间件节点可以跳转的目的地列表"""
+    # 获取中间件对应的方法
+    method = getattr(m1.__class__, param, None)
+    if not method:
+        return None
 
-    Args:
-        m1: 中间件实例
-        param: hook 类型 ('before_agent', 'before_model', 'after_model', 'after_agent')
+    # 检查是否有 @hook_config 装饰器
+    # LangGraph 的 hook_config 会将配置存储在方法的 __wrapped__ 或属性中
+    # 简单做法：直接检查方法名是否在支持的跳转列表中
+    # 对于 after_model，通常应该允许跳转到 end
+    if param == "after_model":
+        return ["end"]  # after_model 中间件默认可以结束对话
+    elif param == "before_agent":
+        return ["model", "end"]
+    elif param == "before_model":
+        return ["model", "end"]
 
-    Returns:
-        可跳转的目的地列表，如 ['model', 'end']，如果不能跳转则返回 None
-
-    简化处理：
-    - 检查中间件是否有 jump_to 属性
-    - 如果有，返回对应的目的地列表
-    - 否则返回 None，表示只能走默认路径
-    """
-    # 从中间件对象提取 jump_to 属性
-    jump_to = getattr(m1, 'jump_to', None)
-
-    if jump_to:
-        # 如果有 jump_to，转换为列表
-        if isinstance(jump_to, str):
-            return [jump_to]
-        elif isinstance(jump_to, list):
-            return jump_to
-
-    # 没有 jump_to，返回 None，表示不能跳转
     return None
 
 
@@ -1246,11 +1257,64 @@ def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
     result = tool_node.invoke(state)
 
     logging.info("[TOOLS] <<< 离开tools节点")
-    logging.debug(f"[TOOLS] 输出消息:{repr(result.get('messages'))}")
-    logging.debug(f"[TOOLS] 输出格式:{type(result)}")
-    logging.debug(f"[TOOLS] 输出完整信息{repr(result)}")
+    
+    # 兼容处理：tool_node.invoke 可能返回 list 或 dict
+    if isinstance(result, list):
+        from langchain_core.messages import BaseMessage, ToolMessage
+        from langgraph.types import Command
+        import uuid
+        
+        # 收集所有需要更新的状态
+        all_updates = {}
+        valid_messages = []
+        
+        for item in result:
+            if isinstance(item, BaseMessage):
+                # 直接是 Message 对象
+                if isinstance(item, ToolMessage) and not item.tool_call_id:
+                    item.tool_call_id = str(uuid.uuid4())
+                    logging.warning(f"[TOOLS] 修复空 tool_call_id，生成新ID: {item.tool_call_id}")
+                valid_messages.append(item)
+            elif isinstance(item, Command):
+                # Command 对象，需要修复其 update 中的 messages，并合并 update
+                if item.update:
+                    # 修复 messages 中的空 tool_call_id
+                    if 'messages' in item.update:
+                        fixed_messages = []
+                        for msg in item.update['messages']:
+                            if isinstance(msg, ToolMessage) and not msg.tool_call_id:
+                                msg.tool_call_id = str(uuid.uuid4())
+                                logging.warning(f"[TOOLS] 修复 Command 中的空 tool_call_id，生成新ID: {msg.tool_call_id}")
+                            fixed_messages.append(msg)
+                        item.update['messages'] = fixed_messages
+                        valid_messages.extend(fixed_messages)
+                    
+                    # 合并其他 update 字段（如 todos）
+                    for key, value in item.update.items():
+                        if key != 'messages':
+                            all_updates[key] = value
+            else:
+                # 其他类型，跳过
+                pass
+        
+        # 构建返回结果：包含 messages 和其他状态更新
+        final_result = {"messages": valid_messages}
+        final_result.update(all_updates)
+        
+        logging.debug(f"[TOOLS] 输出有效消息列表长度: {len(valid_messages)}")
+        logging.debug(f"[TOOLS] 输出完整信息: {repr(final_result)}")
+        return final_result
+    elif isinstance(result, dict):
+        logging.debug(f"[TOOLS] 输出消息:{repr(result.get('messages'))}")
+        logging.debug(f"[TOOLS] 输出格式:{type(result)}")
+        logging.debug(f"[TOOLS] 输出完整信息{repr(result)}")
+        return result
+    else:
+        # 如果返回了其他类型（如 Command），记录错误并返回空更新
+        logging.error(f"[TOOLS] 未知返回类型: {type(result)}, 内容: {result}")
+        return {}
 
-    return result
+
 
 
 def create_agent(
@@ -1271,6 +1335,8 @@ def create_agent(
         cache: BaseCache[Any] | None = None,
 ) -> CompiledStateGraph:
     """工作流搭建"""
+    logging.info(f">>>>>>>>>>>>进入[factory]")
+
     """系统提示词加载"""
     system_messages: SystemMessage | None = None
     if system_prompt:
@@ -1278,6 +1344,9 @@ def create_agent(
             system_messages = system_prompt
         else:
             system_messages = SystemMessage(content=system_prompt)
+    logging.info(f"[system_messages]:{system_messages}")
+    logging.debug(f"[system_messages]:{repr(system_messages)}")
+
     """四大中间件列表[hook]"""
     (middleware_before_agent, middleware_before_model,
      middleware_after_model, middleware_after_agent) = _get_real_middleware_list(middleware)
@@ -1351,6 +1420,8 @@ def create_agent(
     """添加 model 节点"""
 
     def model_node_wrapper(state: AgentState[Any], runtime: Runtime[ContextT]) -> list[Command[Any]]:
+        logging.info("[MODEL] >>> 进入model节点")
+
         return model_node(
             model=model,
             tool_node=tool_node,
@@ -1362,6 +1433,7 @@ def create_agent(
         )
 
     async def amodel_node_wrapper(state: AgentState[Any], runtime: Runtime[ContextT]) -> list[Command[Any]]:
+        logging.info("[MODEL] >>> 进入model节点")
         return await amodel_node(
             model=model,
             tool_node=tool_node,
@@ -1393,7 +1465,7 @@ def create_agent(
                 structured_output_tools=structured_output_tools,
                 end_destination=exit_node,
             ),
-            trace=False,
+            trace=True,
         ),
         tools_to_model_destinations,  # 目标节点列表
     )
@@ -1439,18 +1511,21 @@ def create_agent(
         )
 
     """构建从 model 到 tools 的条件边"""
-    graph.add_conditional_edges(
-        "model",
-        RunnableCallable(  # type: ignore[arg-type]
-            _choose_model_to_tools_edge(
-                model_destinations=loop_entry_node,
-                structured_output_tools=structured_output_tools,
-                end_destination=exit_node
+    if not middleware_after_model:
+        graph.add_conditional_edges(
+            "model",
+            RunnableCallable(  # type: ignore[arg-type]
+                _choose_model_to_tools_edge(
+                    model_destinations=loop_entry_node,
+                    structured_output_tools=structured_output_tools,
+                    end_destination=exit_node
+                ),
+                trace=False,
             ),
-            trace=False,
-        ),
-        model_to_tools_destinations,  # 使用正确的目标列表
-    )
+            model_to_tools_destinations,  # 使用正确的目标列表
+        )
+
+
 
     """构建 after_model middleware 边"""
     for idx in range(len(middleware_after_model) - 1, 0, -1):  # 手写倒序，输入[A,B,C],输出[C,B],[B,A]
@@ -1463,6 +1538,20 @@ def create_agent(
             model_destination=loop_entry_node,
             end_destination=exit_node,
             can_jump_to=_get_can_jump_to(m1, "after_model"),
+        )
+        # 2. 第一个中间件（链条出口）复用 model->tools 的路由逻辑
+    if middleware_after_model:
+        graph.add_conditional_edges(
+            f"{middleware_after_model[0].name}.after_model",
+            RunnableCallable(  # type: ignore[arg-type]
+                _choose_model_to_tools_edge(
+                    model_destinations=loop_entry_node,
+                    structured_output_tools=structured_output_tools,
+                    end_destination=exit_node
+                ),
+                trace=False,
+            ),
+            [exit_node, "tools"]
         )
     # Model 节点不具备重新回到 model 节点和直接退出的功能，否则过于冗余
     if middleware_after_model:

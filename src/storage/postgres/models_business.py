@@ -11,7 +11,7 @@ Base = declarative_base()
 
 
 class User(Base):
-    """用户模型"""
+    """用户模型表"""
 
     __tablename__ = "users"
 
@@ -77,7 +77,7 @@ class User(Base):
         self.login_locked_until = None
 
 class AgentConfig(Base):
-    """智能体配置"""
+    """智能体配置表"""
     __tablename__ = "agent_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)

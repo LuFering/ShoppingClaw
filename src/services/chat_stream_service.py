@@ -128,9 +128,9 @@ async def stream_agent_chat(
         )
         message_type = "multimodal_image"
     else:
-        human_message = HumanMessage(content=query)
-        message_type = "text"
-    init_msg = {"role": "user", "content": query, "type": "human"}
+        human_message = HumanMessage(content=query) # <-传给messages
+        message_type = "text" # <-传给init_msg
+    init_msg = {"role": "user", "content": query, "type": "human"} # <-第一次chunk给前端
 
     if image_content:
         init_msg["message_type"] = message_type
@@ -159,7 +159,7 @@ async def stream_agent_chat(
         )
         return
 
-    messages = [human_message]  # ← 只有当前用户消息（历史由 Checkpointer 管理）
+    messages = [human_message]  # <- 传给agent
 
     user_id = str(current_user.id)
 
@@ -167,7 +167,8 @@ async def stream_agent_chat(
     # # 获取或创建 Agent 配置
     logging.debug(f">>>进入[stream_agent_chat]")
     logging.info(f"config:{config}")
-    agent_config_id = config.get("agent_config_id")
+    agent_config_id = config.get("agent_config_id") #前端传来的config中取出agent_config_id
+    #config_item是 AgentConfig 对象
     config_item, agent_config_id = await _resolve_agent_config(db, agent_name,user_id, agent_config_id)
 
     # 如果没有 thread_id，自动生成（新对话）
@@ -176,6 +177,7 @@ async def stream_agent_chat(
         logging.warning(f"No thread_id provided, generated new thread_id: {thread_id}")
 
     # 构建 input_context（传递给 LangGraph）
+    #config_json为AgentConfig 对象的核心配置（含 context 等）
     agent_config = (config_item.config_json or {}).get("context", {})
     input_context = {
         "user_id": user_id,
