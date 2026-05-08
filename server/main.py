@@ -3,16 +3,18 @@ ShoppingClaw API Server
 FastAPI 应用入口
 """
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-import debugpy
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from server.routers import router
 from server.routers.chat_rounter import chat
+from src.knowledge import knowledge_manager
 from src.storage.postgres.manager import pg_manager
 
 # 配置日志
@@ -32,9 +34,23 @@ async def lifespan(app: FastAPI):
     # 初始化数据库连接
     try:
         pg_manager.initialize()
+        await pg_manager.create_business_tables()
         logger.info("[OK] Database connection established")
     except Exception as e:
         logger.error(f"[ERROR] Failed to initialize database: {e}")
+        raise
+
+    knowledge_docs_dir = os.getenv("KNOWLEDGE_DOCS_DIR")
+    default_docs_dir = Path("docs") / "knowledge"
+    docs_dir = knowledge_docs_dir or (default_docs_dir if default_docs_dir.exists() else None)
+    try:
+        await knowledge_manager.initialize(docs_dir)
+        if docs_dir:
+            logger.info("[OK] Knowledge base initialized from %s", docs_dir)
+        else:
+            logger.info("[OK] Knowledge base initialized without bootstrap documents")
+    except Exception as e:
+        logger.error(f"[ERROR] Failed to initialize knowledge base: {e}")
         raise
     
     logger.info("[OK] ShoppingClaw API ready")

@@ -27,7 +27,7 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
     api_key=os.getenv(env_var) or env_var
     #
     base_url=get_docker_safe_url(model_info.base_url)
-    logging.debug(f"api_key:{api_key}")
+    logging.debug(f"api_key:{api_key[:10]}... (hidden)")
 
     if provider in ["openai","deepseek"]:
         model_spec=f"{provider}:{model}"

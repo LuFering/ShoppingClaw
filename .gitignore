@@ -1,5 +1,11 @@
 # Environment variables
 .env
+.trae
+.langgraph_api
+.idea
+.tmp-validation
+test
+tests
 
 # Python
 __pycache__/

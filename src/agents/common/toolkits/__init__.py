@@ -15,6 +15,8 @@ from src.agents.common.toolkits.utils import gen_tool_info
 # 如果不在这里 import，那这些工具就像放在抽屉里没打开一样。
 # ==============================================================
 import src.agents.common.toolkits.shopping
+import src.agents.common.toolkits.research  # 注册Scrapling爬虫工具
+# import src.agents.common.toolkits.analyst  # 临时注释，避免训练时循环导入
 
 __all__ = [
     "tool",

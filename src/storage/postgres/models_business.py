@@ -1,3 +1,4 @@
+"""数据库模型定义,使用 SQLAlchemy 进行 ORM（对象关系映射）建模"""
 from typing import Any
 
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, UniqueConstraint, Index
@@ -19,6 +20,8 @@ class User(Base):
     user_name = Column(String, nullable=False, unique=True, index=True)  # 用户名称
     user_id = Column(String, nullable=False, unique=True, index=True)  # 登录ID
     phone_number = Column(String, nullable=False, unique=True, index=True)  # 手机号
+    config_json=Column(JSON,nullable=True,default={})
+    shipping_address=Column(String,nullable=False)
     avatar = Column(String, nullable=True)  # 头像URL
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False, default="user")  # 角色：superadmin,admin,user
@@ -113,3 +116,38 @@ class AgentConfig(Base):
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at),
         }
+
+class KnowledgeFaq(Base):
+    """FAQ高频问答表"""
+    __tablename__ = "knowledge_faq"
+
+    __table_args__ = (
+        UniqueConstraint("doc_id", "question", name="uq_knowledge_faq_doc_question"),
+        Index("ix_knowledge_faq_doc_active", "doc_id", "is_active"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    doc_id = Column(String(255), nullable=False, index=True)
+    question = Column(String(500), nullable=False)
+    answer = Column(String(4000), nullable=False)
+    category = Column(String(100), nullable=True, index=True)
+    tags = Column(JSON, default=list)
+    question_keywords = Column(JSON, default=list)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+class KnowledgeRetrievalLog(Base):
+    """检索日志表（用于质量监控）"""
+    __tablename__ = "knowledge_retrieval_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(String(500), nullable=False)
+    category = Column(String(100), nullable=True)
+    source_types = Column(JSON, default=list)
+    result_count = Column(Integer, default=0)
+    latency_ms = Column(Integer, default=0)
+    is_hit = Column(Boolean, default=True)
+    is_bad_case = Column(Boolean, default=False)
+    bad_case_note = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)

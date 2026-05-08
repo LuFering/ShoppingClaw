@@ -74,6 +74,10 @@ dependencies = [
     # "rapidocr-onnxruntime>=1.4.4",  # OCR识别，~50MB
     "loguru>=0.7.3",
     "redis>=5.2.0",
+    "lightgbm>=4.6.0",
+    "scikit-learn>=1.8.0",
+    "joblib>=1.5.3",
+    "numpy>=2.4.3",
 ]
 [tool.ruff]
 line-length = 120  # 代码最大行宽
@@ -100,6 +104,9 @@ default = true
 # [tool.uv.sources]
 # torch = { index = "pytorch-cpu" }
 # torchvision = { index = "pytorch-cpu" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 
 [tool.pytest.ini_options]
