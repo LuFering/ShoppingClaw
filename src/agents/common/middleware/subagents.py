@@ -454,11 +454,27 @@ def _build_task_tool(  # noqa: C901
         subagent_type: Annotated[str, "The type of subagent to use. Must be one of the available agent types listed in the tool description."],
         runtime: ToolRuntime,
     ) -> str | Command:
+        import logging
+        import time
+        start_time = time.time()
+        # logging.info(f"[SubAgent] >>> 正在启动子智能体: {subagent_type} (ID: {runtime.tool_call_id})")
+        # logging.debug(f"[SubAgent] 任务描述: {description[:100]}...")
+        
         if subagent_type not in subagent_graphs:
             allowed_types = ", ".join([f"`{k}`" for k in subagent_graphs])
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
-        subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
-        result = await subagent.ainvoke(subagent_state)
+        
+        try:
+            subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
+            # [DEBUG LOG] 打印 Master Agent 派发的任务详情
+            logging.info(f"\n{'='*50}\n[MASTER AGENT 调度指令]\n目标子智能体: {subagent_type}\n任务描述: {description}\n{'='*50}\n")
+            # logging.info(f"[SubAgent] {subagent_type} 开始执行 ainvoke...")
+            result = await subagent.ainvoke(subagent_state)
+            # logging.info(f"[SubAgent] <<< {subagent_type} 执行完毕，耗时: {time.time() - start_time:.2f}s")
+        except Exception as e:
+            logging.error(f"[SubAgent] {subagent_type} 执行失败: {e}", exc_info=True)
+            raise e
+        
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)

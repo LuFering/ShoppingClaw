@@ -1,8 +1,9 @@
+"""数据库管理器,执行建表操作"""
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
-
+from .models_business import Base as BusinessBase
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 from server.utils.singleton import SingletonMeta
@@ -55,6 +56,13 @@ class PostgresManager(metaclass=SingletonMeta):
         """检查是否已初始化"""
         if not self._initialized:
             raise RuntimeError("PostgreSQL manager not initialized. Please check configuration.")
+
+    async def create_business_tables(self):
+        """创建业务表"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.run_sync(BusinessBase.metadata.create_all)
+        logging.info("PostgreSQL tables created/checked  business")
 
     @asynccontextmanager
     async def get_async_session_context(self):

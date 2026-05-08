@@ -45,19 +45,9 @@ class BaseAgent:
             "recursion_limit": 100,
         }
         
-        logging.info(f"[Graph Start] Context: {context.__dict__}")
+        # logging.info(f"[Graph Start] Context: {context.__dict__}")  # 注释掉：避免输出 system_prompt
 
-        # 追踪节点数据流通
-        async for chunk in graph.astream(
-                input={"messages": messages},
-                stream_mode="updates",
-                context=context,
-                config=input_config,
-        ):
-            for node_name, node_output in chunk.items():
-                logging.info(f"[Node Flow] {node_name} -> Keys: {list(node_output.keys())}")
-
-        # 返回消息流给前端
+        # 返回消息流给前端（直接使用 messages 模式，保持状态连续性）
         async for msg, metadata in graph.astream(
                 input={"messages": messages},
                 stream_mode="messages",

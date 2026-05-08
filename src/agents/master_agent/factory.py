@@ -1,7 +1,15 @@
 import itertools
+import asyncio
+import logging
 from dataclasses import field, dataclass
 from typing import Sequence, Any, Callable, Awaitable, Generic, get_type_hints, Required, NotRequired, get_args, \
     Annotated
+
+try:
+    import nest_asyncio
+    HAS_NEST_ASYNCIO = True
+except ImportError:
+    HAS_NEST_ASYNCIO = False
 
 import langchain
 from langchain.agents import AgentState
@@ -328,8 +336,8 @@ def _get_real_middleware_list(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> (list, list, list, list):
     """hook函数列表"""
-    logging.info(f">>>>>>>>>>>>进入【_get_real_middleware_list】")
-    logging.debug(f"输入参数middleware:{repr(middleware)}")
+    # logging.info(f">>>>>>>>>>>>进入【_get_real_middleware_list】")
+    # logging.debug(f"输入参数middleware:{repr(middleware)}")
     before_agent = [
         m for m in middleware
         if m.__class__.before_agent is not AgentMiddleware.before_agent
@@ -350,11 +358,11 @@ def _get_real_middleware_list(
         if m.__class__.after_model is not AgentMiddleware.after_model
            or m.__class__.aafter_model is not AgentMiddleware.aafter_model
     ]
-    logging.debug(f"输出结果before_agent:{repr(before_agent)}")
-    logging.debug(f"输出结果before_agent:{repr(before_model)}")
-    logging.debug(f"输出结果before_agent:{repr(after_model)}")
-    logging.debug(f"输出结果before_agent:{repr(after_agent)}")
-    logging.info(f"<<<<<<<<<<<<离开【_get_real_middleware_list】")
+    # logging.debug(f"输出结果before_agent:{repr(before_agent)}")
+    # logging.debug(f"输出结果before_agent:{repr(before_model)}")
+    # logging.debug(f"输出结果before_agent:{repr(after_model)}")
+    # logging.debug(f"输出结果before_agent:{repr(after_agent)}")
+    # logging.info(f"<<<<<<<<<<<<离开【_get_real_middleware_list】")
 
 
     return (before_agent, before_model,
@@ -365,9 +373,9 @@ def _get_entry_node(
         before_agent: Sequence[AgentMiddleware[StateT_co, ContextT]],
         before_model: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> str:
-    logging.info(f">>>>>>>>>>>>进入【_get_entry_node】")
-    logging.debug(f"输入参数before_agent:{repr(before_agent)}")
-    logging.debug(f"输入参数before_agent:{repr(before_model)}")
+    # logging.info(f">>>>>>>>>>>>进入【_get_entry_node】")
+    # logging.debug(f"输入参数before_agent:{repr(before_agent)}")
+    # logging.debug(f"输入参数before_agent:{repr(before_model)}")
 
     """entry_node节点判断"""
     if before_agent:
@@ -376,8 +384,8 @@ def _get_entry_node(
         entry_node = f"{before_model[0].name}.before_model"
     else:
         entry_node = "model"
-    logging.debug(f"输出结果before_agent:{repr(entry_node)}")
-    logging.info(f"<<<<<<<<<<<<离开【_get_entry_node】")
+    # logging.debug(f"输出结果before_agent:{repr(entry_node)}")
+    # logging.info(f"<<<<<<<<<<<<离开【_get_entry_node】")
     return entry_node
 
 
@@ -409,14 +417,14 @@ def _get_exit_node(
         after_agent: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> str:
     """exit节点判断"""
-    logging.info(f">>>>>>>>>>>>进入【_get_exit_node】")
-    logging.debug(f"输入参数after_agent:{repr(after_agent)}")
+    # logging.info(f">>>>>>>>>>>>进入【_get_exit_node】")
+    # logging.debug(f"输入参数after_agent:{repr(after_agent)}")
     if after_agent:
         exit_node = f"{after_agent[-1].name}.after_agent"
     else:
         exit_node = END
-    logging.debug(f"输出结果exit_node:{repr(exit_node)}")
-    logging.info(f"<<<<<<<<<<<<离开【_get_exit_node】")
+    # logging.debug(f"输出结果exit_node:{repr(exit_node)}")
+    # logging.info(f"<<<<<<<<<<<<离开【_get_exit_node】")
 
     return exit_node
 
@@ -761,11 +769,11 @@ def middleware_node(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> None:
     """添加middleware节点"""
-    logging.info(f">>>>>>>>>>>>进入【middleware_node】")
-    logging.debug(f"输入参数 middleware:{repr(middleware)}")
+    # logging.info(f">>>>>>>>>>>>进入【middleware_node】")
+    # logging.debug(f"输入参数 middleware:{repr(middleware)}")
     
     for m in middleware:
-        logging.debug(f"正在处理中间件: {m.name}")
+        # logging.debug(f"正在处理中间件: {m.name}")
         # before_agent
         if (
                 m.__class__.before_agent is not AgentMiddleware.before_agent
@@ -782,7 +790,7 @@ def middleware_node(
                 else None
             )
             before_agent_node = RunnableCallable(sync_before_agent, async_before_agent)
-            logging.debug(f"-> 添加节点: {m.name}.before_agent")
+            # logging.debug(f"-> 添加节点: {m.name}.before_agent")
             graph.add_node(
                 f"{m.name}.before_agent",
                 before_agent_node,
@@ -805,7 +813,7 @@ def middleware_node(
                 else None
             )
             before_model_node = RunnableCallable(sync_before_model, async_before_model)
-            logging.debug(f"-> 添加节点: {m.name}.before_model")
+            # logging.debug(f"-> 添加节点: {m.name}.before_model")
             graph.add_node(
                 f"{m.name}.before_model",
                 before_model_node,
@@ -828,7 +836,7 @@ def middleware_node(
                 else None
             )
             after_agent_node = RunnableCallable(sync_after_agent, async_after_agent)
-            logging.debug(f"-> 添加节点: {m.name}.after_agent")
+            # logging.debug(f"-> 添加节点: {m.name}.after_agent")
             graph.add_node(
                 f"{m.name}.after_agent",
                 after_agent_node,
@@ -851,14 +859,14 @@ def middleware_node(
                 else None
             )
             after_model_node = RunnableCallable(sync_after_model, async_after_model)
-            logging.debug(f"-> 添加节点: {m.name}.after_model")
+            # logging.debug(f"-> 添加节点: {m.name}.after_model")
             graph.add_node(
                 f"{m.name}.after_model",
                 after_model_node,
                 input_schema=merged_state_schema
             )
     
-    logging.info(f"<<<<<<<<<<<<离开【middleware_node】")
+    # logging.info(f"<<<<<<<<<<<<离开【middleware_node】")
 
 
 def _get_async_tool_call(
@@ -914,9 +922,9 @@ def _extract_metadata(field_type: type) -> list[Any]:
 
 
 def __merged_schema(schemas: set[type], schema_name: str, omit_flag: str | None = None) -> type:
-    logging.info(f">>>>>>>>>>>>进入【__merged_schema】")
-    logging.debug(f"输入参数 schemas:{repr(schemas)}")
-    logging.debug(f"输入参数 schema_name:{schema_name}, omit_flag:{omit_flag}")
+    # logging.info(f">>>>>>>>>>>>进入【__merged_schema】")
+    # logging.debug(f"输入参数 schemas:{repr(schemas)}")
+    # logging.debug(f"输入参数 schema_name:{schema_name}, omit_flag:{omit_flag}")
     
     from langchain.agents.middleware.types import OmitFromSchema
     
@@ -941,23 +949,23 @@ def __merged_schema(schemas: set[type], schema_name: str, omit_flag: str | None 
             if not should_omit:
                 all_annotations[field_name] = field_type
                 
-    logging.debug(f"合并结果 all_annotations:{all_annotations}")
-    logging.info(f"<<<<<<<<<<<<离开【__merged_schema】")
+    # logging.debug(f"合并结果 all_annotations:{all_annotations}")
+    # logging.info(f"<<<<<<<<<<<<离开【__merged_schema】")
     return TypedDict(schema_name, all_annotations)
 
 
 def _get_schema(
         middleware: Sequence[AgentMiddleware[StateT_co, ContextT]]
 ):
-    logging.info(f">>>>>>>>>>>>进入【_get_schema】")
-    logging.debug(f"输入参数 middleware:{repr(middleware)}")
+    # logging.info(f">>>>>>>>>>>>进入【_get_schema】")
+    # logging.debug(f"输入参数 middleware:{repr(middleware)}")
     import operator  # ← 新增导入
     from typing import List, Annotated  # ← 新增 Annotated
     from typing import List
     from langchain_core.messages import AnyMessage
 
     state_schemas: set[type] = {m.state_schema for m in middleware}
-    logging.debug(f"提取的中间件 schemas:{state_schemas}")
+    # logging.debug(f"提取的中间件 schemas:{state_schemas}")
 
     # 如果没有中间件，使用默认的 messages schema
     if not state_schemas:
@@ -972,18 +980,18 @@ def _get_schema(
             # ↓ 修改这里：添加 operator.add 启用追加模式
             "messages": Annotated[List[AnyMessage], operator.add]  # 通过类型注解把 operator.add 函数注册为 messages 字段的合并策略
         })
-        logging.info(f"<<<<<<<<<<<<离开【_get_schema】（无中间件模式）")
+        # logging.info(f"<<<<<<<<<<<<离开【_get_schema】（无中间件模式）")
         return (state_schemas, StateSchema,
                 InputSchema, OutputSchema)
     else:
         merged_state_schema = __merged_schema(state_schemas, "StateSchema", None)
         input_schema = __merged_schema(state_schemas, "InputSchema", "input")
         output_schema = __merged_schema(state_schemas, "OutputSchema", "output")
-        logging.debug(f"生成 merged_state_schema:{merged_state_schema}")
-        logging.debug(f"生成 input_schema:{input_schema}")
-        logging.debug(f"生成 output_schema:{output_schema}")
+        # logging.debug(f"生成 merged_state_schema:{merged_state_schema}")
+        # logging.debug(f"生成 input_schema:{input_schema}")
+        # logging.debug(f"生成 output_schema:{output_schema}")
 
-    logging.info(f"<<<<<<<<<<<<离开【_get_schema】")
+    # logging.info(f"<<<<<<<<<<<<离开【_get_schema】")
     return (state_schemas, merged_state_schema,
             input_schema, output_schema)
 
@@ -1173,9 +1181,9 @@ def _get_can_jump_to(
     # 简单做法：直接检查方法名是否在支持的跳转列表中
     # 对于 after_model，通常应该允许跳转到 end
     if param == "after_model":
-        return ["end"]  # after_model 中间件默认可以结束对话
+        return ["end", "model", "tools"]  # after_model 中间件可以结束对话、跳回model或去tools执行
     elif param == "before_agent":
-        return ["model", "end"]
+        return ["end"]  # before_agent只能选择继续或结束，不能跳回model
     elif param == "before_model":
         return ["model", "end"]
 
@@ -1204,6 +1212,7 @@ def _add_middleware_edge(
     1. 如果 can_jump_to 为 None → 添加普通边（固定路径）
     2. 如果 can_jump_to 不为 None → 添加条件边（根据 jump_to 字段动态决定路径）
     """
+    # print(f"[DEBUG _add_middleware_edge] name={name}, default={default_destination}, model_dest={model_destination}, end_dest={end_destination}, can_jump={can_jump_to}")
     if can_jump_to is None or len(can_jump_to) == 0:
         # 情况 1：不能跳转，直接添加固定边
         graph.add_edge(name, default_destination)
@@ -1218,15 +1227,15 @@ def _add_middleware_edge(
             if jump_to_value:
                 # 如果 jump_to 是字符串，直接使用
                 if isinstance(jump_to_value, str):
-                    if jump_to_value == "model":
-                        return model_destination
-                    elif jump_to_value == "end":
-                        return end_destination
-                    elif jump_to_value == "tools":
-                        return "tools"
+                    # 直接返回 jump_to 的值，不再转换
+                    result = jump_to_value
+                    # print(f"[DEBUG jump_edge] jump_to={jump_to_value}, returning={result}")
+                    return result
 
             # 没有 jump_to 或无法识别，返回默认目的地
-            return default_destination
+            result = default_destination
+            # print(f"[DEBUG jump_edge] no jump_to, returning default={result}")
+            return result
 
         # 构建所有可能的目标节点列表
         destinations = [default_destination]
@@ -1234,10 +1243,17 @@ def _add_middleware_edge(
         # 根据 can_jump_to 添加额外的目标节点
         if "end" in can_jump_to and end_destination not in destinations:
             destinations.append(end_destination)
-        if "model" in can_jump_to and model_destination not in destinations:
-            destinations.append(model_destination)
+        if "model" in can_jump_to:
+            # model_destination可能是变量（如"gap_detector.before_model"）或字符串"model"
+            if model_destination not in destinations:
+                destinations.append(model_destination)
+            # 同时添加字符串"model"以兼容直接跳转
+            if "model" not in destinations:
+                destinations.append("model")
         if "tools" in can_jump_to and "tools" not in destinations:
             destinations.append("tools")
+        
+        # print(f"[DEBUG destinations] name={name}, destinations={destinations}")
 
         # 添加条件边
         graph.add_conditional_edges(
@@ -1248,15 +1264,39 @@ def _add_middleware_edge(
 
 
 def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
-    """ToolNode的包装器,用于添加日志"""
-    logging.info("[TOOLS] >>> 进入tools节点")
-    logging.debug(f"[TOOLS] 输入消息:{repr(state['messages'])}")
-    logging.debug(f"[TOOLS] state完整信息:{repr(state)}")
+    """ToolNode的包装器,用于添加日志和增强并行稳定性"""
+    # logging.info("[TOOLS] >>> 进入tools节点")
+    
+    async def _execute_tools():
+        """内部异步执行函数，负责并行调度所有工具"""
+        # logging.info("[TOOLS] 开始并行执行工具调用...")
+        # ainvoke 内部会自动处理多个 tool_calls 的并行 (asyncio.gather)
+        result = await tool_node.ainvoke(state)
+        # logging.info(f"[TOOLS] 工具并行执行完毕，返回结果类型: {type(result)}")
+        return result
 
-    # 执行ToolNode
-    result = tool_node.invoke(state)
+    try:
+        # 尝试获取当前是否已有事件循环在运行
+        loop = asyncio.get_running_loop()
+        # 如果有循环在运行，且安装了 nest_asyncio，则应用补丁以支持嵌套
+        if HAS_NEST_ASYNCIO:
+            nest_asyncio.apply()
+            result = asyncio.run(_execute_tools())
+        else:
+            # 如果没有安装补丁，尝试在当前循环中创建任务（但这在同步 wrapper 中很难实现）
+            # 这种情况下，我们只能尝试直接运行，可能会报 RuntimeError
+            logging.warning("[TOOLS] nest_asyncio 未安装，尝试直接运行异步任务...")
+            result = asyncio.run(_execute_tools())
+    except RuntimeError as e:
+        # 如果是因为嵌套循环导致的错误，提示用户安装 nest_asyncio
+        if "cannot be called from a running event loop" in str(e):
+            raise RuntimeError(
+                "检测到嵌套事件循环冲突。请执行 'pip install nest_asyncio' 以支持 Windows 下的并行工具调用。"
+            ) from e
+        raise e
 
-    logging.info("[TOOLS] <<< 离开tools节点")
+    # logging.info("[TOOLS] <<< 离开tools节点")
+    return result
     
     # 兼容处理：tool_node.invoke 可能返回 list 或 dict
     if isinstance(result, list):
@@ -1335,7 +1375,7 @@ def create_agent(
         cache: BaseCache[Any] | None = None,
 ) -> CompiledStateGraph:
     """工作流搭建"""
-    logging.info(f">>>>>>>>>>>>进入[factory]")
+    # logging.info(f">>>>>>>>>>>>进入[factory]")
 
     """系统提示词加载"""
     system_messages: SystemMessage | None = None
@@ -1344,8 +1384,8 @@ def create_agent(
             system_messages = system_prompt
         else:
             system_messages = SystemMessage(content=system_prompt)
-    logging.info(f"[system_messages]:{system_messages}")
-    logging.debug(f"[system_messages]:{repr(system_messages)}")
+    # logging.info(f"[system_messages]:{system_messages}")
+    # logging.debug(f"[system_messages]:{repr(system_messages)}")
 
     """四大中间件列表[hook]"""
     (middleware_before_agent, middleware_before_model,
@@ -1447,7 +1487,12 @@ def create_agent(
     graph.add_node("model", RunnableCallable(model_node_wrapper, amodel_node_wrapper))
 
     """添加tools节点"""
-    graph.add_node("tools", lambda state: tool_node_wrapper(state, tool_node))
+    # 使用异步包装器以支持 StructuredTool
+    async def atool_node_wrapper(state):
+        return tool_node_wrapper(state, tool_node)
+    
+    from langchain_core.runnables import RunnableLambda
+    graph.add_node("tools", RunnableLambda(tool_node_wrapper, afunc=atool_node_wrapper))
 
     """添加 middleware 节点"""
     middleware_node(graph, merged_state_schema, middleware)  # type: ignore[arg-type]
@@ -1539,19 +1584,16 @@ def create_agent(
             end_destination=exit_node,
             can_jump_to=_get_can_jump_to(m1, "after_model"),
         )
-        # 2. 第一个中间件（链条出口）复用 model->tools 的路由逻辑
+    
+    # 处理第一个中间件（链条出口，即最后注册的中间件）
     if middleware_after_model:
-        graph.add_conditional_edges(
-            f"{middleware_after_model[0].name}.after_model",
-            RunnableCallable(  # type: ignore[arg-type]
-                _choose_model_to_tools_edge(
-                    model_destinations=loop_entry_node,
-                    structured_output_tools=structured_output_tools,
-                    end_destination=exit_node
-                ),
-                trace=False,
-            ),
-            [exit_node, "tools"]
+        _add_middleware_edge(
+            graph,
+            name=f"{middleware_after_model[0].name}.after_model",
+            default_destination=exit_node,
+            model_destination=loop_entry_node,
+            end_destination=exit_node,
+            can_jump_to=_get_can_jump_to(middleware_after_model[0], "after_model"),
         )
     # Model 节点不具备重新回到 model 节点和直接退出的功能，否则过于冗余
     if middleware_after_model:
@@ -1579,7 +1621,7 @@ def create_agent(
             can_jump_to=_get_can_jump_to(middleware_after_agent[0], "after_agent"),
         )
 
-    config: RunnableConfig = {"recursion_limit": 10000}
+    config: RunnableConfig = {"recursion_limit": 25}
     if name:
         config["metadata"] = {"agent_name": name}
 

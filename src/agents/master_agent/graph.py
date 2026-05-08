@@ -7,7 +7,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.agents.common.base import BaseAgent
 from src.agents.common.backends import StateBackend
 from src.agents.common.middleware.filesystem import FilesystemMiddleware
+from src.agents.common.middleware.intent_detector import IntentDetectorMiddleware
 from src.agents.common.middleware.patch_tool_calls import PatchToolCallsMiddleware
+from src.agents.common.middleware.evidence_collector import EvidenceCollectorMiddleware
+from src.agents.common.middleware.gap_detector import GapDetectorMiddleware
 from src.agents.common.middleware.skills import SkillsMiddleware
 from src.agents.common.middleware.subagents import SubAgentMiddleware
 from src.agents.common.middleware.summarization import SummaryOffloadMiddleware
@@ -18,6 +21,8 @@ from src.agents.master_agent.agent_demo import create_master_agent
 
 # 导入硬编码工具模块，触发 @tool 装饰器的自动注册逻辑
 import src.agents.common.toolkits.buildin.tools
+import src.agents.common.toolkits.analyst.tools
+import src.agents.common.toolkits.critic.tools
 
 def _get_tool_by_name(tool_name: str):
     """根据名称从全局注册表中查找工具实例"""
@@ -28,7 +33,8 @@ def _get_tool_by_name(tool_name: str):
     return None
 
 def load_subagent(config_path:Path, default_model)->list:
-    """从 YAML 加载子智能体配置并映射工具"""
+    """从 YAML 加载子智能体配置并映射工具（支持 YAML 自定义模型）"""
+    import logging
     with open(config_path, encoding='utf-8') as f:
         config=yaml.safe_load(f)
     subagents=[]
@@ -43,12 +49,23 @@ def load_subagent(config_path:Path, default_model)->list:
             else:
                 print(f"Warning: Tool '{t_name}' not found for subagent '{name}'")
         
+        # 2. 确定模型：优先使用 YAML 配置，如果没有则使用 default_model
+        model_name = spec.get("model")
+
+        if model_name:
+            # logging.info(f"[SubAgent] {name} 正在加载 YAML 指定模型: {model_name}")
+            agent_model = load_chat_model(model_name)
+            # logging.info(f"[SubAgent] {name} 模型加载完成")
+        else:
+            # logging.info(f"[SubAgent] {name} 使用默认模型 (由 context.subagents_model 加载)")
+            agent_model = default_model
+
         subagent={
             "name":name,
             "description":spec.get("description", ""),
             "system_prompt":spec.get("system_prompt", ""),
-            "tools": resolved_tools,  # 2. 注入真正的工具对象
-            "model": default_model,   # 3. 直接使用已初始化的模型实例，避免字符串解析错误
+            "tools": resolved_tools,  # 3. 注入真正的工具对象
+            "model": agent_model,     # 4. 注入确定的模型实例
         }
         subagents.append(subagent)
     return subagents
@@ -69,8 +86,17 @@ class MasterAgent(BaseAgent):
         self.checkpointer=None
 
     async def get_tools(self):
-        """获取所有已注册的硬编码工具实例"""
-        return get_all_tool_instances()
+        """获取所有已注册的硬编码工具实例（仅buildin类别）"""
+        from src.agents.common.toolkits.registry import get_all_extra_metadata, ToolExtraMetadata
+        
+        all_tools = get_all_tool_instances()
+        extra_meta = get_all_extra_metadata()
+        
+        # 只保留 buildin 类别的工具
+        return [
+            tool for tool in all_tools 
+            if extra_meta.get(tool.name, ToolExtraMetadata()).category == "buildin"
+        ]
 
     async def _get_checkpointer(self):
         """获取检查点器（目前使用内存存储）"""
@@ -90,7 +116,7 @@ class MasterAgent(BaseAgent):
         
         # 3. 获取工具与子智能体
         tools=await self.get_tools()
-        # subagents = load_subagent(Path(__file__).parent.parent / "subagents" / "subagents.yaml", sub_model)
+        subagents = load_subagent(Path(__file__).parent.parent / "subagents" / "subagents.yaml", sub_model)
         #
         # # 4. 配置中间件 (Middleware)
         #
@@ -104,38 +130,44 @@ class MasterAgent(BaseAgent):
         # )
         #
         # # B. 子智能体管理：MasterAgent 的核心调度器
-        # subagents_middleware = SubAgentMiddleware(
-        #     default_model=sub_model,
-        #     default_tools=[],  # 子智能体默认不继承主智能体的工具，保持纯净
-        #     subagents=subagents,
-        #     default_middleware=[
-        #         PatchToolCallsMiddleware(),
-        #         SummaryOffloadMiddleware(
-        #             model=sub_model,
-        #             trigger=("tokens", 50000), # 子智能体更激进的压缩
-        #             trim_tokens_to_summarize=2000,
-        #         ),
-        #     ],
-        #     general_purpose_agent=True,
-        # )
+        subagents_middleware = SubAgentMiddleware(
+            default_model=sub_model,
+            default_tools=[],  # 子智能体默认不继承主智能体的工具，保持纯净
+            subagents=subagents,
+            default_middleware=[
+                PatchToolCallsMiddleware(),
+                SummaryOffloadMiddleware(
+                    model=sub_model,
+                    trigger=("tokens", 50000), # 子智能体更激进的压缩
+                    trim_tokens_to_summarize=2000,
+                ),
+            ],
+            general_purpose_agent=True,
+        )
 
         # 5. 组装 Graph
+        import logging
+        # logging.info("[MasterAgent] 正在编译 LangGraph...")
         graph = create_master_agent(
             model=model,
             context_schema=MasterContext,  # ← 传入 Context Schema 类
             tools=tools,
             middleware=[
+                IntentDetectorMiddleware(),
                 PatchToolCallsMiddleware(),  # 修复不同模型的工具调用格式差异
+                GapDetectorMiddleware(),  # 检测证据缺口（必须先注册，后执行）
+                EvidenceCollectorMiddleware(),  # 结构化SubAgent输出（后注册，先执行）
                 ToolCallLimitMiddleware(run_limit=10,thread_limit=20, exit_behavior="end"),  # 安全锁：防止死循环
                 TodoListMiddleware(),  # 赋予 Agent 拆解任务的能力
 
-            #     FilesystemMiddleware(backend=_create_fs_backend),  # 赋予 Agent 读写文件能力
+            FilesystemMiddleware(backend=_create_fs_backend),  # 赋予 Agent 读写文件能力
             #     # SkillsMiddleware(),  # 暂时禁用：需要配置 backend 和 sources
-            #     subagents_middleware,       # 注入子智能体调度能力
+            subagents_middleware,       # 注入子智能体调度能力
             #     summary_middleware,         # 注入长对话压缩能力
 
             ],
             # checkpointer=await self._get_checkpointer(),
         )
+        # logging.info("[MasterAgent] LangGraph 编译完成")
         
         return graph
