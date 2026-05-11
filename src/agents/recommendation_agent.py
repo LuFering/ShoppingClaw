@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from src.models.product import Product
-from src.models.state import ShoppingState
+from agents.common.model import Product
+from agents.common.model import ShoppingState
 from src.tools.compare import compare_products
 
 logger = logging.getLogger(__name__)

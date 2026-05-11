@@ -1,7 +1,7 @@
 """数据库模型定义,使用 SQLAlchemy 进行 ORM（对象关系映射）建模"""
 from typing import Any
 
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, UniqueConstraint, Index, Text, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship
 
 from src.utils.datetime_utils import utc_now_naive, format_utc_datetime
@@ -9,7 +9,30 @@ from src.utils.datetime_utils import utc_now_naive, format_utc_datetime
 # SQLAlchemy 是ORM（对象关系映射）框架，用于在 Python 代码和关系型数据库之间建立桥梁
 # 所有继承自 Base 的类都会自动映射到数据库表
 Base = declarative_base()
+class OperationLog(Base):
+    """操作日志模型"""
 
+    __tablename__ = "operation_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    operation = Column(String, nullable=False)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String, nullable=True)
+    timestamp = Column(DateTime, default=utc_now_naive)
+
+    # 关联用户
+    user = relationship("User", back_populates="operation_logs")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "operation": self.operation,
+            "details": self.details,
+            "ip_address": self.ip_address,
+            "timestamp": format_utc_datetime(self.timestamp),
+        }
 
 class User(Base):
     """用户模型表"""

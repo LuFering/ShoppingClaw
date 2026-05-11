@@ -15,13 +15,12 @@ class AgentManager():
         for agent in self._classes.keys():
             self.get_agent(agent)
 
-    def get_agent(self,agent):
+    def get_agent(self, agent):
         """根据agent name 实例agent,载入_instance"""
-        #TODO:检查是否已经创建了该 agent 的实例
-        #TODO:如果仅需要重新加载 graph，则清空 graph 缓存
-        agent_class=self._classes[agent]
-        self._instance[agent]=agent_class()
-
+        agent_class = self._classes.get(agent)
+        if agent_class is None:
+            return None
+        self._instance[agent] = agent_class()
         return self._instance[agent]
 
     def get_agents(self):
@@ -36,8 +35,11 @@ class AgentManager():
 
     async def get_agents_info(self):
         """异步获取所有agent信息"""
-        #TODO:异步获取所有agent信息
-        pass
+        infos = []
+        for agent in self._instance.values():
+            info = await agent.get_info()
+            infos.append(info)
+        return infos
 
     def auto_discover_agent(self):
         """自动发现并注册 src/agents/ 下的所有智能体"""

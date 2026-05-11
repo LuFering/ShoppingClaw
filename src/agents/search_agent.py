@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from src.models.state import PlatformCode, ShoppingState
+from agents.common.model import PlatformCode, ShoppingState
 from src.tools.search import search
 
 logger = logging.getLogger(__name__)

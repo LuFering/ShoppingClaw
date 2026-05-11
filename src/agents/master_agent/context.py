@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional, List, Dict
 
 from src.agents.common.context import BaseContext
-from src.models.intent_state import IntentState
+from src.agents.common.model.intent_state import IntentState
 
 BASE_AGENT_PROMPT = (Path(__file__).parent / "BASE_PROMPT.md").read_text(encoding="utf-8")
 
