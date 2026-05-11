@@ -27,6 +27,18 @@ class BaseAgent:
     def get_graph(self, **kwargs) -> CompiledStateGraph:
         pass
 
+    async def get_info(self) -> dict:
+        """返回 agent 的基本信息"""
+        return {
+            "id": self.__class__.__name__,
+            "name": self.name,
+            "description": self.description,
+            "capabilities": self.capabilities,
+            "examples": getattr(self, "examples", []),
+            "has_checkpointer": self.checkpointer is not None,
+            "configurable_items": [],
+        }
+
     async def stream_messages(self, messages: list[str], input_context=None, **kwargs):
         graph = await self.get_graph() #初始编译图
         context = self.context_schema()

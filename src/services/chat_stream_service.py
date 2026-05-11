@@ -3,6 +3,7 @@ import json
 import logging
 import traceback
 import uuid
+from datetime import datetime, UTC
 
 from langchain_core.messages import HumanMessage, AIMessageChunk, AIMessage
 from src.config import config as conf
@@ -12,6 +13,40 @@ from src.repositories.agent_config_repository import AgentConfigRepository
 from src.repositories.conversation_repository import ConversationRepository
 from src.storage.postgres.manager import pg_manager
 
+
+def _build_state_files(attachments: list[dict]) -> dict:
+    """将附件列表转换为 StateBackend 格式的 files 字典
+
+    StateBackend 期望的格式:
+    {
+        "/attachments/file.md": {
+            "content": ["line1", "line2", ...],
+            "created_at": "...",
+            "modified_at": "...",
+        }
+    }
+    """
+    files = {}
+    for attachment in attachments:
+        if attachment.get("status") != "parsed":
+            continue
+
+        file_path = attachment.get("file_path")
+        markdown = attachment.get("markdown")
+
+        if not file_path or not markdown:
+            continue
+
+        now = datetime.now(UTC).isoformat()
+        # 将 markdown 内容按行拆分
+        content_lines = markdown.split("\n")
+        files[file_path] = {
+            "content": content_lines,
+            "created_at": attachment.get("uploaded_at", now),
+            "modified_at": attachment.get("uploaded_at", now),
+        }
+
+    return files
 
 def extract_agent_state(values: dict) -> dict:
     todos = values.get("todos")
@@ -328,3 +363,49 @@ async def stream_agent_chat(
             )
 
         yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
+
+async def get_agent_state_view(
+    *,
+    agent_id: str,
+    thread_id: str,
+    current_user_id: str,
+    db,
+) -> dict:
+    if not agent_manager.get_agent(agent_id):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"智能体 {agent_id} 不存在")
+
+    conv_repo = ConversationRepository(db)
+    conversation = await conv_repo.get_conversation_by_thread_id(thread_id)
+    if not conversation or conversation.user_id != str(current_user_id) or conversation.status == "deleted":
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="对话线程不存在")
+
+    agent = agent_manager.get_agent(agent_id)
+    graph = await agent.get_graph()
+    langgraph_config = {"configurable": {"user_id": str(current_user_id), "thread_id": thread_id}}
+    state = await graph.aget_state(langgraph_config)
+    agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
+
+    # 如果 state 中没有 files，从附件构建
+    # 这确保了上传附件后立即可以在文件列表中看到文件
+    if not agent_state.get("files") or agent_state["files"] == {}:
+        try:
+            attachments = await conv_repo.get_attachments_by_thread_id(thread_id)
+            logging.info(f"[get_agent_state_view] found {len(attachments)} attachments in DB")
+            if attachments:
+                first_status = attachments[0].get("status")
+                first_has_markdown = bool(attachments[0].get("markdown"))
+                logging.info(
+                    f"[get_agent_state_view] first attachment status: {first_status}, "
+                    f"has markdown: {first_has_markdown}"
+                )
+                files = _build_state_files(attachments)
+                agent_state["files"] = files
+                logging.info(f"[get_agent_state_view] Built files from attachments: {len(files)} files")
+        except Exception as e:
+            logging.warning(f"Failed to fetch attachments for thread {thread_id}: {e}")
+
+    return {"agent_state": agent_state}

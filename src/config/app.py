@@ -21,7 +21,7 @@ class Config(BaseModel):
 
     #模型配置
     default_model:str=Field(
-        default="aliyun/qwen3.5-27b",
+        default="deepseek/deepseek-v4-flash",
         description="默认对话模型",
     )
     # 模型信息（只读，不持久化）

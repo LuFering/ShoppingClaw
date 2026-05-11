@@ -2,21 +2,30 @@
 from src.agents.common.toolkits.registry import (
     tool,
     ToolExtraMetadata,
-    get_all_tool_instances,
     get_extra_metadata,
     get_all_extra_metadata,
 )
-from src.agents.common.toolkits.utils import gen_tool_info
 
-# ==============================================================
-# 💡 解释：在这里导入 shopping 模块，
-# 这样在加载 registry.py 时，@tool 装饰器就会自动触发，
-# 把 search_tool, filter_tool, compare_tool 注册进系统的可用工具表。
-# 如果不在这里 import，那这些工具就像放在抽屉里没打开一样。
-# ==============================================================
-import src.agents.common.toolkits.shopping
-import src.agents.common.toolkits.research  # 注册Scrapling爬虫工具
-# import src.agents.common.toolkits.analyst  # 临时注释，避免训练时循环导入
+# 延迟导入：research 和 analyst 工具包在首次调用时才加载，
+# 避免服务启动时引入 jd/sqlalchemy/torch 等重量级依赖。
+_tools_loaded = False
+
+def _ensure_tools_loaded():
+    global _tools_loaded
+    if _tools_loaded:
+        return
+    import src.agents.common.toolkits.buildin.tools  # 注册内置工具
+    import src.agents.common.toolkits.research       # 注册爬虫工具
+    import src.agents.common.toolkits.analyst        # 注册分析工具
+    import src.agents.common.toolkits.critic.tools   # 注册审查工具
+    _tools_loaded = True
+
+def get_all_tool_instances() -> list:
+    _ensure_tools_loaded()
+    from src.agents.common.toolkits.registry import get_all_tool_instances as _get
+    return _get()
+
+from src.agents.common.toolkits.utils import gen_tool_info
 
 __all__ = [
     "tool",
@@ -26,4 +35,3 @@ __all__ = [
     "get_all_extra_metadata",
     "gen_tool_info",
 ]
-

@@ -17,12 +17,9 @@ from src.agents.common.middleware.summarization import SummaryOffloadMiddleware
 from src.agents.common.models import load_chat_model
 from src.agents.common.toolkits import get_all_tool_instances
 from src.agents.master_agent.context import MasterContext
-from src.agents.master_agent.agent_demo import create_master_agent
 
-# 导入硬编码工具模块，触发 @tool 装饰器的自动注册逻辑
-import src.agents.common.toolkits.buildin.tools
-import src.agents.common.toolkits.analyst.tools
-import src.agents.common.toolkits.critic.tools
+# 工具模块延迟加载：由 toolkits.__init__ 的 _ensure_tools_loaded() 统一管理
+# 避免服务启动时引入 sqlalchemy / knowledge_manager / jd / torch 等重量级依赖
 
 def _get_tool_by_name(tool_name: str):
     """根据名称从全局注册表中查找工具实例"""
@@ -147,6 +144,7 @@ class MasterAgent(BaseAgent):
 
         # 5. 组装 Graph
         import logging
+        from src.agents.master_agent.agent_demo import create_master_agent
         # logging.info("[MasterAgent] 正在编译 LangGraph...")
         graph = create_master_agent(
             model=model,

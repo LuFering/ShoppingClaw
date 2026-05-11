@@ -1,9 +1,12 @@
 """Middleware for providing subagents to an agent via a `task` tool."""
 
+import json
+import logging
+import re
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any, NotRequired, TypedDict, Unpack, cast
-
+from langchain_core.messages import AIMessage
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
 from langchain.agents.middleware.types import AgentMiddleware, ContextT, ModelRequest, ModelResponse, ResponseT
@@ -126,6 +129,140 @@ DEFAULT_SUBAGENT_PROMPT = "In order to complete the objective that the user asks
 #    from leaking to child agents (e.g., the general-purpose subagent loads its own skills via
 #    SkillsMiddleware).
 _EXCLUDED_STATE_KEYS = {"messages", "todos", "structured_response", "skills_metadata", "memory_contents"}
+
+
+# ---------------------------------------------------------------------------
+# SubAgent 输出协议校验 + 证据注入
+# ---------------------------------------------------------------------------
+
+def _get_output_schema(subagent_type: str):
+    """按 Agent 类型获取对应的 Pydantic 输出协议（懒加载，避免循环依赖）。"""
+    try:
+        from agents.common.model import (
+            ResearcherOutput,
+            AnalystOutput,
+            CriticOutput,
+            MemoryOutput,
+        )
+        _SCHEMA_MAP = {
+            "researcher": ResearcherOutput,
+            "analyst": AnalystOutput,
+            "critic": CriticOutput,
+            "memory_manager": MemoryOutput,
+        }
+        return _SCHEMA_MAP.get(subagent_type)
+    except ImportError:
+        return None
+
+
+def _enrich_task_description(subagent_type: str, description: str, state: dict) -> str:
+    """将 MasterAgent state 中的前置证据注入到 SubAgent 的任务描述中。
+
+    确保下游 Agent（analyst／critic）能接收到上游 Agent 已产出的数据，
+    无需 MasterAgent 在 prompt 中手动传递。
+    """
+    evidence = state.get("evidence", {})
+
+    if subagent_type == "analyst":
+        research_data = evidence.get("research_data")
+        if research_data and research_data.get("products"):
+            products_str = json.dumps(
+                research_data["products"], ensure_ascii=False, indent=2
+            )
+            description = (
+                f"{description}\n\n"
+                f"【系统注入】以下为 Researcher 已采集的商品数据，请基于此进行分析：\n{products_str}"
+            )
+
+    elif subagent_type == "critic":
+        analysis_report = evidence.get("analysis_report")
+        if analysis_report:
+            report_str = json.dumps(analysis_report, ensure_ascii=False, indent=2)
+            description = (
+                f"{description}\n\n"
+                f"【系统注入】以下为 Analyst 的分析报告，请据此进行风险评估：\n{report_str}"
+            )
+
+    return description
+
+
+def _extract_json(text: str) -> dict | None:
+    """从可能包含 Markdown 或前言的文本中提取 JSON 对象。"""
+    # 检测并警告 ```json 不合规输出
+    if '```' in text:
+        logging.warning(
+            f"[SubAgent] 输出包含 ```json 标记（违反 prompt 约束），"
+            f"_extract_json 已兼容提取，但应约束 LLM 遵守纯 JSON 协议"
+        )
+
+    # 1. 直接解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. ```json ... ``` 块
+    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. 第一个 { ... } 块
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _validate_output(subagent_type: str, text: str) -> tuple[bool, str | None]:
+    """校验 SubAgent 输出是否符合约定的 Pydantic Schema，并返回含默认值的完整 JSON。
+
+    Returns:
+        (is_valid, result_or_error)
+        - is_valid=True 时 result_or_error 为经过 Pydantic 填充默认值后的完整 JSON 字符串
+        - is_valid=False 时 result_or_error 为错误提示
+    """
+    schema = _get_output_schema(subagent_type)
+    if schema is None:
+        return True, text  # 没有定义 Schema 的 Agent 类型，原样返回
+
+    parsed = _extract_json(text)
+    if parsed is None:
+        return False, (
+            f"输出格式错误：未检测到有效的 JSON 对象。请只输出一个符合 "
+            f"{schema.__name__} 格式的纯 JSON 对象，不要包含任何 Markdown "
+            f"标记（```json）、开场白或结束语。"
+        )
+
+    try:
+        validated = schema.model_validate(parsed)
+        return True, validated.model_dump_json(ensure_ascii=False)
+    except Exception as e:
+        # 宽松校验降级：model_validate 可能因工具返回数据不完整（缺 price/state/url 等）
+        # 而失败。使用 model_construct 跳过验证，让数据流继续
+        try:
+            validated = schema.model_construct(**parsed)
+            logging.warning(
+                f"[SubAgent] {subagent_type} 宽松验证通过（model_construct），"
+                f"跳过严格校验。原始错误: {e}"
+            )
+            return True, validated.model_dump_json(ensure_ascii=False)
+        except Exception:
+            return False, (
+                f"输出验证失败：{e}\n"
+                f"请根据以上错误修正输出，只返回符合 {schema.__name__} 格式的纯 JSON 对象。"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 下面为 Task Tool 构建逻辑
+# ---------------------------------------------------------------------------
 
 TASK_TOOL_DESCRIPTION = """Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows.
 
@@ -400,7 +537,7 @@ def _build_task_tool(  # noqa: C901
     else:
         description = task_description
 
-    def _return_command_with_state_update(result: dict, tool_call_id: str) -> Command:
+    def _return_command_with_state_update(result: dict, tool_call_id: str, *, content_override: str | None = None) -> Command:
         # Validate that the result contains a 'messages' key
         if "messages" not in result:
             error_msg = (
@@ -411,8 +548,12 @@ def _build_task_tool(  # noqa: C901
             raise ValueError(error_msg)
 
         state_update = {k: v for k, v in result.items() if k not in _EXCLUDED_STATE_KEYS}
-        # Strip trailing whitespace to prevent API errors with Anthropic
-        message_text = result["messages"][-1].text.rstrip() if result["messages"][-1].text else ""
+        # 优先使用 content_override（经 Pydantic 填充默认值后的完整 JSON）
+        # 回退到原始 LLM 输出文本
+        if content_override is not None:
+            message_text = content_override
+        else:
+            message_text = result["messages"][-1].text.rstrip() if result["messages"][-1].text else ""
         return Command(
             update={
                 **state_update,
@@ -425,7 +566,9 @@ def _build_task_tool(  # noqa: C901
         subagent = subagent_graphs[subagent_type]
         # Create a new state dict to avoid mutating the original
         subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
-        subagent_state["messages"] = [HumanMessage(content=description)]
+        # Inject relevant evidence from MasterAgent state into the task description
+        enriched_description = _enrich_task_description(subagent_type, description, subagent_state)
+        subagent_state["messages"] = [HumanMessage(content=enriched_description)]
         return subagent, subagent_state
 
     def task(
@@ -440,11 +583,38 @@ def _build_task_tool(  # noqa: C901
             allowed_types = ", ".join([f"`{k}`" for k in subagent_graphs])
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
-        result = subagent.invoke(subagent_state)
+
+        max_retries = 2
+        result = None
+        total_tool_calls = 0
+        for attempt in range(max_retries):
+            result = subagent.invoke(subagent_state)
+            message_text = result["messages"][-1].text.rstrip() if result["messages"][-1].text else ""
+            # 统计本轮工具调用次数（含跨重试累计）
+            attempt_calls = sum(
+                len(msg.tool_calls) if hasattr(msg, 'tool_calls') and msg.tool_calls else 0
+                for msg in result.get("messages", [])
+            )
+            total_tool_calls += attempt_calls
+            is_valid, validated_or_error = _validate_output(subagent_type, message_text)
+            if is_valid:
+                message_text = validated_or_error  # 使用 Pydantic 填充默认值后的完整 JSON
+                break
+            logging.warning(f"[SubAgent] {subagent_type} 输出格式验证失败（第{attempt + 1}次），正在重试...")
+            if attempt < max_retries - 1:
+                subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
+                subagent_state["messages"] = [
+                    HumanMessage(content=description),
+                    AIMessage(content=message_text),
+                    HumanMessage(content=f"[系统] 你的输出格式不符合要求，请修正。\n{validated_or_error}"),
+                ]
+
+        if total_tool_calls > 20:
+            logging.warning(f"[SubAgent] {subagent_type} 本轮调用工具{total_tool_calls}次（含{attempt+1}次重试），频率偏高请关注")
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
-        return _return_command_with_state_update(result, runtime.tool_call_id)
+        return _return_command_with_state_update(result, runtime.tool_call_id, content_override=message_text)
 
     async def atask(
         description: Annotated[
@@ -454,31 +624,48 @@ def _build_task_tool(  # noqa: C901
         subagent_type: Annotated[str, "The type of subagent to use. Must be one of the available agent types listed in the tool description."],
         runtime: ToolRuntime,
     ) -> str | Command:
-        import logging
-        import time
-        start_time = time.time()
-        # logging.info(f"[SubAgent] >>> 正在启动子智能体: {subagent_type} (ID: {runtime.tool_call_id})")
-        # logging.debug(f"[SubAgent] 任务描述: {description[:100]}...")
-        
         if subagent_type not in subagent_graphs:
             allowed_types = ", ".join([f"`{k}`" for k in subagent_graphs])
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
-        
+
         try:
             subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
-            # [DEBUG LOG] 打印 Master Agent 派发的任务详情
             logging.info(f"\n{'='*50}\n[MASTER AGENT 调度指令]\n目标子智能体: {subagent_type}\n任务描述: {description}\n{'='*50}\n")
-            # logging.info(f"[SubAgent] {subagent_type} 开始执行 ainvoke...")
-            result = await subagent.ainvoke(subagent_state)
-            # logging.info(f"[SubAgent] <<< {subagent_type} 执行完毕，耗时: {time.time() - start_time:.2f}s")
+
+            max_retries = 2
+            result = None
+            total_tool_calls = 0
+            for attempt in range(max_retries):
+                result = await subagent.ainvoke(subagent_state)
+                message_text = result["messages"][-1].text.rstrip() if result["messages"][-1].text else ""
+                # 统计本轮工具调用次数（含跨重试累计）
+                attempt_calls = sum(
+                    len(msg.tool_calls) if hasattr(msg, 'tool_calls') and msg.tool_calls else 0
+                    for msg in result.get("messages", [])
+                )
+                total_tool_calls += attempt_calls
+                is_valid, validated_or_error = _validate_output(subagent_type, message_text)
+                if is_valid:
+                    message_text = validated_or_error  # 使用 Pydantic 填充默认值后的完整 JSON
+                    break
+                logging.warning(f"[SubAgent] {subagent_type} 输出格式验证失败（第{attempt + 1}次），正在重试...")
+                if attempt < max_retries - 1:
+                    subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
+                    subagent_state["messages"] = [
+                        HumanMessage(content=description),
+                        AIMessage(content=message_text),
+                        HumanMessage(content=f"[系统] 你的输出格式不符合要求，请修正。\n{validated_or_error}"),
+                    ]
         except Exception as e:
             logging.error(f"[SubAgent] {subagent_type} 执行失败: {e}", exc_info=True)
             raise e
-        
+
+        if total_tool_calls > 20:
+            logging.warning(f"[SubAgent] {subagent_type} 本轮调用工具{total_tool_calls}次（含{attempt+1}次重试），频率偏高请关注")
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
-        return _return_command_with_state_update(result, runtime.tool_call_id)
+        return _return_command_with_state_update(result, runtime.tool_call_id, content_override=message_text)
 
     return StructuredTool.from_function(
         name="task",
