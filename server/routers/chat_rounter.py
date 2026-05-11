@@ -1,67 +1,129 @@
+"""聊天路由 — 简化版：agent + stream + threads"""
 import logging
+import traceback
 import uuid
 
-from fastapi import APIRouter, Body, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.responses import StreamingResponse
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
-from server.utils.auth_middleware import get_current_user, get_db
-from src.services.chat_stream_service import stream_agent_chat
-from src.storage.postgres.models_business import User
+from server.utils.auth_middleware import get_required_user
+from server.utils.user_store import User
+from src import config as conf
+from src.agents import agent_manager
 
 chat = APIRouter(prefix="/chat", tags=["chat"])
 
 
+# ── 模型 ──────────────────────────────────────────────────
+
+class ThreadCreate(BaseModel):
+    title: str | None = None
+    agent_id: str
+    metadata: dict | None = None
+
+
+class ThreadUpdate(BaseModel):
+    title: str | None = None
+    is_pinned: bool | None = None
+
+
+class ThreadResponse(BaseModel):
+    id: str
+    user_id: str
+    agent_id: str
+    title: str | None = None
+    is_pinned: bool = False
+    created_at: str
+    updated_at: str
+
+
+# ── 默认智能体 ────────────────────────────────────────────
+
+@chat.get("/default_agent")
+async def get_default_agent(current_user: User = Depends(get_required_user)):
+    try:
+        default_agent_id = getattr(conf.config, 'default_agent_id', None)
+        if not default_agent_id:
+            agents = await agent_manager.get_agents_info()
+            if agents:
+                default_agent_id = agents[0].get("id", "")
+        return {"default_agent_id": default_agent_id}
+    except Exception as e:
+        logging.error(f"获取默认智能体出错: {e}")
+        raise HTTPException(status_code=500, detail=f"获取默认智能体出错: {str(e)}")
+
+
+# ── 智能体列表 ────────────────────────────────────────────
+
+@chat.get("/agent")
+async def get_agent(current_user: User = Depends(get_required_user)):
+    agents_info = await agent_manager.get_agents_info()
+    return {
+        "agents": [
+            {
+                "id": a["id"],
+                "name": a.get("name", "Unknown"),
+                "description": a.get("description", ""),
+                "examples": a.get("examples", []),
+                "has_checkpointer": a.get("has_checkpointer", False),
+                "capabilities": a.get("capabilities", []),
+            }
+            for a in agents_info
+        ]
+    }
+
+
+# ── 智能体详情 ────────────────────────────────────────────
+
+@chat.get("/agent/{agent_id}")
+async def get_single_agent(agent_id: str, current_user: User = Depends(get_required_user)):
+    try:
+        if not (agent := agent_manager.get_agent(agent_id)):
+            raise HTTPException(status_code=404, detail=f"智能体 {agent_id} 不存在")
+        info = await agent.get_info()
+        return {
+            "id": info["id"],
+            "name": info.get("name", "Unknown"),
+            "description": info.get("description", ""),
+            "examples": info.get("examples", []),
+            "configurable_items": info.get("configurable_items", []),
+            "has_checkpointer": info.get("has_checkpointer", False),
+            "capabilities": info.get("capabilities", []),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"获取智能体 {agent_id} 信息出错: {e}")
+        raise HTTPException(status_code=500, detail=f"获取智能体信息出错: {str(e)}")
+
+
+# ── 聊天流式响应 (核心) ───────────────────────────────────
+
 @chat.post("/agent/{agent_name}")
 async def chat_agent(
-        agent_name: str,  # 智能体 ID,从 URL 路径获取
-        query: str = Body(...),  # 用户问题
-        config: dict = Body({}),  # 配置项:thread_id, model, agent_config_id
-        meta: dict = Body(None),  # 元数据:request_id, model_provider
-        image_content: str | None = Body(None),  # ← base64 图片
-        current_user: User | None = Depends(get_current_user),  # ← 允许匿名用户
-        # db: AsyncSession = Depends(get_db),  # ← 临时注释，跳过数据库
+    agent_name: str,
+    query: str = Body(...),
+    config: dict = Body({}),
+    meta: dict = Body(None),
+    image_content: str | None = Body(None),
+    current_user: User | None = Depends(get_required_user),
 ):
-    # TODO: 临时测试代码 - 创建匿名用户
-    from src.storage.postgres.models_business import User as UserModel
-    if current_user is None:
-        current_user = UserModel(
-            user_name="anonymous",
-            user_id="test-user",
-            phone_number="00000000000",
-            password_hash="dummy_hash"
-        )
-    
-    # 临时创建一个假的 db 对象（None），传递给 stream_agent_chat
-    db = None
-    logging.debug(f">>>进入[chat_agent]")
-    logging.info(f"[chat_agent] agent_id:{agent_name},query:{query},config:{config},meta:{meta}")
-    logging.info(f"[chat_agent] image_content present: {image_content is not None}")
-    if image_content:
-        logging.info(f"[chat_agent] image_content length: {len(image_content)}")
-        logging.info(f"[chat_agent] image_content preview: {image_content[:50]}...")
+    from src.services.chat_stream_service import stream_agent_chat
 
-
-    # request_id 用于链路追踪，如果前端没传则自动生成 UUID
     if "request_id" not in meta or not meta.get("request_id"):
-        meta["request_id"] = str(uuid.uuid4())#UUID是一个用于生成通用唯一识别码的库
+        meta["request_id"] = str(uuid.uuid4())
 
-    # meta更新,补充关键上下文信息，传递给后续的流式处理函数
-    meta.update(#丰富 meta 信息（用于日志和监控）
-        {
-            "query": query,
-            "agent_name": agent_name,
-            "thread_id": config.get("thread_id"),  # 线程ID,多轮对话历史管理
-            "server_model_name": config.get("model", agent_name),
-            "user_id": current_user.id,
-            "has_image": bool(image_content),
-        }
-    )
-    logging.info(f"[chat_agent] 更新后的meta:{meta}")
+    meta.update({
+        "query": query,
+        "agent_name": agent_name,
+        "thread_id": config.get("thread_id"),
+        "server_model_name": config.get("model", agent_name),
+        "user_id": current_user.id,
+        "has_image": bool(image_content),
+    })
 
-    # 返回流式响应，媒体类型为 application/json
-    """前端会收到多个 JSON 行（NDJSON 格式），每行一个 chunk"""
-    return StreamingResponse(#打字机效果
+    return StreamingResponse(
         stream_agent_chat(
             agent_name=agent_name,
             query=query,
@@ -69,7 +131,103 @@ async def chat_agent(
             meta=meta,
             image_content=image_content,
             current_user=current_user,
-            db=db,
+            db=None,
         ),
-        media_type="application/json", # ← 每行都是 JSON
+        media_type="application/json",
     )
+
+
+# ── 线程 CRUD ─────────────────────────────────────────────
+
+@chat.post("/thread", response_model=ThreadResponse)
+async def create_thread(
+    thread: ThreadCreate,
+    current_user: User = Depends(get_required_user),
+):
+    """创建新对话线程 (内存模式)"""
+    import uuid as _uuid
+    from datetime import datetime
+
+    now = datetime.now().isoformat()
+    return {
+        "id": str(_uuid.uuid4()),
+        "user_id": str(current_user.id),
+        "agent_id": thread.agent_id,
+        "title": thread.title or "新的对话",
+        "is_pinned": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+@chat.get("/threads", response_model=list[ThreadResponse])
+async def list_threads(
+    agent_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_required_user),
+):
+    """获取用户对话线程列表 (内存模式 — 返回空列表)"""
+    return []
+
+
+@chat.delete("/thread/{thread_id}")
+async def delete_thread(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    return {"message": "删除成功"}
+
+
+@chat.put("/thread/{thread_id}", response_model=ThreadResponse)
+async def update_thread(
+    thread_id: str,
+    thread_update: ThreadUpdate,
+    current_user: User = Depends(get_required_user),
+):
+    """更新对话线程"""
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    return {
+        "id": thread_id,
+        "user_id": str(current_user.id),
+        "agent_id": "",
+        "title": thread_update.title or "对话",
+        "is_pinned": thread_update.is_pinned if thread_update.is_pinned is not None else False,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+# ── 历史 & 状态 ───────────────────────────────────────────
+
+@chat.get("/agent/{agent_id}/history")
+async def get_agent_history(
+    agent_id: str,
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    """获取智能体历史消息 (内存模式 — 返回空列表)"""
+    return {"history": []}
+
+
+@chat.get("/agent/{agent_id}/state")
+async def get_agent_state(
+    agent_id: str,
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    """获取智能体当前状态"""
+    try:
+        from src.services.chat_stream_service import get_agent_state_view
+        return await get_agent_state_view(
+            agent_id=agent_id,
+            thread_id=thread_id,
+            current_user_id=str(current_user.id),
+            db=None,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"获取AgentState出错: {e}, {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"获取AgentState出错: {str(e)}")
