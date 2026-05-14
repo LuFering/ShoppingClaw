@@ -2,6 +2,8 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from src.models.product import Product
+
 
 class JdDeepSearchInput(BaseModel):
     """京东深度搜索工具的输入参数"""
@@ -21,6 +23,7 @@ class JdProductDetailInput(BaseModel):
     - fetch_description参数暂未实现（需要其他API）
     """
     sku_id: str = Field(..., description="商品SKU ID字符串，如'100012345678'。工具内部会直接传给API（官方API要求sku_id=String类型）")
+    existing_product: Optional[Product] = Field(default=None, description="已有的轻量商品快照；如果提供，工具会在其基础上增量补全字段")
     fetch_specs: bool = Field(default=True, description="是否获取规格参数和包装清单（wareQD,propCode）")
     fetch_description: bool = Field(default=False, description="是否获取图文详情（暂未实现，请使用移动端详情API）")
 
@@ -72,6 +75,7 @@ class JdProductMobileDetailInput(BaseModel):
     - 响应数据在result字段中，包含完整的HTML内容
     """
     sku_id: str = Field(..., description="商品SKU ID字符串，如'123456'。工具内部会自动转为整数123456传给API（官方API要求skuid=Number类型）")
+    existing_product: Optional[Product] = Field(default=None, description="已有的轻量商品快照；如果提供，工具会在其基础上增量补全字段")
     fields: Optional[List[str]] = Field(
         default=None,
         description="此参数无效，官方API不支持字段过滤，会返回所有字段（wareQD,propCode,wdis等）"
@@ -87,3 +91,10 @@ class JustoneProductSearchInput(BaseModel):
 class JustoneProductDetailInput(BaseModel):
     """JustoneAPI商品详情工具的输入参数"""
     sku_id: str = Field(..., description="商品SKU ID")
+    existing_product: Optional[Product] = Field(default=None, description="已有的轻量商品快照；如果提供，工具会在其基础上增量补全字段")
+
+
+class ProductFullDetailInput(BaseModel):
+    """整合详情工具输入参数"""
+    sku_id: str = Field(..., description="商品SKU ID")
+    existing_product: Optional[Product] = Field(default=None, description="已有的轻量商品快照；如果提供，工具会在其基础上增量补全字段")

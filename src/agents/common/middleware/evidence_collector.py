@@ -102,6 +102,7 @@ class EvidenceCollectorMiddleware(AgentMiddleware):
 
         # 汇总更新
         merged_update: dict = {}
+        merged_evidence = dict(state.get("evidence") or {})
 
         for last_tool_msg in tool_messages:
             # 智能提取 JSON
@@ -146,6 +147,7 @@ class EvidenceCollectorMiddleware(AgentMiddleware):
 
             # 写入更新
             merged_update[target_field] = validated_data
+            merged_evidence[target_field] = validated_data
             merged_update.setdefault("evidence_log", []).append({
                 "type": evidence_type,
                 "source": last_tool_msg.name or "unknown",
@@ -154,5 +156,8 @@ class EvidenceCollectorMiddleware(AgentMiddleware):
             })
 
             logging.info(f"[EvidenceCollector] 收集完成: {evidence_type} -> {target_field}")
+
+        if merged_evidence:
+            merged_update["evidence"] = merged_evidence
 
         return merged_update if merged_update else None

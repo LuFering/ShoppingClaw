@@ -13,7 +13,7 @@ from typing import List, Literal, Optional
 
 from typing_extensions import NotRequired, TypedDict
 
-from agents.common.model.product import Product
+from src.models.product import Product
 
 PlatformCode = Literal["jd", "taobao", "pdd"]
 

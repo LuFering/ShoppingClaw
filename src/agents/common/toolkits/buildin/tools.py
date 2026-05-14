@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 
 from langgraph.types import interrupt
 from sqlalchemy import select
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.agents.common.toolkits import tool

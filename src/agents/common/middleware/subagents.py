@@ -155,13 +155,22 @@ def _get_output_schema(subagent_type: str):
         return None
 
 
+def _build_evidence_view(state: dict) -> dict[str, Any]:
+    """构造统一证据视图，兼容顶层字段与嵌套 evidence 两种存储方式。"""
+    evidence = dict(state.get("evidence") or {})
+    for field_name in ("research_data", "analysis_report", "risk_audit", "user_profile"):
+        if evidence.get(field_name) is None and state.get(field_name) is not None:
+            evidence[field_name] = state.get(field_name)
+    return evidence
+
+
 def _enrich_task_description(subagent_type: str, description: str, state: dict) -> str:
     """将 MasterAgent state 中的前置证据注入到 SubAgent 的任务描述中。
 
     确保下游 Agent（analyst／critic）能接收到上游 Agent 已产出的数据，
     无需 MasterAgent 在 prompt 中手动传递。
     """
-    evidence = state.get("evidence", {})
+    evidence = _build_evidence_view(state)
 
     if subagent_type == "analyst":
         research_data = evidence.get("research_data")

@@ -116,3 +116,29 @@ class TestFilterTool:
         filtered = filter_products(products, keywords=["iPhone", "小米"])
         assert len(filtered) == 2
         assert all("iPhone" in p.title or "小米" in p.title for p in filtered)
+
+    def test_filter_handles_invalid_price_values(self):
+        """测试价格过滤对异常 price 值的兜底处理"""
+        products = [
+            Product.model_construct(
+                id="1",
+                title="异常价格商品",
+                price=None,
+                state=1,
+                platform="jd",
+                url="https://example.com/item/1",
+            ),
+            Product.model_construct(
+                id="2",
+                title="正常商品",
+                price=1999.0,
+                state=1,
+                platform="jd",
+                url="https://example.com/item/2",
+            ),
+        ]
+
+        filtered = filter_products(products, price_min=1000, price_max=2500)
+
+        assert len(filtered) == 1
+        assert filtered[0].id == "2"

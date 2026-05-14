@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from agents.common.model import Product
-from agents.common.model import ShoppingState
+from src.models.product import Product
+from src.models.state import ShoppingState
 from src.tools.compare import compare_products
 
 logger = logging.getLogger(__name__)
@@ -31,17 +31,6 @@ def recommendation_agent(state: ShoppingState) -> dict:
         return {
             "recommendations": [],
             "answer": f"抱歉，关于您搜索的“{query}”，未能找到符合要求的商品。\n\n【市场分析】\n{analysis_report}"
-        }
-
-    # 工程防御 2：只有一个商品时，直接推荐，不走对比算法
-    if len(products) == 1:
-        single_product = products[0]
-        logger.info("recommendation_agent.single_product")
-        return {
-            "recommendations": products,
-            "answer": f"为您找到了一款关于“{query}”的商品：\n\n"
-                      f"【推荐商品】 {single_product.title} (价格: ¥{single_product.price})\n\n"
-                      f"【市场分析】\n{analysis_report}"
         }
 
     try:

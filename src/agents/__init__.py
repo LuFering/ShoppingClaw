@@ -50,9 +50,35 @@ class AgentManager():
 
 agent_manager=AgentManager()
 
-# TODO: 临时手动注册 MasterAgent,待 auto_discover_agent 实现后移除
-from src.agents.master_agent.graph import MasterAgent
-agent_manager.register_agent(MasterAgent)
+def init_default_agents() -> None:
+    from src.agents.master_agent.graph import MasterAgent
 
-agent_manager.init_all_agents()
-__all__=["agent_manager"]
+    if "MasterAgent" not in agent_manager._classes:
+        agent_manager.register_agent(MasterAgent)
+
+    if "MasterAgent" not in agent_manager._instance:
+        agent_manager.init_all_agents()
+
+
+def search_agent(state):
+    from src.agents.search_agent import search_agent as _fn
+
+    return _fn(state)
+
+
+def analysis_agent(state):
+    from src.agents.analysis_agent import analysis_agent as _fn
+
+    return _fn(state)
+
+
+def recommendation_agent(state):
+    from src.agents.recommendation_agent import recommendation_agent as _fn
+
+    return _fn(state)
+
+
+init_default_agents()
+
+
+__all__ = ["agent_manager", "init_default_agents", "search_agent", "analysis_agent", "recommendation_agent"]

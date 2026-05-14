@@ -15,9 +15,22 @@ def _ensure_tools_loaded():
     if _tools_loaded:
         return
     import src.agents.common.toolkits.buildin.tools  # 注册内置工具
-    import src.agents.common.toolkits.research       # 注册爬虫工具
-    import src.agents.common.toolkits.analyst        # 注册分析工具
-    import src.agents.common.toolkits.critic.tools   # 注册审查工具
+    try:
+        import src.agents.common.toolkits.shopping  # 注册购物工具
+    except Exception:
+        pass
+    try:
+        import src.agents.common.toolkits.research  # 注册爬虫工具
+    except Exception:
+        pass
+    try:
+        import src.agents.common.toolkits.analyst  # 注册分析工具
+    except Exception:
+        pass
+    try:
+        import src.agents.common.toolkits.critic.tools  # 注册审查工具
+    except Exception:
+        pass
     _tools_loaded = True
 
 def get_all_tool_instances() -> list:

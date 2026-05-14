@@ -10,8 +10,10 @@ from typing import Dict, Any, List, Optional
 from urllib.parse import quote
 from pydantic import BaseModel, Field
 
-# 京东SDK静态导入
-import jd.api
+try:
+    from src import jd  # type: ignore
+except Exception:
+    jd = None  # type: ignore[assignment]
 from src.agents.common.toolkits.registry import tool
 from src.agents.common.toolkits.research.schemas import (
     JdDeepSearchInput,
@@ -22,7 +24,9 @@ from src.agents.common.toolkits.research.schemas import (
     JdProductMobileDetailInput,
     JustoneProductSearchInput,
     JustoneProductDetailInput,
+    ProductFullDetailInput,
 )
+from src.models.product import Product
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +55,156 @@ def _parse_sales(sales_str: Optional[str]) -> Optional[int]:
     return None
 
 
+def _safe_price(value: Any) -> float:
+    try:
+        price = float(value)
+    except Exception:
+        return 1.0
+    return price if price > 0 else 1.0
+
+
+def _safe_url(url: Any, *, fallback: str) -> str:
+    s = str(url or "").strip()
+    if s.lower().startswith("http"):
+        return s
+    return fallback
+
+
+def _safe_image_url(url: Any) -> str | None:
+    s = str(url or "").strip()
+    if s.lower().startswith("http"):
+        return s
+    return None
+
+
+def _build_seed_product(sku_id: str, existing_product: Product | None = None) -> Product:
+    if existing_product is not None:
+        return existing_product
+    return Product(
+        id=f"jd_{sku_id}",
+        title=f"JD商品{sku_id}",
+        price=1.0,
+        state=1,
+        platform="jd",
+        url=f"https://item.jd.com/{sku_id}.html",
+    )
+
+
+def _merge_dict_value(base: dict | None, extra: dict | None) -> dict | None:
+    merged = dict(base or {})
+    for key, value in (extra or {}).items():
+        if value in (None, "", [], {}):
+            continue
+        merged[key] = value
+    return merged or None
+
+
+def _enrich_product(
+    sku_id: str,
+    existing_product: Product | None = None,
+    *,
+    title: Any = None,
+    price: Any = None,
+    url: Any = None,
+    image_url: Any = None,
+    state: Any = None,
+    shop_name: Any = None,
+    brand: Any = None,
+    category: Any = None,
+    rating: Any = None,
+    sales_count: Any = None,
+    specs: dict | None = None,
+    after_sales_info: dict | None = None,
+    delivery_info: dict | None = None,
+    increment_service: dict | None = None,
+    promo_info: dict | None = None,
+    rank_info: dict | None = None,
+    good_comment_keywords: list | None = None,
+    installment_info: Any = None,
+    promo_tags: Any = None,
+) -> Product:
+    base = _build_seed_product(sku_id, existing_product)
+    updates: dict[str, Any] = {}
+
+    title_str = str(title or "").strip()
+    if title_str and (not base.title or base.title.startswith("JD商品")):
+        updates["title"] = title_str
+
+    price_num = _safe_price(price) if price is not None else None
+    if price_num is not None and (base.price <= 1.0 or price_num != base.price):
+        updates["price"] = price_num
+
+    if state is not None:
+        try:
+            updates["state"] = int(state)
+        except Exception:
+            pass
+
+    safe_url = _safe_url(url, fallback=str(base.url))
+    if safe_url != str(base.url):
+        updates["url"] = safe_url
+
+    safe_img = _safe_image_url(image_url)
+    if safe_img:
+        updates["image_url"] = safe_img
+
+    for field_name, value in {
+        "shop_name": shop_name,
+        "brand": brand,
+        "category": category,
+        "installment_info": installment_info,
+        "promo_tags": promo_tags,
+    }.items():
+        value_str = str(value or "").strip()
+        if value_str:
+            updates[field_name] = value_str
+
+    if rating is not None:
+        try:
+            rating_val = float(rating)
+            if 0 <= rating_val <= 5:
+                updates["rating"] = rating_val
+        except Exception:
+            pass
+
+    if sales_count is not None:
+        try:
+            updates["sales_count"] = int(sales_count)
+        except Exception:
+            pass
+
+    merged_specs = _merge_dict_value(base.specs, specs)
+    if merged_specs is not None:
+        updates["specs"] = merged_specs
+        updates["key_specs"] = merged_specs
+
+    for field_name, extra in {
+        "after_sales_info": after_sales_info,
+        "delivery_info": delivery_info,
+        "increment_service": increment_service,
+        "promo_info": promo_info,
+        "rank_info": rank_info,
+    }.items():
+        merged = _merge_dict_value(getattr(base, field_name), extra)
+        if merged is not None:
+            updates[field_name] = merged
+
+    if good_comment_keywords:
+        current = list(base.good_comment_keywords or [])
+        for item in good_comment_keywords:
+            if item not in current:
+                current.append(item)
+        if current:
+            updates["good_comment_keywords"] = current
+
+    return base.model_copy(update=updates)
+
+
 def init_jd_sdk():
     """初始化京东SDK认证"""
+    if jd is None:
+        logger.warning("[JD API] 京东SDK不可用")
+        return False, None
     # 从环境变量读取配置
     app_key = os.getenv("JD_APP_KEY")
     app_secret = os.getenv("JD_APP_SECRET")
@@ -99,17 +251,11 @@ def jd_deep_search(
     try:
         success, access_token = init_jd_sdk()
         if not success:
-            return {
-                "keyword": keyword,
-                "total_products": 0,
-                "pages_crawled": 0,
-                "products": [],
-                "error": "未配置JD_APP_KEY或JD_APP_SECRET",
-            }
+            return {"products": [], "error": "京东官方API未配置或不可用"}
         
-        from jd.api.rest.SearchWareRequest import SearchWareRequest
+        from src.jd.api.rest.SearchWareRequest import SearchWareRequest
         
-        all_products = []
+        products: list[Product] = []
         
         for page in range(1, max_pages + 1):
             # 创建搜索请求
@@ -128,37 +274,40 @@ def jd_deep_search(
                 paragraph = res.get('Paragraph', [])
                 
                 from urllib.parse import unquote
-                
+
                 for item in paragraph:
-                    content = item.get('Content', {})
-                    product = {
-                        "sku_id": str(item.get('wareid', '')),
-                        "title": unquote(content.get('warename', '')),
-                        "image_url": content.get('imageurl', ''),
-                        "good_rate": item.get('good', ''),
-                        "shop_id": item.get('shop_id', ''),
-                    }
-                    all_products.append(product)
-            
-            logger.info(f"[Tool] 第{page}页获取 {len(all_products)} 个商品")
-        
-        return {
-            "keyword": keyword,
-            "total_products": len(all_products),
-            "pages_crawled": page,
-            "products": all_products,
-            "error": None,
-        }
+                    content = item.get("Content", {})
+                    sku = str(item.get("wareid") or "").strip()
+                    title = str(unquote(content.get("warename") or "")).strip()
+                    if not sku or not title:
+                        continue
+                    raw_img = str(content.get("imageurl") or "").strip()
+                    if raw_img.lower().startswith("http"):
+                        image_url = raw_img
+                    elif raw_img:
+                        image_url = f"https://img10.360buyimg.com/n1/{raw_img}"
+                    else:
+                        image_url = None
+
+                    products.append(
+                        Product(
+                            id=f"jd_{sku}",
+                            title=title,
+                            price=1.0,
+                            state=1,
+                            platform="jd",
+                            url=f"https://item.jd.com/{sku}.html",
+                            image_url=_safe_image_url(image_url),
+                        )
+                    )
+
+            logger.info(f"[Tool] 第{page}页累计 {len(products)} 个商品")
+
+        return {"products": products, "error": None}
     
     except Exception as e:
         logger.error(f"[Tool] 京东API搜索失败: {e}")
-        return {
-            "keyword": keyword,
-            "total_products": 0,
-            "pages_crawled": 0,
-            "products": [],
-            "error": str(e),
-        }
+        return {"products": [], "error": str(e)}
 
 
 # ==================== 工具2: jd_product_detail - 商品详情 ====================
@@ -172,6 +321,7 @@ def jd_deep_search(
 )
 def jd_product_detail(
     sku_id: str,
+    existing_product: Product | None = None,
     fetch_specs: bool = True,
     fetch_description: bool = False,
 ) -> Dict[str, Any]:
@@ -191,9 +341,9 @@ def jd_product_detail(
     try:
         success, access_token = init_jd_sdk()
         if not success:
-            return {"sku_id": sku_id, "error": "未配置JD_APP_KEY或JD_APP_SECRET"}
+            return {"products": [], "error": "京东官方API未配置或不可用"}
         
-        from jd.api.rest.WareProductbigfieldGetRequest import WareProductbigfieldGetRequest
+        from src.jd.api.rest.WareProductbigfieldGetRequest import WareProductbigfieldGetRequest
         
         request = WareProductbigfieldGetRequest('https://api.jd.com/routerjson', 80)
         request.sku_id = sku_id
@@ -210,24 +360,32 @@ def jd_product_detail(
         response = request.getResponse()  # 无需access_token
         
         # 解析返回数据
-        if response and 'jingdong_ware_productbigfield_get_responce' in response:
-            res = response['jingdong_ware_productbigfield_get_responce']
-            
-            # 提取各个字段的数据
-            result = {
-                "sku_id": sku_id,
-                "wareQD": res.get('wareQD', ''),  # 包装清单
-                "propCode": res.get('propCode', ''),  # 规格参数
-                "wdis": res.get('wdis', ''),  # 商品介绍
-                "error": None,
-            }
-            return result
-        
-        return {"sku_id": sku_id, "error": "API返回数据格式异常"}
+        if response and "jingdong_ware_productbigfield_get_responce" in response:
+            res = response["jingdong_ware_productbigfield_get_responce"]
+
+            specs: dict[str, str] = {}
+            ware_qd = res.get("wareQD")
+            prop_code = res.get("propCode")
+            wdis = res.get("wdis")
+            if ware_qd:
+                specs["wareQD"] = str(ware_qd)
+            if prop_code:
+                specs["propCode"] = str(prop_code)
+            if wdis:
+                specs["wdis"] = str(wdis)
+
+            p = _enrich_product(
+                sku_id,
+                existing_product,
+                specs=specs,
+            )
+            return {"products": [p], "error": None}
+
+        return {"products": [], "error": "京东官方API返回数据格式异常"}
     
     except Exception as e:
         logger.error(f"[Tool] 京东API商品详情失败: {e}")
-        return {"sku_id": sku_id, "error": str(e)}
+        return {"products": [], "error": str(e)}
 
 
 # ==================== 工具3: jd_shop_reliability - 店铺可靠性 ====================
@@ -254,12 +412,9 @@ def jd_shop_reliability(
         包含店铺可靠性评估和错误状态的字典
     """
     logger.info(f"[Tool] 京东API店铺评估: {shop_name}")
-    
-    return {
-        "shop_name": shop_name,
-        "shop_id": shop_id,
-        "error": "API暂未实现",
-    }
+
+    _ = shop_id
+    return {"products": [], "error": "京东店铺评估暂未实现"}
 
 
 # ==================== 工具5: jd_product_images - 商品图片 ====================
@@ -288,9 +443,9 @@ def jd_product_images(
     try:
         success, access_token = init_jd_sdk()
         if not success:
-            return {"sku_ids": sku_ids, "error": "未配置JD_APP_KEY或JD_APP_SECRET"}
+            return {"products": [], "error": "京东官方API未配置或不可用"}
         
-        from jd.api.rest.WareProductimageGetRequest import WareProductimageGetRequest
+        from src.jd.api.rest.WareProductimageGetRequest import WareProductimageGetRequest
         
         request = WareProductimageGetRequest('https://api.jd.com/routerjson', 80)
         # 将字符串列表转为整数列表
@@ -303,8 +458,7 @@ def jd_product_images(
             res = response['jingdong_ware_productimage_get_responce']
             image_path_list = res.get('image_path_list', [])
             
-            # 构建结果字典
-            result = {}
+            results: dict[str, dict[str, Any]] = {}
             for item in image_path_list:
                 sku_id_str = str(item.get('sku_id', ''))
                 images = item.get('image_list', [])
@@ -319,23 +473,33 @@ def jd_product_images(
                         "image_id": img.get('id', 0),
                     })
                 
-                result[sku_id_str] = {
+                results[sku_id_str] = {
                     "total_images": len(image_info),
                     "primary_image": next((img["url"] for img in image_info if img["is_primary"]), None),
                     "images": image_info,
                 }
-            
-            return {
-                "sku_ids": sku_ids,
-                "results": result,
-                "error": None,
-            }
-        
-        return {"sku_ids": sku_ids, "error": "API返回数据格式异常"}
+
+            products: list[Product] = []
+            for sku in sku_ids:
+                primary = (results.get(str(sku)) or {}).get("primary_image")
+                p = Product(
+                    id=f"jd_{sku}",
+                    title=f"JD商品{sku}",
+                    price=1.0,
+                    state=1,
+                    platform="jd",
+                    url=f"https://item.jd.com/{sku}.html",
+                    image_url=_safe_image_url(primary),
+                )
+                products.append(p)
+
+            return {"products": products, "error": None}
+
+        return {"products": [], "error": "京东官方API返回数据格式异常"}
     
     except Exception as e:
         logger.error(f"[Tool] 京东API商品图片查询失败: {e}")
-        return {"sku_ids": sku_ids, "error": str(e)}
+        return {"products": [], "error": str(e)}
 
 
 # ==================== 工具6: jd_product_basic - 商品基础信息 ====================
@@ -367,9 +531,9 @@ def jd_product_basic(
     try:
         success, access_token = init_jd_sdk()
         if not success:
-            return {"sku_ids": sku_ids, "error": "未配置JD_APP_KEY或JD_APP_SECRET"}
+            return {"products": [], "error": "京东官方API未配置或不可用"}
         
-        from jd.api.rest.NewWareBaseproductGetRequest import NewWareBaseproductGetRequest
+        from src.jd.api.rest.NewWareBaseproductGetRequest import NewWareBaseproductGetRequest
         
         request = NewWareBaseproductGetRequest('https://api.jd.com/routerjson', 80)
         # 将字符串列表转为整数列表（官方API要求ids=Number[]类型）
@@ -388,27 +552,43 @@ def jd_product_basic(
             res = response['jingdong_new_ware_baseproduct_get_responce']
             product_list = res.get('listproductbase_result', [])
             
-            # 构建结果字典
-            result = {}
+            results: dict[str, dict[str, Any]] = {}
             for product in product_list:
                 sku_id_str = str(product.get('skuId', ''))
-                result[sku_id_str] = {
+                results[sku_id_str] = {
                     "name": product.get('name', ''),  # 注意：字段名是name不是pname
                     "is_delete": product.get('isDelete', ''),  # 1=上架, 0=下架
                     "url": product.get('url', ''),
                 }
-            
-            return {
-                "sku_ids": sku_ids,
-                "results": result,
-                "error": None,
-            }
-        
-        return {"sku_ids": sku_ids, "error": "API返回数据格式异常"}
+
+            products: list[Product] = []
+            for sku in sku_ids:
+                r = results.get(str(sku)) or {}
+                name = str(r.get("name") or "").strip() or f"JD商品{sku}"
+                is_delete = r.get("is_delete")
+                try:
+                    state = 1 if int(is_delete) == 1 else 0
+                except Exception:
+                    state = 1
+                url_val = _safe_url(r.get("url"), fallback=f"https://item.jd.com/{sku}.html")
+                products.append(
+                    Product(
+                        id=f"jd_{sku}",
+                        title=name,
+                        price=1.0,
+                        state=state,
+                        platform="jd",
+                        url=url_val,
+                    )
+                )
+
+            return {"products": products, "error": None}
+
+        return {"products": [], "error": "京东官方API返回数据格式异常"}
     
     except Exception as e:
         logger.error(f"[Tool] 京东API商品基础信息查询失败: {e}")
-        return {"sku_ids": sku_ids, "error": str(e)}
+        return {"products": [], "error": str(e)}
 
 
 # ==================== 工具7: jd_product_mobile_detail - 移动端详情 ====================
@@ -422,6 +602,7 @@ def jd_product_basic(
 )
 def jd_product_mobile_detail(
     sku_id: str,
+    existing_product: Product | None = None,
     fields: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
@@ -439,9 +620,9 @@ def jd_product_mobile_detail(
     try:
         success, access_token = init_jd_sdk()
         if not success:
-            return {"sku_id": sku_id, "error": "未配置JD_APP_KEY或JD_APP_SECRET"}
+            return {"products": [], "error": "京东官方API未配置或不可用"}
         
-        from jd.api.rest.NewWareMobilebigfieldGetRequest import NewWareMobilebigfieldGetRequest
+        from src.jd.api.rest.NewWareMobilebigfieldGetRequest import NewWareMobilebigfieldGetRequest
         
         request = NewWareMobilebigfieldGetRequest('https://api.jd.com/routerjson', 80)
         request.skuid = int(sku_id)  # 注意：参数名是skuid，类型是Number
@@ -458,19 +639,19 @@ def jd_product_mobile_detail(
         if response and 'jingdong_new_ware_mobilebigfield_get_responce' in response:
             res = response['jingdong_new_ware_mobilebigfield_get_responce']
             html_content = res.get('result', '')
-            
-            return {
-                "sku_id": sku_id,
-                "html_content": html_content,
-                "content_length": len(html_content),
-                "error": None,
-            }
-        
-        return {"sku_id": sku_id, "error": "API返回数据格式异常"}
+
+            p = _enrich_product(
+                sku_id,
+                existing_product,
+                specs={"mobile_html": str(html_content or "")},
+            )
+            return {"products": [p], "error": None}
+
+        return {"products": [], "error": "京东官方API返回数据格式异常"}
     
     except Exception as e:
         logger.error(f"[Tool] 京东API移动端商品详情失败: {e}")
-        return {"sku_id": sku_id, "error": str(e)}
+        return {"products": [], "error": str(e)}
 
 
 # ==================== 工具8: search_products - 整合搜索（官方+Justone） ====================
@@ -507,13 +688,14 @@ def search_products(
     """
     logger.info(f"[Tool] 整合搜索: {keyword} | 页码: {page}")
     
-    products = []
+    products: list[Product] = []
+    errors: list[str] = []
     
-    # 1. 调用官方API获取基础数据（好评率、店铺ID）
+    # 1. 优先用官方API获取基础数据（可选依赖：jd SDK）
     try:
         success, access_token = init_jd_sdk()
         if success:
-            from jd.api.rest.SearchWareRequest import SearchWareRequest
+            from src.jd.api.rest.SearchWareRequest import SearchWareRequest
             
             request = SearchWareRequest('https://api.jd.com/routerjson', 80)
             request.key = quote(keyword)
@@ -527,20 +709,33 @@ def search_products(
                 
                 for item in paragraph:
                     content = item.get('Content', {})
-                    products.append({
-                        "id": f"jd_{item.get('wareid')}",  # 符合Product.id格式
-                        "title": content.get('warename', ''),
-                        "image_url": f"https://img10.360buyimg.com/n1/{content.get('imageurl', '')}",
-                        "good_rate": item.get('good'),  # 额外字段
-                        "shop_id": item.get('shop_id'),
-                        "category_id": item.get('catid'),
-                        "platform": "jd"
-                    })
+                    sku = str(item.get("wareid", "")).strip()
+                    title = str(content.get("warename", "")).strip()
+                    if not sku or not title:
+                        continue
+                    image_path = str(content.get("imageurl", "")).strip()
+                    image_url = f"https://img10.360buyimg.com/n1/{image_path}" if image_path else None
+                    products.append(
+                        Product(
+                            id=f"jd_{sku}",
+                            title=title,
+                            price=1.0,
+                            state=1,
+                            platform="jd",
+                            url=f"https://item.jd.com/{sku}.html",
+                            image_url=image_url,
+                        )
+                    )
+            else:
+                errors.append("京东官方API返回为空")
+        else:
+            errors.append("京东官方API未配置或不可用")
     except Exception as e:
         logger.warning(f"[Tool] 官方API搜索失败: {e}")
+        errors.append(f"京东官方API异常: {e}")
     
-    # 2. 如果需要价格，调用JustoneAPI补充数据
-    if need_price and JUSTONE_API_KEY and len(products) > 0:
+    # 2. 用 JustoneAPI 补齐价格/销量/店铺等（如果官方API不可用，这一步也可以单独产出候选集）
+    if need_price and JUSTONE_API_KEY:
         try:
             url = f"{JUSTONE_BASE_URL}/api/jd/search-item-list/v1"
             params = {
@@ -552,34 +747,74 @@ def search_products(
             response = requests.get(url, params=params, timeout=10)
             result = response.json()
             
-            if result.get('code') == 0:
-                justone_products = result.get('data', {}).get('products', [])
-                
-                # 按ID匹配，合并数据
-                justone_map = {str(p['id']): p for p in justone_products}
-                
-                for product in products:
-                    sku_id = product['id'].replace('jd_', '')  # 去掉前缀匹配
-                    if sku_id in justone_map:
-                        j = justone_map[sku_id]
-                        
-                        # 映射到Product模型字段
-                        product['price'] = float(j.get('price', 0)) if j.get('price') else None
-                        product['shop_name'] = j.get('shopName')
-                        product['sales_count'] = _parse_sales(j.get('sales'))  # 转换为int
-                        product['good_comment_keywords'] = j.get('gcw', [])
-                        product['installment_info'] = j.get('foi')
-                        product['promo_tags'] = j.get('promoTag')
-                        product['url'] = j.get('landUrl')
+            if result.get("code") == 0:
+                justone_products = result.get("data", {}).get("products", [])
+                if justone_products is None:
+                    justone_products = []
+
+                justone_map = {str(p.get("id")): p for p in justone_products if isinstance(p, dict) and p.get("id")}
+
+                if products:
+                    for idx, p in enumerate(list(products)):
+                        sku_id = p.id.replace("jd_", "")
+                        j = justone_map.get(sku_id)
+                        if not j:
+                            continue
+                        try:
+                            price = float(j.get("price")) if j.get("price") else 1.0
+                        except Exception:
+                            price = 1.0
+                        products[idx] = p.model_copy(
+                            update={
+                                "price": price if price > 0 else 1.0,
+                                "shop_name": j.get("shopName"),
+                                "sales_count": _parse_sales(j.get("sales")),
+                                "good_comment_keywords": j.get("gcw", []),
+                                "installment_info": j.get("foi"),
+                                "promo_tags": j.get("promoTag"),
+                                "url": j.get("landUrl") or p.url,
+                            }
+                        )
+                else:
+                    for j in justone_products:
+                        sku = str(j.get("id", "")).strip()
+                        title = str(j.get("title", "") or j.get("name", "")).strip()
+                        if not sku or not title:
+                            continue
+                        try:
+                            price = float(j.get("price")) if j.get("price") else 1.0
+                        except Exception:
+                            price = 1.0
+                        url_val = j.get("landUrl") or f"https://item.jd.com/{sku}.html"
+                        image_url = j.get("imgUrl") or j.get("image") or None
+                        products.append(
+                            Product(
+                                id=f"jd_{sku}",
+                                title=title,
+                                price=price if price > 0 else 1.0,
+                                state=1,
+                                platform="jd",
+                                url=url_val,
+                                image_url=image_url,
+                                shop_name=j.get("shopName"),
+                                sales_count=_parse_sales(j.get("sales")),
+                                good_comment_keywords=j.get("gcw", []),
+                                installment_info=j.get("foi"),
+                                promo_tags=j.get("promoTag"),
+                            )
+                        )
+            else:
+                errors.append("JustoneAPI返回失败")
                         
         except Exception as e:
             logger.warning(f"[Tool] JustoneAPI搜索失败: {e}")
+            errors.append(f"JustoneAPI异常: {e}")
+    elif need_price and not JUSTONE_API_KEY:
+        errors.append("JustoneAPI未配置")
     
-    return {
-        "status": "success",
-        "count": len(products),
-        "products": products  # 已是Product兼容结构
-    }
+    if not products and errors:
+        return {"products": [], "error": "; ".join(errors)}
+    return {"products": products, "error": None}
 
 
 # ==================== 工具9: get_product_full_detail - 完整详情（官方+Justone） ====================
@@ -590,7 +825,10 @@ def search_products(
     display_name="商品完整详情（官方+Justone整合）",
     icon="📊",
 )
-def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
+def get_product_full_detail(
+    sku_id: str,
+    existing_product: Product | None = None,
+) -> Dict[str, Any]:
     """
     获取商品完整详情，**整合官方所有可用API + Justone详情API**。
     
@@ -613,11 +851,9 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
     - promo_info, rank_info, key_specs
     """
     logger.info(f"[Tool] 获取商品完整详情: {sku_id}")
-    
+    errors: list[str] = []
     # 初始化Product兼容结构
-    detail = {
-        "id": f"jd_{sku_id}",
-        "platform": "jd",
+    detail: dict[str, Any] = {
         "title": None,
         "price": None,
         "url": None,
@@ -625,19 +861,19 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
         "shop_name": None,
         "brand": None,
         "category": None,
-        "key_specs": {},
+        "specs": {},
         "after_sales_info": {},
         "delivery_info": {},
         "increment_service": {},
         "promo_info": {},
-        "rank_info": {}
+        "rank_info": {},
     }
     
     # 1. 基础信息 + 规格参数（官方API）
     try:
         success, access_token = init_jd_sdk()
         if success:
-            from jd.api.rest.NewWareBaseproductGetRequest import NewWareBaseproductGetRequest
+            from src.jd.api.rest.NewWareBaseproductGetRequest import NewWareBaseproductGetRequest
             
             request = NewWareBaseproductGetRequest('https://api.jd.com/routerjson', 80)
             request.ids = [int(sku_id)]
@@ -657,18 +893,21 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
                     # 提取关键规格
                     spec_info = product.get('specInfo', {})
                     if isinstance(spec_info, dict):
-                        detail['key_specs'] = {
+                        detail['specs'] = {
                             k: v for k, v in spec_info.items() 
                             if isinstance(v, str) and len(v) < 100  # 过滤长文本
                         }
+        else:
+            errors.append("京东官方API未配置或不可用")
     except Exception as e:
         logger.warning(f"[Tool] 官方API基础信息失败: {e}")
+        errors.append(f"京东官方API基础信息异常: {e}")
     
     # 2. 商品图片（官方API）
     try:
         success, access_token = init_jd_sdk()
         if success:
-            from jd.api.rest.WareProductimageGetRequest import WareProductimageGetRequest
+            from src.jd.api.rest.WareProductimageGetRequest import WareProductimageGetRequest
             
             request = WareProductimageGetRequest('https://api.jd.com/routerjson', 80)
             request.skuId = int(sku_id)
@@ -680,8 +919,11 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
                 images = res.get('imageList', [])
                 if images:
                     detail['image_url'] = images[0].get('url')  # 主图
+        else:
+            errors.append("京东官方API未配置或不可用")
     except Exception as e:
         logger.warning(f"[Tool] 官方API图片失败: {e}")
+        errors.append(f"京东官方API图片异常: {e}")
     
     # 3. 价格（JustoneAPI）
     if JUSTONE_API_KEY:
@@ -701,6 +943,9 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
                     detail['price'] = price_data[0].get('price')
         except Exception as e:
             logger.warning(f"[Tool] JustoneAPI价格失败: {e}")
+            errors.append(f"JustoneAPI价格异常: {e}")
+    else:
+        errors.append("JustoneAPI未配置")
     
     # 4. 服务保障 + 促销信息（Justone详情API）
     if JUSTONE_API_KEY:
@@ -790,14 +1035,46 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
                 detail['shop_name'] = stock.get('D', {}).get('shopName')
                 detail['url'] = f"https://item.jd.com/{sku_id}.html"
                 
-                # 补充店铺名称和URL
-                detail['shop_name'] = stock.get('D', {}).get('shopName')
-                detail['url'] = f"https://item.jd.com/{sku_id}.html"
-                
         except Exception as e:
             logger.warning(f"[Tool] JustoneAPI详情失败: {e}")
+            errors.append(f"JustoneAPI详情异常: {e}")
     
-    return detail
+    has_data = any(
+        [
+            detail.get("title"),
+            detail.get("price"),
+            detail.get("image_url"),
+            detail.get("shop_name"),
+            detail.get("brand"),
+            detail.get("category"),
+            bool(detail.get("specs")),
+            bool(detail.get("after_sales_info")),
+            bool(detail.get("promo_info")),
+            bool(detail.get("rank_info")),
+        ]
+    )
+    if not has_data:
+        return {"products": [], "error": "; ".join(errors) if errors else "详情获取失败"}
+
+    p = _enrich_product(
+        sku_id,
+        existing_product,
+        title=detail.get("title"),
+        price=detail.get("price"),
+        url=detail.get("url"),
+        image_url=detail.get("image_url"),
+        shop_name=detail.get("shop_name"),
+        brand=detail.get("brand"),
+        category=detail.get("category"),
+        specs=detail.get("specs") or {},
+        after_sales_info=detail.get("after_sales_info") or None,
+        delivery_info=detail.get("delivery_info") or None,
+        increment_service=detail.get("increment_service") or None,
+        promo_info=detail.get("promo_info") or None,
+        rank_info=detail.get("rank_info") or None,
+    )
+
+    return {"products": [p], "error": None}
 
 
 # ==================== 工具10: get_products_specs - 批量规格对比 ====================
@@ -820,17 +1097,15 @@ def get_products_specs_batch(sku_ids: List[str]) -> Dict[str, Any]:
     """
     logger.info(f"[Tool] 批量获取规格: {len(sku_ids)} 个SKU")
     
-    specs_data = []
+    products: list[Product] = []
+    errors: list[str] = []
     
     try:
         success, access_token = init_jd_sdk()
         if not success:
-            return {
-                "status": "error",
-                "message": "未配置JD_APP_KEY或JD_APP_SECRET"
-            }
+            return {"products": [], "error": "京东官方API未配置或不可用"}
         
-        from jd.api.rest.NewWareBaseproductGetRequest import NewWareBaseproductGetRequest
+        from src.jd.api.rest.NewWareBaseproductGetRequest import NewWareBaseproductGetRequest
         
         request = NewWareBaseproductGetRequest('https://api.jd.com/routerjson', 80)
         request.ids = [int(id) for id in sku_ids]
@@ -843,24 +1118,36 @@ def get_products_specs_batch(sku_ids: List[str]) -> Dict[str, Any]:
             product_list = res.get('listproductbase_result', [])
             
             for product in product_list:
-                specs_data.append({
-                    "sku_id": product.get('skuId'),
-                    "brand": product.get('brandName'),
-                    "model": product.get('model'),
-                    "specs": product.get('specInfo', {})
-                })
+                sku = str(product.get("skuId") or "").strip()
+                if not sku:
+                    continue
+                spec_info = product.get("specInfo") or {}
+                specs = {}
+                if isinstance(spec_info, dict):
+                    for k, v in spec_info.items():
+                        if v is None:
+                            continue
+                        specs[str(k)] = str(v)
+                title = str(product.get("wareName") or product.get("name") or "").strip() or f"JD商品{sku}"
+                products.append(
+                    Product(
+                        id=f"jd_{sku}",
+                        title=title,
+                        price=1.0,
+                        state=1,
+                        platform="jd",
+                        url=f"https://item.jd.com/{sku}.html",
+                        brand=product.get("brandName"),
+                        specs=specs,
+                    )
+                )
     except Exception as e:
         logger.error(f"[Tool] 批量规格查询失败: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-    
-    return {
-        "status": "success",
-        "count": len(specs_data),
-        "products": specs_data
-    }
+        errors.append(str(e))
+
+    if not products and errors:
+        return {"products": [], "error": "; ".join(errors)}
+    return {"products": products, "error": None}
 
 
 # ==================== 工具8: justone_product_search - Justone商品搜索 ====================
@@ -890,12 +1177,7 @@ def justone_product_search(
     
     try:
         if not JUSTONE_API_KEY:
-            return {
-                "keyword": keyword,
-                "total_products": 0,
-                "products": [],
-                "error": "未配置JUSTONE_API_KEY",
-            }
+            return {"products": [], "error": "JustoneAPI未配置"}
         
         url = f"{JUSTONE_BASE_URL}/api/jd/search-item-list/v1"
         params = {
@@ -908,56 +1190,40 @@ def justone_product_search(
         result = response.json()
         
         if result.get('code') == 0:
-            products_data = result.get('data', {}).get('products', [])
-            
-            products = []
+            products_data = result.get("data", {}).get("products", []) or []
+
+            products: list[Product] = []
             for item in products_data:
-                # 安全转换价格
-                price_val = item.get('price')
-                try:
-                    price_float = float(price_val) if price_val else None
-                except (ValueError, TypeError):
-                    price_float = None
-                
-                product = {
-                    "sku_id": str(item.get('id', '')),  # 确保字符串类型
-                    "title": item.get('title'),
-                    "price": price_float,
-                    "image_url": f"https://img10.360buyimg.com/n1/{item.get('imageUrl', '')}",
-                    "shop_name": item.get('shopName'),
-                    "sales": item.get('sales'),
-                    "month_sales": item.get('monthSales'),
-                    "good_comment_keywords": item.get('gcw', []),
-                    "recommendation": item.get('gct'),
-                    "url": item.get('landUrl'),
-                    "promo_tags": item.get('promoTag'),
-                    "installment_info": item.get('foi'),
-                }
-                products.append(product)
-            
-            return {
-                "keyword": keyword,
-                "page": page,
-                "total_products": len(products),
-                "products": products,
-                "error": None,
-            }
+                sku = str(item.get("id") or "").strip()
+                title = str(item.get("title") or item.get("name") or "").strip()
+                if not sku or not title:
+                    continue
+                img = item.get("imgUrl") or item.get("imageUrl") or item.get("image") or None
+                url_val = _safe_url(item.get("landUrl"), fallback=f"https://item.jd.com/{sku}.html")
+                products.append(
+                    Product(
+                        id=f"jd_{sku}",
+                        title=title,
+                        price=_safe_price(item.get("price")),
+                        state=1,
+                        platform="jd",
+                        url=url_val,
+                        image_url=_safe_image_url(img),
+                        shop_name=item.get("shopName"),
+                        sales_count=_parse_sales(item.get("sales")),
+                        good_comment_keywords=item.get("gcw", []),
+                        promo_tags=item.get("promoTag"),
+                        installment_info=item.get("foi"),
+                    )
+                )
+
+            return {"products": products, "error": None}
         else:
-            return {
-                "keyword": keyword,
-                "total_products": 0,
-                "products": [],
-                "error": f"JustoneAPI返回错误: {result.get('message', '未知错误')}",
-            }
+            return {"products": [], "error": f"JustoneAPI返回错误: {result.get('message', '未知错误')}"}
             
     except Exception as e:
         logger.error(f"[Tool] JustoneAPI搜索失败: {e}")
-        return {
-            "keyword": keyword,
-            "total_products": 0,
-            "products": [],
-            "error": str(e),
-        }
+        return {"products": [], "error": str(e)}
 
 
 # ==================== 工具9: justone_product_full_detail - Justone商品完整详情 ====================
@@ -971,6 +1237,7 @@ def justone_product_search(
 )
 def justone_product_full_detail(
     sku_id: str,
+    existing_product: Product | None = None,
 ) -> Dict[str, Any]:
     """
     使用JustoneAPI获取商品完整详情，包括服务保障、促销信息、排行榜等。
@@ -985,7 +1252,7 @@ def justone_product_full_detail(
     
     try:
         if not JUSTONE_API_KEY:
-            return {"sku_id": sku_id, "error": "未配置JUSTONE_API_KEY"}
+            return {"products": [], "error": "JustoneAPI未配置"}
         
         url = f"{JUSTONE_BASE_URL}/api/jd/get-item-detail/v1"
         params = {
@@ -1053,49 +1320,32 @@ def justone_product_full_detail(
             
             # 安全访问stock.D嵌套字典
             stock_d = stock.get('D') or {}
-            
-            return {
-                "sku_id": sku_id,
-                "basic_info": {
-                    "sku_id": product.get('skuId'),
-                    "title": product.get('skuName'),
-                    "brand": product.get('brandName'),
-                    "model": product.get('model'),
-                    "category": product.get('productArea'),
-                    "shop_name": stock_d.get('shopName'),
-                    "is_self_operated": stock_d.get('type') == 0,
-                },
-                "after_sales_info": {
-                    "services": after_sales,
-                    "shop_name": stock_d.get('shopName'),
-                    "is_self_operated": stock_d.get('type') == 0
-                },
-                "delivery_info": {
-                    "services": delivery,
-                    "promise": stock.get('promiseResult'),
-                    "freight_info": stock.get('dcashDesc')
-                },
-                "increment_service": {
-                    "services": increment,
-                    "product_area": product.get('productArea'),
-                    "warranty": product.get('wserve')
-                },
-                "promo_info": {
-                    "promotions": promo_info,
-                    "has_gift": len(promo_info) > 0
-                },
-                "rank_info": {
-                    "rankings": rankings
-                },
-                "main_images": product.get('mainImages', []),
-                "error": None,
-            }
+
+            title = str(product.get("skuName") or "").strip()
+            if not title:
+                title = f"JD商品{sku_id}"
+            images = product.get("mainImages") or []
+            first_img = images[0] if isinstance(images, list) and images else None
+
+            p = _enrich_product(
+                sku_id,
+                existing_product,
+                title=title,
+                image_url=first_img,
+                shop_name=stock_d.get("shopName"),
+                brand=product.get("brandName"),
+                category=product.get("productArea"),
+                after_sales_info={"services": after_sales, "is_self_operated": stock_d.get("type") == 0},
+                delivery_info={"services": delivery, "promise": stock.get("promiseResult"), "freight_info": stock.get("dcashDesc")},
+                increment_service={"services": increment, "product_area": product.get("productArea"), "warranty": product.get("wserve")},
+                promo_info={"promotions": promo_info, "has_gift": len(promo_info) > 0},
+                rank_info={"rankings": rankings},
+            )
+
+            return {"products": [p], "error": None}
         else:
-            return {
-                "sku_id": sku_id,
-                "error": f"JustoneAPI返回错误: {result.get('message', '未知错误')}"
-            }
+            return {"products": [], "error": f"JustoneAPI返回错误: {result.get('message', '未知错误')}"}
             
     except Exception as e:
         logger.error(f"[Tool] JustoneAPI商品详情失败: {e}")
-        return {"sku_id": sku_id, "error": str(e)}
+        return {"products": [], "error": str(e)}

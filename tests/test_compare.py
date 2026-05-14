@@ -1,4 +1,4 @@
-from src.tools.compare import compare_products, ComparisonResult
+from src.tools.compare import compare_products, ComparisonResult, _generate_report
 from src.models.product import Product
 
 
@@ -78,3 +78,54 @@ class TestCompareTool:
         assert result.ranked_products[0].id == "1"
         assert result.ranked_products[1].id == "2"
         assert result.ranked_products[2].id == "3"
+
+    def test_generate_report_handles_invalid_price_display(self):
+        """测试报告生成对异常价格值的展示兜底"""
+        products = [
+            Product.model_construct(
+                id="1",
+                title="异常价格商品",
+                price="bad-price",
+                state=1,
+                platform="jd",
+                url="https://example.com/item/1",
+                rating=4.5,
+                sales_count=5000,
+            )
+        ]
+
+        report = _generate_report(products)
+
+        assert "异常价格商品" in report
+        assert "价格: ¥未知" in report
+
+    def test_compare_handles_invalid_numeric_fields(self):
+        """测试排序计算对异常数值字段的兜底处理"""
+        products = [
+            Product.model_construct(
+                id="1",
+                title="异常商品1",
+                price="bad-price",
+                state=1,
+                platform="jd",
+                url="https://example.com/item/1",
+                rating="bad-rating",
+                sales_count="bad-sales",
+            ),
+            Product.model_construct(
+                id="2",
+                title="正常商品",
+                price=4999.0,
+                state=1,
+                platform="taobao",
+                url="https://example.com/item/2",
+                rating=4.6,
+                sales_count=8000,
+            ),
+        ]
+
+        result = compare_products(products)
+
+        assert isinstance(result, ComparisonResult)
+        assert len(result.ranked_products) == 2
+        assert "商品对比报告" in result.report

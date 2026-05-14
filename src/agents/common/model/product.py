@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, HttpUrl
 
@@ -23,7 +23,7 @@ class Product(BaseModel):
     id: str = Field(description="商品唯一标识，建议格式：{platform}_{平台侧ID}")
     title: str = Field(description="商品标题，用于展示与检索摘要")
     price: float = Field(gt=0, description="当前价格（人民币元），必须为正数")
-    state: int = Field(description="商品状态（是否处在上架销售状态）")
+    state: int = Field(default=1, description="商品状态（是否处在上架销售状态）")
     platform: PlatformCode = Field(description="来源平台：jd / taobao / pdd")
     # url: str = Field(description="商品详情页链接")
 
@@ -38,6 +38,7 @@ class Product(BaseModel):
 
     delivery_address:Optional[str]=Field(default=None,description="发货地址")
     express_info: Optional[dict] = Field(default=None, description="物流信息（预计送达、运费说明）")
+    delivery_info: Optional[dict] = Field(default=None, description="兼容字段：与 express_info 同义，承载配送承诺、运费说明等")
     after_sales_info: Optional[dict] = Field(default=None, description="售后保障信息（7天无理由、价保、破损包退等）")
     increment_service: Optional[dict] = Field(default=None, description="增值服务（产地、质保、特色服务）")
     promo_info: Optional[dict] = Field(default=None, description="促销信息（赠品、满减、优惠券）")
@@ -49,7 +50,23 @@ class Product(BaseModel):
     # --- 业务字段（可选）：弱结构化属性 ---
     category: Optional[str] = Field(default=None, description="类目路径或名称")
     brand: Optional[str] = Field(default=None, description="品牌")
-    key_specs: Dict[str, str] = Field(
+    specs: Dict[str, str] = Field(
         default_factory=dict,
         description="规格参数键值对，适配不同品类",
     )
+
+    key_specs: Dict[str, str] = Field(
+        default_factory=dict,
+        description="兼容字段：与 specs 同义，后续会统一为 specs",
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.key_specs and not self.specs:
+            object.__setattr__(self, "specs", self.key_specs)
+        elif self.specs and not self.key_specs:
+            object.__setattr__(self, "key_specs", self.specs)
+
+        if self.delivery_info and not self.express_info:
+            object.__setattr__(self, "express_info", self.delivery_info)
+        elif self.express_info and not self.delivery_info:
+            object.__setattr__(self, "delivery_info", self.express_info)
