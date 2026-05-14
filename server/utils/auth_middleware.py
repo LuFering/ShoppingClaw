@@ -1,4 +1,4 @@
-"""认证中间件 — 基于 JSON 用户存储的轻量实现"""
+"""认证中间件 — PostgreSQL 版"""
 import re
 
 from fastapi import Depends, HTTPException, status
@@ -6,9 +6,11 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 
 from server.utils.auth_utils import AuthUtils
-from server.utils.user_store import get_user_by_id, User
+from src.repositories.user_repository import UserRepository
+from src.storage.postgres.models_business import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
+user_repo = UserRepository()
 
 PUBLIC_PATHS = [
     r"^/api/auth/token$",
@@ -43,7 +45,7 @@ async def get_current_user(token: str | None = Depends(oauth2_scheme)) -> User |
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = get_user_by_id(int(user_id))
+    user = await user_repo.get_by_id(int(user_id))
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

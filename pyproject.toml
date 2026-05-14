@@ -8,6 +8,7 @@ dependencies = [
     "asyncpg>=0.30.0",
     "aiosqlite>=0.20.0",
     "sqlalchemy[asyncio]>=2.0.0",
+    "psycopg2-binary>=2.9.9",
     "langchain>=1.2.0",
     "langchain-core >= 1.2.5",
     "colorlog>=6.9.0",
@@ -42,6 +43,7 @@ dependencies = [
     "pymupdf>=1.25.5",
     "python-dotenv>=1.1.0",
     "python-jose[cryptography]>=3.4.0",
+    "passlib[bcrypt]>=1.7.4",
     "python-multipart>=0.0.20",
     "pyyaml>=6.0.2",
     # "rapidocr-onnxruntime>=1.4.4",  # OCR识别，当前未使用 (~50MB)
@@ -53,6 +55,8 @@ dependencies = [
     "rich>=13.7.1",
     "typer>=0.16.0",
     "tabulate>=0.9.0",
+    "torch>=2.5.0,<2.6.0",
+    "transformers>=4.50.0",
     # "minio>=7.2.7",  # 对象存储，当前未使用 (~50MB)
     # "pymilvus>=2.5.8",  # 向量数据库，当前未使用 (~100MB)
     "Pillow>=10.5.0",
@@ -64,6 +68,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "arq>=0.26.3",
     "chardet>=5.0.0",
+    "chromadb>=0.5.0",
     "deepagents>=0.2.5",
     "json-repair>=0.54.0",
     # 以下重型依赖已注释，如需文档智能解析/RAG功能可取消注释
@@ -94,6 +99,14 @@ lint.select = [         # 选择的规则
 name = "tsinghua"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 # PyTorch CPU 索引已注释，如需 torch 可取消注释
 # [[tool.uv.index]]

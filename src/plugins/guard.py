@@ -33,7 +33,7 @@ PROMPT_TEMPLATE = """
 def load_keywords(file_path: str) -> list[str]:
     """Loads keywords from a file, one per line."""
     if not os.path.exists(file_path):
-        keywords = []
+        return []
     with open(file_path, encoding="utf-8") as f:
         keywords = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 

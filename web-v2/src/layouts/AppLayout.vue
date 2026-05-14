@@ -2,6 +2,7 @@
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Bot } from 'lucide-vue-next'
 import { useUserStore } from '@/stores/user'
+import UserMenuButton from '@/components/UserMenuButton.vue'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -43,6 +44,11 @@ const mainList = [
         </RouterLink>
       </div>
       <div class="fill"></div>
+      
+      <!-- 用户菜单（固定在底部） -->
+      <div class="user-menu-container">
+        <UserMenuButton />
+      </div>
     </div>
     <router-view v-slot="{ Component, route }" id="app-router-view">
       <keep-alive v-if="route.meta.keepAlive !== false">
@@ -98,6 +104,11 @@ div.header,
 
   .fill {
     flex-grow: 1;
+  }
+  
+  .user-menu-container {
+    padding: 8px;
+    margin-bottom: 8px;
   }
 
   .logo {

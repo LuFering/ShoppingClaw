@@ -9,6 +9,8 @@ def utc_now() -> dt.datetime:
     """返回当前 UTC 时间的 datetime 对象（带时区信息）"""
     return dt.datetime.now(UTC)
 
+def shanghai_now() -> dt.datetime:
+    return utc_now().astimezone(SHANGHAI_TZ)
 
 def utc_now_naive() -> dt.datetime:
     """返回当前 UTC 时间的 datetime 对象（不带时区信息）"""

@@ -8,16 +8,7 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      name: 'main',
-      component: BlankLayout,
-      children: [
-        {
-          path: '',
-          name: 'Home',
-          component: () => import('../views/HomeView.vue'),
-          meta: { keepAlive: true, requiresAuth: false }
-        }
-      ]
+      redirect: '/agent'
     },
     {
       path: '/login',
@@ -34,13 +25,13 @@ const router = createRouter({
           path: '',
           name: 'AgentComp',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: false }
         },
         {
           path: ':agent_id',
           name: 'AgentCompWithId',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: false }
         }
       ]
     },
@@ -66,14 +57,18 @@ router.beforeEach(async (to, from, next) => {
     }
   }
 
-  if (requiresAuth && !userStore.isLoggedIn) {
-    sessionStorage.setItem('redirect', to.fullPath)
-    next('/login')
-    return
-  }
+  // 移除强制登录拦截，改为按需触发
+  // if (requiresAuth && !userStore.isLoggedIn) {
+  //   sessionStorage.setItem('redirect', to.fullPath)
+  //   next('/login')
+  //   return
+  // }
 
   if (to.path === '/login' && userStore.isLoggedIn) {
-    next('/')
+    // 登录后跳转到之前尝试访问的页面或默认页面
+    const redirectPath = sessionStorage.getItem('redirect') || '/agent'
+    sessionStorage.removeItem('redirect')
+    next(redirectPath)
     return
   }
 

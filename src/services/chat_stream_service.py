@@ -3,7 +3,6 @@ import json
 import logging
 import traceback
 import uuid
-from datetime import datetime, UTC
 
 from langchain_core.messages import HumanMessage, AIMessageChunk, AIMessage
 from src.config import config as conf
@@ -13,40 +12,6 @@ from src.repositories.agent_config_repository import AgentConfigRepository
 from src.repositories.conversation_repository import ConversationRepository
 from src.storage.postgres.manager import pg_manager
 
-
-def _build_state_files(attachments: list[dict]) -> dict:
-    """将附件列表转换为 StateBackend 格式的 files 字典
-
-    StateBackend 期望的格式:
-    {
-        "/attachments/file.md": {
-            "content": ["line1", "line2", ...],
-            "created_at": "...",
-            "modified_at": "...",
-        }
-    }
-    """
-    files = {}
-    for attachment in attachments:
-        if attachment.get("status") != "parsed":
-            continue
-
-        file_path = attachment.get("file_path")
-        markdown = attachment.get("markdown")
-
-        if not file_path or not markdown:
-            continue
-
-        now = datetime.now(UTC).isoformat()
-        # 将 markdown 内容按行拆分
-        content_lines = markdown.split("\n")
-        files[file_path] = {
-            "content": content_lines,
-            "created_at": attachment.get("uploaded_at", now),
-            "modified_at": attachment.get("uploaded_at", now),
-        }
-
-    return files
 
 def extract_agent_state(values: dict) -> dict:
     todos = values.get("todos")
@@ -64,19 +29,21 @@ def _ensure_full_msg(full_msg: AIMessage | None, accumulated_content: list[str])
 
 
 async def _resolve_agent_config(
-    db, agent_id: str,  user_id: str, agent_config_id: int | str | None
+        db, agent_id: str, user_id: str, agent_config_id: int | str | None
 ) -> tuple:
     """解析 agent_config，返回 (config_item, agent_config_id)"""
-    
+
     # TODO: 临时跳过数据库配置加载,返回默认配置
     if db is None:
         logging.warning("Database not available, using default agent config")
+
         # 创建一个简单的模拟对象
         class MockConfig:
             id = 0
             config_json = {"context": {}}
+
         return MockConfig(), 0
-    
+
     config_repo = AgentConfigRepository(db)
     config_item = None
     if agent_config_id is not None:
@@ -96,19 +63,19 @@ async def _resolve_agent_config(
 
 
 async def save_partial_message(
-    conv_repo, 
-    thread_id, 
-    full_msg, 
-    param=None,  # 兼容旧调用方式
-    error_message=None,
-    error_type=None
+        conv_repo,
+        thread_id,
+        full_msg,
+        param=None,  # 兼容旧调用方式
+        error_message=None,
+        error_type=None
 ):
     """保存部分消息到数据库(临时占位实现)"""
     # TODO: 实现完整的消息保存逻辑
     if conv_repo is None:
         logging.warning("Database not available, skipping message save")
         return
-    
+
     try:
         # 这里应该调用 conv_repo 保存消息
         pass
@@ -118,7 +85,7 @@ async def save_partial_message(
 
 async def check_and_handle_interrupts(agent, langgraph_config, make_chunk, meta, thread_id):
     """检查并处理中断(人工审批)
-    
+
     TODO: 实现完整的中断检查逻辑
     当前: 空实现,直接返回
     """
@@ -153,7 +120,6 @@ async def stream_agent_chat(
                 + b"\n"
         )
 
-
     if image_content:
         human_message = HumanMessage(
             content=[
@@ -163,9 +129,9 @@ async def stream_agent_chat(
         )
         message_type = "multimodal_image"
     else:
-        human_message = HumanMessage(content=query) # <-传给messages
-        message_type = "text" # <-传给init_msg
-    init_msg = {"role": "user", "content": query, "type": "human"} # <-第一次chunk给前端
+        human_message = HumanMessage(content=query)  # <-传给messages
+        message_type = "text"  # <-传给init_msg
+    init_msg = {"role": "user", "content": query, "type": "human"}  # <-第一次chunk给前端
 
     if image_content:
         init_msg["message_type"] = message_type
@@ -198,13 +164,12 @@ async def stream_agent_chat(
 
     user_id = str(current_user.id)
 
-
     # # 获取或创建 Agent 配置
     logging.debug(f">>>进入[stream_agent_chat]")
     logging.info(f"config:{config}")
-    agent_config_id = config.get("agent_config_id") #前端传来的config中取出agent_config_id
-    #config_item是 AgentConfig 对象
-    config_item, agent_config_id = await _resolve_agent_config(db, agent_name,user_id, agent_config_id)
+    agent_config_id = config.get("agent_config_id")  # 前端传来的config中取出agent_config_id
+    # config_item是 AgentConfig 对象
+    config_item, agent_config_id = await _resolve_agent_config(db, agent_name, user_id, agent_config_id)
 
     # 如果没有 thread_id，自动生成（新对话）
     if not (thread_id := config.get("thread_id")):
@@ -212,7 +177,7 @@ async def stream_agent_chat(
         logging.warning(f"No thread_id provided, generated new thread_id: {thread_id}")
 
     # 构建 input_context（传递给 LangGraph）
-    #config_json为AgentConfig 对象的核心配置（含 context 等）
+    # config_json为AgentConfig 对象的核心配置（含 context 等）
     agent_config = (config_item.config_json or {}).get("context", {})
     input_context = {
         "user_id": user_id,
@@ -251,8 +216,20 @@ async def stream_agent_chat(
         accumulated_content = []
         # 流式执行 Agent 推理
         async for msg, metadata in agent.stream_messages(messages, input_context=input_context):
+            # 原有的消息处理逻辑
             if isinstance(msg, AIMessageChunk):
-                accumulated_content.append(msg.content)
+                content = msg.content or ""
+                additional_kwargs = getattr(msg, 'additional_kwargs', {})
+                reasoning_content = additional_kwargs.get('reasoning_content', '')
+                
+                # 发送思考过程（如果有）
+                if reasoning_content:
+                    yield make_chunk(thinking_step={
+                        "type": "thinking",
+                        "content": reasoning_content
+                    })
+                
+                accumulated_content.append(content)
 
                 # # 敏感词检查（每 10 个 chunk 检查一次）
                 # content_for_check = "".join(accumulated_content[-10:])
@@ -265,7 +242,7 @@ async def stream_agent_chat(
                 #     return
 
                 ## 流式返回给前端
-                yield make_chunk(content=msg.content, msg=msg.model_dump(), metadata=metadata, status="loading")
+                yield make_chunk(content=content, msg=msg.model_dump(), metadata=metadata, status="loading")
             else:
                 msg_dict = msg.model_dump()  # 转成dict类型
                 yield make_chunk(msg=msg_dict, metadata=metadata, status="loading")
@@ -363,49 +340,3 @@ async def stream_agent_chat(
             )
 
         yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
-
-async def get_agent_state_view(
-    *,
-    agent_id: str,
-    thread_id: str,
-    current_user_id: str,
-    db,
-) -> dict:
-    if not agent_manager.get_agent(agent_id):
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=404, detail=f"智能体 {agent_id} 不存在")
-
-    conv_repo = ConversationRepository(db)
-    conversation = await conv_repo.get_conversation_by_thread_id(thread_id)
-    if not conversation or conversation.user_id != str(current_user_id) or conversation.status == "deleted":
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=404, detail="对话线程不存在")
-
-    agent = agent_manager.get_agent(agent_id)
-    graph = await agent.get_graph()
-    langgraph_config = {"configurable": {"user_id": str(current_user_id), "thread_id": thread_id}}
-    state = await graph.aget_state(langgraph_config)
-    agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
-
-    # 如果 state 中没有 files，从附件构建
-    # 这确保了上传附件后立即可以在文件列表中看到文件
-    if not agent_state.get("files") or agent_state["files"] == {}:
-        try:
-            attachments = await conv_repo.get_attachments_by_thread_id(thread_id)
-            logging.info(f"[get_agent_state_view] found {len(attachments)} attachments in DB")
-            if attachments:
-                first_status = attachments[0].get("status")
-                first_has_markdown = bool(attachments[0].get("markdown"))
-                logging.info(
-                    f"[get_agent_state_view] first attachment status: {first_status}, "
-                    f"has markdown: {first_has_markdown}"
-                )
-                files = _build_state_files(attachments)
-                agent_state["files"] = files
-                logging.info(f"[get_agent_state_view] Built files from attachments: {len(files)} files")
-        except Exception as e:
-            logging.warning(f"Failed to fetch attachments for thread {thread_id}: {e}")
-
-    return {"agent_state": agent_state}

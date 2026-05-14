@@ -26,7 +26,7 @@ services:
       - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-shoppingclaw}}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - MODEL_DIR_IN_DOCKER=/models
+      - MODEL_DIR_IN_DOCKER=/model
       - RUNNING_IN_DOCKER=true
       - NO_PROXY=localhost,127.0.0.1,postgres,redis
       - no_proxy=localhost,127.0.0.1,postgres,redis

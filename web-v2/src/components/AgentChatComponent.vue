@@ -38,6 +38,16 @@
           </div>
         </div>
         <div class="header__right">
+          <!-- 思考过程按钮 -->
+          <div 
+            v-if="conversations.length > 0 || thinkingState.steps.length > 0"
+            type="button" 
+            class="agent-nav-btn"
+            :class="{ 'active': thinkingState.isOpen }"
+            @click="toggleThinkingSidebar">
+            <Brain class="nav-btn-icon" size="18" />
+            <span class="text">思考过程</span>
+          </div>
           <slot name="header-right"></slot>
         </div>
       </div>
@@ -45,6 +55,78 @@
       <div class="chat-content-container">
         <div class="chat-main" ref="chatMainContainer">
           <div class="chat-box" ref="messagesContainer">
+            <!-- 欢迎页品牌区域 (空状态显示) -->
+            <div v-if="!conversations.length" class="welcome-brand">
+              <img 
+                src="@/assets/parrot-logo.png" 
+                alt="ShoppingClaw Logo" 
+                class="brand-logo" 
+              />
+              <div class="brand-text">
+                <h2 class="brand-name">ShoppingClaw</h2>
+                <p class="brand-slogan">有虾购，想购就 go</p>
+              </div>
+            </div>
+
+            <!-- 固定云朵层 (空状态显示) -->
+            <div v-if="!conversations.length" class="fixed-clouds-layer">
+              <!-- 上层：左右两栏竖向排列的文本引导云朵 -->
+              <div class="text-clouds-wrapper">
+                <div class="text-clouds-column left-column">
+                  <div 
+                    v-for="cloud in currentTextClouds.slice(0, 3)" 
+                    :key="cloud.id"
+                    class="cloud-pill text-cloud"
+                    @click="userInput = cloud.text; messageInputRef?.focusInput()"
+                  >
+                    <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
+                    <div class="action-indicator">
+                      <ChevronRight class="arrow-icon" :size="16" />
+                      <span class="buy-text">一键 go</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="text-clouds-column right-column">
+                  <div 
+                    v-for="cloud in currentTextClouds.slice(3, 6)" 
+                    :key="cloud.id + '-r'"
+                    class="cloud-pill text-cloud"
+                    @click="userInput = cloud.text; messageInputRef?.focusInput()"
+                  >
+                    <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
+                    <div class="action-indicator">
+                      <ChevronRight class="arrow-icon" :size="16" />
+                      <span class="buy-text">一键 go</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 下层：横向排列的图标入口云朵 (强制一行) -->
+              <div class="icon-clouds-row">
+                <!-- 品类入口 -->
+                <div 
+                  v-for="cat in categoryClouds" 
+                  :key="cat.categoryId"
+                  class="cloud-pill icon-cloud"
+                >
+                  <component :is="iconMap[cat.icon]" class="cloud-icon" :size="16" />
+                  <span class="cloud-title">{{ cat.text }}</span>
+                  <span class="cloud-subtitle">{{ getCloudSubtitle(cat) }}</span>
+                </div>
+                
+                <!-- 个性化入口 -->
+                <div 
+                  v-for="per in personalClouds" 
+                  :key="per.apiType"
+                  class="cloud-pill icon-cloud"
+                >
+                  <component :is="iconMap[per.icon]" class="cloud-icon" :size="16" />
+                  <span class="cloud-title">{{ per.text }}</span>
+                  <span class="cloud-subtitle">{{ getCloudSubtitle(per) }}</span>
+                </div>
+              </div>
+            </div>
             <div class="conv-box" v-for="(conv, index) in conversations" :key="index">
               <AgentMessageComponent
                 v-for="(message, msgIndex) in conv.messages"
@@ -121,6 +203,18 @@
         </div>
       </div>
     </div>
+    
+    <!-- 右侧思考过程边栏 -->
+    <ThinkingProcessSidebar
+      :is-open="thinkingState.isOpen"
+      :thinking-steps="thinkingState.steps"
+      :plan-steps="thinkingState.planSteps || []"
+      :tool-calls="thinkingState.toolCalls || []"
+      :is-processing="isProcessing"
+      :has-error="false"
+      :is-initial-render="thinkingState.isInitialRender"
+      @close="closeThinkingSidebar"
+    />
   </div>
 </template>
 
@@ -129,14 +223,15 @@ import { ref, reactive, onMounted, watch, nextTick, computed, onUnmounted } from
 import AgentInputArea from '@/components/AgentInputArea.vue'
 import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import ChatSidebarComponent from '@/components/ChatSidebarComponent.vue'
-import { PanelLeftOpen, MessageCirclePlus, LoaderCircle } from 'lucide-vue-next'
+import ThinkingProcessSidebar from '@/components/ThinkingProcessSidebar.vue'
+import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, Smartphone, Laptop, Home, Clock, Star, ChevronRight, Brain } from 'lucide-vue-next'
 import { handleChatError } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
 import { useAgentStore } from '@/stores/agent'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useUserStore } from '@/stores/user'
 import { storeToRefs } from 'pinia'
-import { agentApi, threadApi } from '@/apis'
+import { agentApi, threadApi, personalApi, categoryApi } from '@/apis'
 
 
 const props = defineProps({
@@ -150,6 +245,109 @@ const userStore = useUserStore()
 const { agents, selectedAgentId, defaultAgentId } = storeToRefs(agentStore)
 
 const userInput = ref('')
+
+// 固定云朵数据
+const categoryClouds = [
+  { text: '手机数码', icon: 'Smartphone', categoryId: 'phones' },
+  { text: '电脑办公', icon: 'Laptop', categoryId: 'computers' },
+  { text: '家用电器', icon: 'Home', categoryId: 'appliances' },
+  { text: '运动户外', icon: 'Smartphone', categoryId: 'sports' },
+]
+
+const personalClouds = [
+  { text: '最近浏览', icon: 'Clock', action: 'history', apiType: 'recentViews' },
+  { text: '我的收藏', icon: 'Star', action: 'favorites', apiType: 'favorites' },
+]
+
+const scenePrompts = [
+  '帮我选 3000 元降噪耳机',
+  '618 该买扫地机器人吗',
+  '对比 iPhone 16 和华为 Pura 70',
+  '推荐性价比笔记本电脑',
+  '学生党平价手机推荐',
+  '哪些家电值得囤货',
+]
+
+// 动态文本云朵状态 (固定显示，增加到 6 个以支持两栏)
+const currentTextClouds = ref(scenePrompts.slice(0, 6).map((text, index) => ({
+  id: `t-${index}`,
+  text,
+  isFading: false
+})))
+let textRefreshTimer = null
+
+const iconMap = {
+  Smartphone,
+  Laptop,
+  Home,
+  Clock,
+  Star
+}
+
+// 个性化数据缓存
+const personalDataCache = ref({})
+const categoryDataCache = ref({})
+
+// 获取缩略内容
+const getCloudSubtitle = (cloud) => {
+  if (cloud.apiType) {
+    const data = personalDataCache.value[cloud.apiType]
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      return cloud.action === 'history' ? '暂无浏览记录' : '暂无收藏'
+    }
+    const firstItem = data[0]
+    return firstItem.title || firstItem.name || firstItem.product_name || '查看详情'
+  }
+  
+  if (cloud.categoryId) {
+    const products = categoryDataCache.value[cloud.categoryId]
+    if (!products || !Array.isArray(products) || products.length === 0) {
+      return '查看热门商品'
+    }
+    const names = products.slice(0, 2).map(p => p.name || p.product_name || p.title || '').filter(Boolean)
+    if (names.length === 0) return '查看热门商品'
+    return names.join('、') + (products.length > 2 ? '...' : '')
+  }
+  return ''
+}
+
+// 刷新文本云朵 (原地平滑切换内容)
+const refreshTextClouds = () => {
+  const shuffled = [...scenePrompts].sort(() => 0.5 - Math.random())
+  
+  // 第一步：触发淡出动画
+  currentTextClouds.value.forEach(cloud => cloud.isFading = true)
+
+  // 第二步：等待淡出完成后更新内容并淡入
+  setTimeout(() => {
+    currentTextClouds.value.forEach((cloud, index) => {
+      cloud.text = shuffled[index % shuffled.length]
+      cloud.isFading = false
+    })
+  }, 300) // 300ms 对应 CSS 中的 transition 时间
+}
+
+// 加载数据
+const loadDynamicData = async () => {
+  try {
+    const [recentViews, favorites] = await Promise.all([
+      personalApi.getRecentViews(2).catch(() => []),
+      personalApi.getFavorites(2).catch(() => [])
+    ])
+    personalDataCache.value = { recentViews, favorites }
+    
+    const promises = categoryClouds.map(async (cloud) => {
+      const products = await categoryApi.getHotProducts(cloud.categoryId, 2).catch(() => [])
+      return { categoryId: cloud.categoryId, products }
+    })
+    const results = await Promise.all(promises)
+    results.forEach(({ categoryId, products }) => {
+      categoryDataCache.value[categoryId] = products
+    })
+  } catch (error) {
+    console.error('加载云朵数据失败:', error)
+  }
+}
 
 // 从智能体元数据获取示例问题
 const exampleQuestions = computed(() => {
@@ -165,6 +363,15 @@ const exampleQuestions = computed(() => {
 const chatState = reactive({
   currentThreadId: null,
   threadStates: {}
+})
+
+// 思考过程状态管理
+const thinkingState = reactive({
+  isOpen: false,
+  steps: [],
+  planSteps: [],
+  toolCalls: [],
+  isInitialRender: true
 })
 
 const threads = ref([])
@@ -229,7 +436,7 @@ const currentThreadMessages = computed(() => threadMessages.value[currentChatId.
 
 // 在线程状态中管理流式数据
 const createOnGoingConvState = () => ({
-  msgChunks: {},
+  messages: [],
   currentRequestKey: null,
   currentAssistantKey: null,
 })
@@ -251,13 +458,7 @@ const currentThreadState = computed(() => getThreadState(currentChatId.value))
 const onGoingConvMessages = computed(() => {
   const ts = currentThreadState.value
   if (!ts?.onGoingConv) return []
-  const chunks = ts.onGoingConv.msgChunks
-  // 简单合并chunk - 将内容连接起来
-  const msgs = Object.values(chunks).map(c => ({
-    type: 'ai',
-    content: typeof c === 'string' ? c : (c.content || ''),
-  }))
-  return msgs.filter(m => m.type !== 'tool')
+  return ts.onGoingConv.messages
 })
 
 const historyConversations = computed(() => {
@@ -279,7 +480,7 @@ const isProcessing = computed(() => isStreaming.value)
 
 const scrollController = new ScrollController('.chat-main')
 
-onMounted(() => {
+onMounted(async () => {
   nextTick(() => {
     const chatMainContainer = document.querySelector('.chat-main')
     if (chatMainContainer) {
@@ -287,10 +488,18 @@ onMounted(() => {
     }
   })
   setTimeout(() => { localUIState.isInitialRender = false }, 300)
+  
+  // 初始化固定云朵
+  await loadDynamicData()
+  
+  // 启动文本定时刷新 (每 5 秒)
+  refreshTextClouds()
+  textRefreshTimer = setInterval(refreshTextClouds, 5000)
 })
 
 onUnmounted(() => {
   scrollController.cleanup()
+  if (textRefreshTimer) clearInterval(textRefreshTimer)
 })
 
 // 线程管理
@@ -391,6 +600,44 @@ const toggleSidebar = () => {
   chatUIStore.isSidebarOpen = !chatUIStore.isSidebarOpen
 }
 
+// 思考过程边栏控制
+const toggleThinkingSidebar = () => {
+  thinkingState.isOpen = !thinkingState.isOpen
+}
+
+const closeThinkingSidebar = () => {
+  thinkingState.isOpen = false
+}
+
+// 添加思考步骤
+const addThinkingStep = (step) => {
+  thinkingState.steps.push({
+    ...step,
+    status: step.status || 'active',
+    timestamp: Date.now()
+  })
+  // 自动打开边栏
+  if (!thinkingState.isOpen) {
+    thinkingState.isOpen = true
+  }
+}
+
+// 更新最后一个思考步骤
+const updateLastThinkingStep = (updates) => {
+  if (thinkingState.steps.length > 0) {
+    const lastIndex = thinkingState.steps.length - 1
+    thinkingState.steps[lastIndex] = {
+      ...thinkingState.steps[lastIndex],
+      ...updates
+    }
+  }
+}
+
+// 清空思考步骤
+const clearThinkingSteps = () => {
+  thinkingState.steps = []
+}
+
 const handleSendOrStop = async () => {
   if (isProcessing.value) {
     // 停止生成
@@ -417,6 +664,11 @@ const handleSendOrStop = async () => {
   const ts = getThreadState(threadId)
   ts.isStreaming = true
   ts.onGoingConv = createOnGoingConvState()
+  
+  // 清空之前的思考步骤
+  clearThinkingSteps()
+  
+  let streamingContent = ''
 
   try {
     const response = await agentApi.sendAgentMessage(currentAgentId.value, {
@@ -432,7 +684,7 @@ const handleSendOrStop = async () => {
       throw new Error(`HTTP ${response.status}`)
     }
 
-    let streamingContent = ''
+    let aiMsgIndex = -1  // 当前正在流式输出的 AI 消息在 messages 数组中的索引
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -450,25 +702,99 @@ const handleSendOrStop = async () => {
         if (!trimmed) continue
         try {
           const chunk = JSON.parse(trimmed)
-          if (chunk.type === 'text' || chunk.type === 'ai') {
-            streamingContent += chunk.content || ''
-          } else if (chunk.content) {
-            streamingContent += chunk.content
+
+          // 处理错误状态
+          if (chunk.status === 'error') {
+            throw new Error(chunk.error_message || '流式响应出错')
           }
-          // 更新进行中消息
-          const key = 'streaming-msg'
-          ts.onGoingConv.msgChunks[key] = {
-            type: 'ai',
-            content: streamingContent,
+
+          // 跳过 init / finished / agent_state 等控制帧（不生成消息）
+          if (chunk.status === 'init' || chunk.status === 'finished') continue
+
+          if (chunk.status === 'agent_state') {
+            ts.agentState = chunk.agent_state
+            continue
+          }
+          
+          // 处理思考过程数据
+          if (chunk.thinking_step) {
+            addThinkingStep(chunk.thinking_step)
+            continue
+          }
+          
+          if (chunk.thinking_update) {
+            updateLastThinkingStep(chunk.thinking_update)
+            continue
+          }
+          
+          // 处理计划/步骤数据
+          if (chunk.plan) {
+            thinkingState.planSteps.splice(0, thinkingState.planSteps.length, ...(chunk.plan.steps || []))
+            continue
+          }
+          
+          // 处理工具调用数据
+          if (chunk.tool_call) {
+            const toolItem = {
+              id: chunk.tool_call.tool_call_id || Date.now().toString(),
+              name: chunk.tool_call.function || chunk.tool_call.name || '',
+              args: chunk.tool_call.args,
+              output: chunk.tool_call.content || null,
+              status: chunk.tool_call.status || 'calling',
+              duration: chunk.tool_call.duration_ms,
+              icon: chunk.tool_call.icon,
+              toolCallId: chunk.tool_call.tool_call_id
+            }
+            thinkingState.toolCalls.push(toolItem)
+            continue
+          }
+
+          // 流式文本: 后端把 token 放在 response 字段中
+          const token = chunk.response || chunk.content || ''
+          const msgType = chunk.msg?.type
+
+          if (msgType === 'tool') {
+            // 工具消息：追加为独立消息
+            ts.onGoingConv.messages.push({
+              type: 'tool',
+              content: chunk.msg?.content || '',
+              tool_name: chunk.msg?.name || '',
+              tool_call_id: chunk.msg?.tool_call_id || '',
+              id: Date.now(),
+            })
+            aiMsgIndex = -1  // 工具消息后下一段文本是新 AI 消息
+          } else if (token) {
+            // AI 文本 token: 累积到当前 AI 消息
+            streamingContent += token
+            if (aiMsgIndex < 0) {
+              aiMsgIndex = ts.onGoingConv.messages.length
+              ts.onGoingConv.messages.push({
+                type: 'ai',
+                content: streamingContent,
+                id: Date.now(),
+              })
+            } else {
+              ts.onGoingConv.messages[aiMsgIndex].content = streamingContent
+            }
           }
         } catch (e) {
-          // 忽略解析错误
+          if (e.message && !e.message.startsWith('HTTP')) {
+            throw e  // 状态 error 抛出的异常直接向上传递
+          }
+          // 忽略 JSON 解析错误
         }
       }
     }
 
-    // 流式结束，保存消息
-    if (streamingContent) {
+    // 流式结束，保存最终消息到历史
+    if (ts.onGoingConv.messages.length) {
+      for (const msg of ts.onGoingConv.messages) {
+        threadMessages.value[threadId].push({
+          ...msg,
+          id: Date.now() + Math.random(),
+        })
+      }
+    } else if (streamingContent) {
       threadMessages.value[threadId].push({
         type: 'ai',
         content: streamingContent,
@@ -477,6 +803,15 @@ const handleSendOrStop = async () => {
     }
   } catch (error) {
     console.error('Stream error:', error)
+    handleChatError(error, 'send')
+    // 保存已累积的部分内容
+    if (streamingContent) {
+      threadMessages.value[threadId].push({
+        type: 'ai',
+        content: streamingContent,
+        id: Date.now(),
+      })
+    }
     threadMessages.value[threadId].push({
       type: 'ai',
       content: '',
@@ -568,6 +903,11 @@ defineExpose({
 
   &:hover { background-color: var(--gray-100); color: var(--main-color); }
   &.is-disabled { opacity: 0.5; pointer-events: none; }
+  &.active { 
+    background-color: var(--main-50); 
+    color: var(--main-color); 
+    font-weight: 500;
+  }
 
   .loading-icon { animation: rotate 1s linear infinite; }
 }
@@ -595,6 +935,8 @@ defineExpose({
 
 .conv-box {
   margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
 }
 
 .generating-status {
@@ -692,5 +1034,226 @@ defineExpose({
 @keyframes dotPulse {
   0%, 80%, 100% { transform: scale(0); }
   40% { transform: scale(1); }
+}
+
+/* 欢迎页品牌区域样式 */
+.welcome-brand {
+  position: absolute;
+  top: 18%; /* 进一步向上移动 */
+  left: 50%;
+  /* 关键：以文字中心为轴对称点。通过 transform 将文字中心对准屏幕中线 */
+  /* 假设 gap 为 20px, logo 宽度约为 110px, 则整体需要向左偏移 (logoWidth + gap) / 2 */
+  transform: translate(calc(-50% - 65px), -50%);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.brand-logo {
+  height: 110px; /* 等比例放大 */
+  width: auto;
+  object-fit: contain;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.brand-name {
+  margin: 0;
+  font-size: 44px; /* 等比例放大 */
+  font-weight: 800;
+  color: var(--gray-900);
+  line-height: 1.1;
+  letter-spacing: -0.5px;
+}
+
+.brand-slogan {
+  margin: 0;
+  margin-top: 4px;
+  font-size: 16px; /* 等比例放大 */
+  color: var(--gray-500);
+  font-weight: 500;
+}
+
+/* 固定云朵层 */
+.fixed-clouds-layer {
+  position: absolute;
+  top: 32%; /* 相应向上移动，保持在 Logo 下方 */
+  left: 50%;
+  transform: translate(-50%, 0);
+  width: 90%;
+  max-width: 800px;
+  display: flex;
+  flex-direction: column; /* 上下分栏 */
+  align-items: center;
+  gap: 30px;
+  pointer-events: none;
+}
+
+.text-clouds-wrapper {
+  display: flex;
+  justify-content: center;
+  gap: 24px; /* 缩小左右两栏的间距 */
+  width: 100%;
+}
+
+.text-clouds-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: auto;
+}
+
+.text-cloud {
+  font-weight: 500;
+  justify-content: space-between; /* 文字在左，动作指示在右 */
+  min-width: 280px; /* 稍微缩短以适应两栏布局 */
+  padding: 8px 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.text-content {
+  flex: 1;
+  text-align: left;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.text-content.fading {
+  opacity: 0;
+  transform: translateY(-5px);
+}
+
+.action-indicator {
+  position: relative;
+  width: 40px; /* 预留固定宽度，防止布局抖动 */
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+}
+
+.arrow-icon {
+  color: var(--gray-400);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: absolute;
+  opacity: 1;
+  transform: scale(1);
+}
+
+.buy-text {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--main-color);
+  opacity: 0;
+  transform: scale(0.8) translateX(-5px);
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  position: absolute;
+  white-space: nowrap;
+  padding: 2px 8px;
+  background: rgba(245, 245, 245, 0.9); /* 灰白色背景框 */
+  border-radius: 12px; /* 参考智能体图标的圆角风格 */
+  border: 1px solid rgba(220, 220, 220, 0.8);
+}
+
+.cloud-pill:hover .arrow-icon {
+  opacity: 0;
+  transform: scale(0.8) translateX(5px);
+}
+
+.cloud-pill:hover .buy-text {
+  opacity: 1;
+  transform: scale(1) translateX(0);
+}
+
+.icon-clouds-row {
+  display: flex;
+  flex-wrap: nowrap; /* 禁止换行 */
+  justify-content: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 900px;
+  pointer-events: auto;
+  overflow-x: auto; /* 如果屏幕太窄允许横向滚动，防止挤压 */
+  padding-bottom: 4px; /* 预留滚动条空间 */
+}
+
+.cloud-pill {
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  font-size: 13px;
+  color: var(--gray-700);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cloud-pill:hover {
+  background: rgba(255, 255, 255, 1);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  color: var(--main-color);
+}
+
+.icon-cloud {
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 14px;
+  min-width: 80px;
+  text-align: center;
+}
+
+.icon-cloud .cloud-icon {
+  color: var(--primary-color, #4f46e5);
+  margin-bottom: 4px;
+}
+
+.icon-cloud .cloud-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.icon-cloud .cloud-subtitle {
+  font-size: 10px;
+  color: var(--gray-500);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
+}
+
+/* 文本云朵平滑过渡动画 (上下滑动 + 渐变) */
+.text-slide-move {
+  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.text-slide-enter-active,
+.text-slide-leave-active {
+  transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1); /* 增加弹性效果 */
+}
+
+.text-slide-enter-from {
+  opacity: 0;
+  transform: translateY(20px) scale(0.95);
+}
+
+.text-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-20px) scale(0.95);
 }
 </style>

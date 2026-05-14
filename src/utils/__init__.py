@@ -1,6 +1,8 @@
 import logging
 import os
 
+logger = logging.getLogger(__name__)
+
 
 def get_docker_safe_url(base_url):
     """Docker 容器环境中自动转换本地服务地址"""

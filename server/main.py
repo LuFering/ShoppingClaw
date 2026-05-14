@@ -33,6 +33,14 @@ async def lifespan(app: FastAPI):
     # 确保 saves 目录存在
     os.makedirs("saves", exist_ok=True)
 
+    # 初始化 PostgreSQL manager
+    from src.storage.postgres.manager import pg_manager
+    try:
+        pg_manager.initialize()
+        logger.info("[OK] PostgreSQL initialized")
+    except Exception as e:
+        logger.warning(f"[WARN] PostgreSQL initialization failed: {e}")
+
     logger.info("[OK] ShoppingClaw API ready")
     yield
     logger.info("[STOP] ShoppingClaw API shutting down...")

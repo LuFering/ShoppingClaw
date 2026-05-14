@@ -3,8 +3,8 @@ import { ref } from 'vue'
 
 export const useChatUIStore = defineStore('chatUI', () => {
   // ==================== 聊天界面 UI 状态 ====================
-  // 对话列表侧边栏状态
-  const isSidebarOpen = ref(localStorage.getItem('chat_sidebar_open') !== 'false')
+  // 对话列表侧边栏状态（默认关闭）
+  const isSidebarOpen = ref(false)
 
   // 加载状态
   const creatingNewChat = ref(false)

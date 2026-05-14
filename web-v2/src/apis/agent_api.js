@@ -49,3 +49,19 @@ export const threadApi = {
 
   deleteThread: (threadId) => apiDelete(`/api/chat/thread/${threadId}`),
 }
+
+// 个性化数据 API
+export const personalApi = {
+  // 获取最近浏览记录
+  getRecentViews: (limit = 3) => apiGet(`/api/personal/recent-views?limit=${limit}`),
+  
+  // 获取收藏列表
+  getFavorites: (limit = 3) => apiGet(`/api/personal/favorites?limit=${limit}`),
+}
+
+// 品类数据 API
+export const categoryApi = {
+  // 获取品类热门商品
+  getHotProducts: (categoryId, limit = 2) => 
+    apiGet(`/api/category/${categoryId}/hot-products?limit=${limit}`),
+}

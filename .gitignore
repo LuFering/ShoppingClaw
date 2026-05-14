@@ -6,7 +6,9 @@
 .tmp-validation
 test
 tests
-
+saves
+models
+src/config/saves
 # Python
 __pycache__/
 *.py[cod]

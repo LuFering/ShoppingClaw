@@ -1,4 +1,4 @@
-"""认证路由 — 简化版：登录 + 初始化 + 个人信息"""
+"""认证路由 — PostgreSQL 版：登录 + 初始化 + 个人信息"""
 import logging
 import re
 
@@ -8,14 +8,8 @@ from pydantic import BaseModel
 
 from server.utils.auth_middleware import get_current_user, get_required_user
 from server.utils.auth_utils import AuthUtils
-from server.utils.user_store import (
-    User,
-    check_first_run,
-    create_user,
-    get_user_by_username,
-    init_first_admin,
-    update_user,
-)
+from src.repositories.user_repository import UserRepository
+from src.storage.postgres.models_business import User as DBUser
 from src.utils.datetime_utils import utc_now_naive
 
 auth = APIRouter(prefix="/auth", tags=["authentication"])
@@ -47,11 +41,14 @@ class InitializeRequest(BaseModel):
     password: str
 
 
+user_repo = UserRepository()
+
+
 # ── 路由：登录 ────────────────────────────────────────────
 
 @auth.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = get_user_by_username(form_data.username)
+    user = await user_repo.get_by_username(form_data.username)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -68,15 +65,18 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         )
 
     if not AuthUtils.verify_password(user.password_hash, form_data.password):
-        user.increment_failed_login()
-        update_user(user.id, {
-            "login_failed_count": user.login_failed_count,
-            "last_failed_login": user.last_failed_login,
-            "login_locked_until": user.login_locked_until,
-        })
+        updates = {
+            "login_failed_count": user.login_failed_count + 1,
+            "last_failed_login": utc_now_naive(),
+        }
+        if user.login_failed_count + 1 >= 5:
+            from datetime import timedelta
+            updates["login_locked_until"] = utc_now_naive() + timedelta(minutes=15)
+        
+        await user_repo.update(user.id, updates)
 
-        if user.is_login_locked():
-            remaining = user.get_remaining_lock_time()
+        if user.login_failed_count + 1 >= 5:
+            remaining = 900  # 15 minutes
             raise HTTPException(
                 status_code=status.HTTP_423_LOCKED,
                 detail=f"由于多次登录失败，账户已被锁定 {remaining} 秒",
@@ -89,9 +89,8 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user.reset_failed_login()
-    update_user(user.id, {
-        "last_login": utc_now_naive().isoformat() if utc_now_naive() else None,
+    await user_repo.update(user.id, {
+        "last_login": utc_now_naive(),
         "login_failed_count": 0,
         "last_failed_login": None,
         "login_locked_until": None,
@@ -104,10 +103,10 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         "access_token": access_token,
         "token_type": "bearer",
         "user_id": user.id,
-        "username": user.username,
-        "user_id_login": user.username,
-        "phone_number": None,
-        "avatar": None,
+        "username": user.user_name,
+        "user_id_login": user.user_id,
+        "phone_number": user.phone_number,
+        "avatar": user.avatar,
         "role": user.role,
     }
 
@@ -116,14 +115,16 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 
 @auth.get("/check-first-run")
 async def check_first_run_endpoint():
-    return {"first_run": check_first_run()}
+    has_users = await user_repo.exists_by_username("admin")
+    return {"first_run": not has_users}
 
 
 # ── 路由：初始化管理员 ────────────────────────────────────
 
 @auth.post("/initialize", response_model=Token)
 async def initialize_admin(admin_data: InitializeRequest):
-    if not check_first_run():
+    exists = await user_repo.exists_by_username(admin_data.username)
+    if exists:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="系统已经初始化，无法再次创建初始管理员",
@@ -142,7 +143,15 @@ async def initialize_admin(admin_data: InitializeRequest):
         )
 
     hashed = AuthUtils.hash_password(admin_data.password)
-    user = init_first_admin(admin_data.username, hashed)
+    user = await user_repo.create({
+        "user_name": admin_data.username,
+        "user_id": admin_data.username,
+        "phone_number": "00000000000",
+        "password_hash": hashed,
+        "role": "superadmin",
+        "shipping_address": "",
+        "config_json": {},
+    })
 
     token_data = {"sub": str(user.id)}
     access_token = AuthUtils.create_access_token(token_data)
@@ -151,10 +160,10 @@ async def initialize_admin(admin_data: InitializeRequest):
         "access_token": access_token,
         "token_type": "bearer",
         "user_id": user.id,
-        "username": user.username,
-        "user_id_login": user.username,
-        "phone_number": None,
-        "avatar": None,
+        "username": user.user_name,
+        "user_id_login": user.user_id,
+        "phone_number": user.phone_number,
+        "avatar": user.avatar,
         "role": user.role,
     }
 
@@ -162,5 +171,12 @@ async def initialize_admin(admin_data: InitializeRequest):
 # ── 路由：当前用户信息 ────────────────────────────────────
 
 @auth.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: User = Depends(get_required_user)):
-    return current_user.to_dict()
+async def read_users_me(current_user: DBUser = Depends(get_required_user)):
+    user_dict = current_user.to_dict()
+    return {
+        "id": user_dict["id"],
+        "username": user_dict["user_name"],
+        "role": user_dict["role"],
+        "created_at": user_dict["created_at"],
+        "last_login": user_dict["last_login"],
+    }

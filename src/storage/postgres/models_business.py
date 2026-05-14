@@ -21,9 +21,6 @@ class OperationLog(Base):
     ip_address = Column(String, nullable=True)
     timestamp = Column(DateTime, default=utc_now_naive)
 
-    # 关联用户
-    user = relationship("User", back_populates="operation_logs")
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -59,9 +56,6 @@ class User(Base):
     # 软删除相关字段
     is_deleted = Column(Integer, nullable=False, default=0, index=True)  # 是否已删除：0=否，1=是
     deleted_at = Column(DateTime, nullable=True)  # 删除时间
-
-    # 关联操作日志
-    #operation_logs = relationship("OperationLog", back_populates="user", cascade="all,delete-orphan")
 
     def to_dict(self, include_password: bool = False) -> dict[str, Any]:
         result = {

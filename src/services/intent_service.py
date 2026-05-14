@@ -12,7 +12,7 @@ class JointIntentService:
         if model_dir is None:
             # 使用项目根目录的绝对路径
             project_root = Path(__file__).parent.parent.parent
-            model_dir = str(project_root / "model" / "joint_intent_bert")
+            model_dir = str(project_root / "models" / "joint_intent_bert")
         cfg = json.load(open(f"{model_dir}/label_config.json", encoding="utf-8"))
         self._main_intents = cfg["main_intents"]
         self._sub_intents = cfg["sub_intents"]
