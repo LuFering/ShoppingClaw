@@ -103,6 +103,8 @@ class MasterAgent(BaseAgent):
     
     async def get_graph(self, **kwargs):
         """获取或创建 Agent 图"""
+        if self.graph is not None:
+            return self.graph
 
         # 1. 获取上下文配置
         context=self.context_schema.from_file(module_name=self.module_name)
@@ -164,8 +166,8 @@ class MasterAgent(BaseAgent):
             #     summary_middleware,         # 注入长对话压缩能力
 
             ],
-            # checkpointer=await self._get_checkpointer(),
+            checkpointer=await self._get_checkpointer(),
         )
         # logging.info("[MasterAgent] LangGraph 编译完成")
-        
-        return graph
+        self.graph = graph
+        return self.graph

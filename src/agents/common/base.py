@@ -59,14 +59,37 @@ class BaseAgent:
         
         # logging.info(f"[Graph Start] Context: {context.__dict__}")  # 注释掉：避免输出 system_prompt
 
-        # 返回消息流给前端（直接使用 messages 模式，保持状态连续性）
-        async for msg, metadata in graph.astream(
+        # 返回消息流给前端：
+        # - messages: token 级正文和 reasoning_content
+        # - updates: 节点级别的状态更新，用于捕获工具执行后的模型总结
+        logging.info(f"[Stream Start] graph.astream 开始迭代 (mode: messages + updates)")
+        async for chunk in graph.astream(
                 input={"messages": messages},
-                stream_mode="messages",
+                stream_mode=["messages", "updates"],
                 context=context,
                 config=input_config,
         ):
-            yield msg, metadata
+            # LangGraph 混合模式返回的是 (namespace, data) 元组
+            if isinstance(chunk, tuple) and len(chunk) == 2:
+                namespace, data = chunk
+                # 如果 data 是字典（updates），尝试清洗其中的 Overwrite 对象
+                if isinstance(data, dict):
+                    cleaned_data = {}
+                    for k, v in data.items():
+                        if hasattr(v, 'model_dump'):
+                            cleaned_data[k] = v.model_dump()
+                        elif isinstance(v, (str, int, float, bool, list)) or v is None:
+                            cleaned_data[k] = v
+                        else:
+                            cleaned_data[k] = f"<{type(v).__name__}>"
+                    yield cleaned_data, {"stream_mode": "updates", "namespace": namespace}
+                else:
+                    # messages 模式通常直接返回消息对象
+                    yield data, {"stream_mode": "messages", "namespace": namespace}
+            else:
+                # 兼容单一模式
+                yield chunk, {}
+        logging.info(f"[Stream End] graph.astream 迭代完成")
     async def invoke_messages(self,messages:list[str],input_context=None,**kwargs):
         graph=await self.get_graph()
         context=self.context_schema()

@@ -657,8 +657,9 @@ def _build_task_tool(  # noqa: C901
                         HumanMessage(content=f"[系统] 你的输出格式不符合要求，请修正。\n{validated_or_error}"),
                     ]
         except Exception as e:
-            logging.error(f"[SubAgent] {subagent_type} 执行失败: {e}", exc_info=True)
-            raise e
+            err_msg = f"[SubAgent] {subagent_type} 执行失败: {e}"
+            logging.error(err_msg, exc_info=False)
+            return f"子智能体 {subagent_type} 执行时遇到错误: {e}。请根据已有信息继续处理，或调整策略后重试。"
 
         if total_tool_calls > 20:
             logging.warning(f"[SubAgent] {subagent_type} 本轮调用工具{total_tool_calls}次（含{attempt+1}次重试），频率偏高请关注")

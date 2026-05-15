@@ -4,13 +4,14 @@ import logging
 import traceback
 import uuid
 
-from langchain_core.messages import HumanMessage, AIMessageChunk, AIMessage
+from langchain_core.messages import HumanMessage, AIMessageChunk, AIMessage, ToolMessage
 from src.config import config as conf
 from src.agents import agent_manager
 from src.plugins.guard import content_guard
 from src.repositories.agent_config_repository import AgentConfigRepository
 from src.repositories.conversation_repository import ConversationRepository
 from src.storage.postgres.manager import pg_manager
+from src.services.memory_store import memory_store
 
 
 def extract_agent_state(values: dict) -> dict:
@@ -26,6 +27,96 @@ def _ensure_full_msg(full_msg: AIMessage | None, accumulated_content: list[str])
     if not full_msg and accumulated_content:
         return AIMessage(content="".join(accumulated_content))
     return full_msg
+
+
+def _safe_json_dumps(value) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return str(value)
+
+
+def _truncate(value, limit: int = 3000):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + f"... ({len(value)} chars total)"
+    text = _safe_json_dumps(value)
+    return value if len(text) <= limit else text[:limit] + f"... ({len(text)} chars total)"
+
+
+def _message_text(content) -> str:
+    """Extract displayable text from LangChain message content blocks."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("content"):
+                    parts.append(str(block.get("content")))
+        return "".join(parts)
+    return str(content)
+
+
+def _tool_meta(name: str) -> dict:
+    """Small frontend metadata registry, inspired by ScienceClaw's SSE protocol."""
+    lower = (name or "").lower()
+    if any(key in lower for key in ("search", "grep", "find")):
+        return {"icon": "🔎", "category": "search", "description": name}
+    if any(key in lower for key in ("file", "read", "write", "edit", "ls")):
+        return {"icon": "📄", "category": "filesystem", "description": name}
+    if any(key in lower for key in ("exec", "shell", "python", "terminal")):
+        return {"icon": "⚙️", "category": "execution", "description": name}
+    if any(key in lower for key in ("web", "browser", "crawl", "http")):
+        return {"icon": "🌐", "category": "network", "description": name}
+    if "task" in lower or "agent" in lower:
+        return {"icon": "🤖", "category": "agent", "description": name}
+    return {"icon": "🧰", "category": "tool", "description": name or "tool"}
+
+
+def _normalize_step_status(status: str | None) -> str:
+    value = (status or "pending").lower()
+    if value in {"completed", "complete", "done", "success"}:
+        return "completed"
+    if value in {"in_progress", "running", "active", "processing"}:
+        return "running"
+    if value in {"failed", "error", "cancelled", "canceled"}:
+        return "failed"
+    return "pending"
+
+
+def _todos_to_plan_steps(todos) -> list[dict]:
+    if not isinstance(todos, list):
+        return []
+    steps: list[dict] = []
+    for index, todo in enumerate(todos[:20]):
+        if isinstance(todo, dict):
+            content = todo.get("content") or todo.get("description") or todo.get("title") or str(todo)
+            tool_call_ids = todo.get("tool_call_ids") or todo.get("toolCallIds") or []
+            steps.append({
+                "id": str(todo.get("id") or f"step_{index + 1}"),
+                "description": content,
+                "title": content,
+                "status": _normalize_step_status(todo.get("status")),
+                "toolCallIds": tool_call_ids if isinstance(tool_call_ids, list) else [],
+            })
+        else:
+            content = str(todo)
+            steps.append({
+                "id": f"step_{index + 1}",
+                "description": content,
+                "title": content,
+                "status": "pending",
+                "toolCallIds": [],
+            })
+    return steps
 
 
 async def _resolve_agent_config(
@@ -176,6 +267,9 @@ async def stream_agent_chat(
         thread_id = str(uuid.uuid4())
         logging.warning(f"No thread_id provided, generated new thread_id: {thread_id}")
 
+    # 确保 meta 中的 thread_id 与实际使用的一致
+    meta["thread_id"] = thread_id
+
     # 构建 input_context（传递给 LangGraph）
     # config_json为AgentConfig 对象的核心配置（含 context 等）
     agent_config = (config_item.config_json or {}).get("context", {})
@@ -188,26 +282,105 @@ async def stream_agent_chat(
 
     full_msg = None
     accumulated_content: list[str] = []
+    active_tool_calls: dict[str, dict] = {}
+    emitted_tool_call_ids: set[str] = set()
+
+    def emit_plan_from_state(agent_state: dict) -> bytes | None:
+        steps = _todos_to_plan_steps(agent_state.get("todos") if isinstance(agent_state, dict) else None)
+        if not steps:
+            return None
+        return make_chunk(
+            status="thinking_process",
+            event="plan_update",
+            plan={"steps": steps},
+            meta=meta,
+        )
+
+    def emit_tool_call(tool_call: dict, *, status: str = "calling") -> bytes:
+        tool_call_id = str(tool_call.get("id") or tool_call.get("tool_call_id") or uuid.uuid4())
+        function = tool_call.get("name") or tool_call.get("function") or "unknown"
+        args = tool_call.get("args") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip().startswith(("{", "[")) else {"input": args}
+            except Exception:
+                args = {"input": args}
+        active_tool_calls[tool_call_id] = {
+            "tool_call_id": tool_call_id,
+            "function": function,
+            "args": args,
+            "started_at": asyncio.get_event_loop().time(),
+        }
+        emitted_tool_call_ids.add(tool_call_id)
+        meta_info = _tool_meta(function)
+        return make_chunk(
+            status="thinking_process",
+            event="tool_call",
+            tool_call={
+                "tool_call_id": tool_call_id,
+                "function": function,
+                "name": function,
+                "args": args,
+                "status": status,
+                "tool_meta": meta_info,
+                "icon": meta_info.get("icon"),
+            },
+            meta=meta,
+        )
+
+    def emit_tool_result(tool_msg: ToolMessage) -> bytes:
+        tool_call_id = str(getattr(tool_msg, "tool_call_id", "") or uuid.uuid4())
+        cached = active_tool_calls.pop(tool_call_id, {})
+        function = getattr(tool_msg, "name", "") or cached.get("function") or "unknown"
+        started_at = cached.get("started_at")
+        duration_ms = None
+        if started_at:
+            duration_ms = int((asyncio.get_event_loop().time() - started_at) * 1000)
+        meta_info = _tool_meta(function)
+        return make_chunk(
+            status="thinking_process",
+            event="tool_result",
+            tool_call={
+                "tool_call_id": tool_call_id,
+                "function": function,
+                "name": function,
+                "args": cached.get("args", {}),
+                "content": _truncate(getattr(tool_msg, "content", ""), 3000),
+                "output": _truncate(getattr(tool_msg, "content", ""), 3000),
+                "status": "completed",
+                "duration_ms": duration_ms,
+                "tool_meta": meta_info,
+                "icon": meta_info.get("icon"),
+            },
+            meta=meta,
+        )
 
     try:  # 外层 try: 包裹整个业务逻辑,捕获异常
-        # TODO: 临时跳过数据库消息保存
+        conv_repo = None
         if db is not None:
             conv_repo = ConversationRepository(db)
+            save_msg = getattr(conv_repo, 'add_message_by_thread_id', None)
+            if save_msg:
+                try:
+                    await save_msg(
+                        thread_id=thread_id,
+                        role="user",
+                        content=query,
+                        message_type=message_type,
+                        image_content=image_content,
+                        extra_metadata={"raw_message": human_message.model_dump()},
+                    )
+                except Exception as e:
+                    logging.error(f"Error saving user message to db: {e}")
 
-            try:
-                await conv_repo.add_message_by_thread_id(
-                    thread_id=thread_id,
-                    role="user",
-                    content=query,
-                    message_type=message_type,
-                    image_content=image_content,
-                    extra_metadata={"raw_message": human_message.model_dump()},
-                )
-            except Exception as e:
-                logging.error(f"Error saving user message: {e}")
-        else:
-            logging.warning("Database not available, skipping message save")
-            conv_repo = None  # 后续操作需要检查 conv_repo 是否为 None
+        # 始终存入内存存储 (供 History API 读取)
+        memory_store.add_message(thread_id, {
+            "role": "user",
+            "content": query,
+            "type": "human",
+            "message_type": message_type,
+            "timestamp": asyncio.get_event_loop().time(),
+        })
 
         # 先构建 langgraph_config
         langgraph_config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
@@ -215,10 +388,31 @@ async def stream_agent_chat(
         full_msg = None
         accumulated_content = []
         # 流式执行 Agent 推理
-        async for msg, metadata in agent.stream_messages(messages, input_context=input_context):
+        async for chunk in agent.stream_messages(messages, input_context=input_context):
+            msg = None
+            metadata = {}
+
+            # 健壮性解包：兼容 base.py 的不同返回格式
+            if isinstance(chunk, tuple):
+                if len(chunk) == 2:
+                    msg, metadata = chunk
+                else:
+                    # 如果元组长度不对，尝试从最后一个元素找 metadata
+                    msg = chunk[0]
+                    metadata = chunk[-1] if isinstance(chunk[-1], dict) else {}
+            elif isinstance(chunk, dict):
+                # 某些模式下直接返回字典
+                msg = chunk
+            else:
+                msg = chunk
+
+            # 确保 metadata 是字典
+            if not isinstance(metadata, dict):
+                metadata = {}
+
             # 原有的消息处理逻辑
             if isinstance(msg, AIMessageChunk):
-                content = msg.content or ""
+                content = _message_text(msg.content)
                 additional_kwargs = getattr(msg, 'additional_kwargs', {})
                 reasoning_content = additional_kwargs.get('reasoning_content', '')
                 
@@ -228,8 +422,19 @@ async def stream_agent_chat(
                         "type": "thinking",
                         "content": reasoning_content
                     })
-                
-                accumulated_content.append(content)
+
+                for tool_chunk in getattr(msg, "tool_call_chunks", None) or []:
+                    tool_call_id = tool_chunk.get("id")
+                    tool_name = tool_chunk.get("name")
+                    if tool_call_id and tool_name and str(tool_call_id) not in emitted_tool_call_ids:
+                        yield emit_tool_call({
+                            "id": str(tool_call_id),
+                            "name": tool_name,
+                            "args": tool_chunk.get("args") or {},
+                        })
+
+                if content:
+                    accumulated_content.append(content)
 
                 # # 敏感词检查（每 10 个 chunk 检查一次）
                 # content_for_check = "".join(accumulated_content[-10:])
@@ -244,8 +449,64 @@ async def stream_agent_chat(
                 ## 流式返回给前端
                 yield make_chunk(content=content, msg=msg.model_dump(), metadata=metadata, status="loading")
             else:
-                msg_dict = msg.model_dump()  # 转成dict类型
-                yield make_chunk(msg=msg_dict, metadata=metadata, status="loading")
+                # 处理非 Chunk 类型的消息（如完整的 AIMessage, ToolMessage 或 updates 字典）
+                is_process_update = (metadata or {}).get("stream_mode") == "updates"
+                
+                # 如果 msg 是字典（updates 模式的状态快照），则不执行 model_dump
+                if isinstance(msg, dict):
+                    msg_dict = msg
+                elif hasattr(msg, 'model_dump'):
+                    msg_dict = msg.model_dump()  # 转成dict类型
+                else:
+                    # 兼容其他不可序列化的类型，转为字符串
+                    msg_dict = {"content": str(msg), "type": "unknown"}
+
+                if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                    for tool_call in msg.tool_calls:
+                        tool_call_id = str(tool_call.get("id") or "")
+                        if tool_call_id and tool_call_id in emitted_tool_call_ids:
+                            continue
+                        yield emit_tool_call(tool_call)
+
+                if isinstance(msg, ToolMessage):
+                    yield emit_tool_result(msg)
+
+                if not is_process_update:
+                    # 暴力序列化方案：确保 100% 不报错
+                    try:
+                        if hasattr(msg, 'model_dump'):
+                            safe_msg = msg.model_dump()
+                        elif isinstance(msg, dict):
+                            # 对字典中的每个值进行暴力转换
+                            safe_msg = {}
+                            for k, v in msg.items():
+                                if hasattr(v, 'model_dump'):
+                                    safe_msg[k] = v.model_dump()
+                                elif isinstance(v, (str, int, float, bool, list)) or v is None:
+                                    safe_msg[k] = v
+                                else:
+                                    # 遇到 Overwrite/AddableDict 等，直接转字符串描述
+                                    safe_msg[k] = f"<{type(v).__name__}>"
+                        else:
+                            safe_msg = {"content": str(msg), "type": "unknown"}
+                        
+                        yield make_chunk(msg=safe_msg, metadata=metadata, status="loading")
+                    except Exception as e:
+                        # 即使这里报错，也发送一个极简的错误占位符，绝不让流断开
+                        logging.error(f"[CRITICAL] Serialization error: {e}")
+                        yield make_chunk(msg={"error": "serialization_failed"}, metadata={}, status="loading")
+
+                # 捕获 updates 模式下的节点状态，用于获取工具执行后的模型总结
+                if is_process_update and isinstance(msg, dict):
+                    for node_name, node_output in msg.items():
+                        if node_name == "model" and isinstance(node_output, dict):
+                            model_messages = node_output.get("messages", [])
+                            for m in model_messages:
+                                if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
+                                    # 这是模型在工具执行后生成的最终回复
+                                    content = _message_text(m.content)
+                                    if content:
+                                        yield make_chunk(content=content, msg=m.model_dump(), metadata=metadata, status="loading")
 
                 try:  # 如果是工具调用，更新 agent_state
                     if msg_dict.get("type") == "tool":
@@ -254,6 +515,9 @@ async def stream_agent_chat(
                         agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
                         if agent_state:
                             yield make_chunk(status="agent_state", agent_state=agent_state, meta=meta)
+                            plan_chunk = emit_plan_from_state(agent_state)
+                            if plan_chunk:
+                                yield plan_chunk
                 except Exception as e:
                     logging.error(f"Error processing tool message: {e}")
         full_msg = _ensure_full_msg(full_msg, accumulated_content)
@@ -280,15 +544,37 @@ async def stream_agent_chat(
 
         if agent_state:
             yield make_chunk(status="agent_state", agent_state=agent_state, meta=meta)
+            plan_chunk = emit_plan_from_state(agent_state)
+            if plan_chunk:
+                yield plan_chunk
 
-        # # 先存储数据库，再返回 finished，避免前端查询时数据未落库
-        # if conv_repo:
-        #     await save_messages_from_langgraph_state(
-        #         agent_instance=agent,
-        #         thread_id=thread_id,
-        #         conv_repo=conv_repo,
-        #         config_dict=langgraph_config,
-        #     )
+        for tool_call_id, tool_call in list(active_tool_calls.items()):
+            meta_info = _tool_meta(tool_call.get("function", "unknown"))
+            yield make_chunk(
+                status="thinking_process",
+                event="tool_result",
+                tool_call={
+                    "tool_call_id": tool_call_id,
+                    "function": tool_call.get("function", "unknown"),
+                    "name": tool_call.get("function", "unknown"),
+                    "args": tool_call.get("args", {}),
+                    "status": "completed",
+                    "duration_ms": int((asyncio.get_event_loop().time() - tool_call.get("started_at", start_time)) * 1000),
+                    "tool_meta": meta_info,
+                    "icon": meta_info.get("icon"),
+                },
+                meta=meta,
+            )
+            active_tool_calls.pop(tool_call_id, None)
+
+        # 保存 AI 响应到内存存储 (供 History API 读取)
+        if accumulated_content:
+            memory_store.add_message(thread_id, {
+                "role": "assistant",
+                "content": "".join(accumulated_content),
+                "type": "ai",
+                "timestamp": asyncio.get_event_loop().time(),
+            })
 
         # 完成信号
         yield make_chunk(status="finished", meta=meta)
@@ -296,6 +582,16 @@ async def stream_agent_chat(
     # 异常处理（断开连接）
     except (asyncio.CancelledError, ConnectionError) as e:
         logging.warning(f"Client disconnected, cancelling stream: {e}")
+
+        # 保存已累积的内容到内存存储
+        if accumulated_content:
+            memory_store.add_message(thread_id, {
+                "role": "assistant",
+                "content": "".join(accumulated_content),
+                "type": "ai",
+                "partial": True,
+                "timestamp": asyncio.get_event_loop().time(),
+            })
 
         async def save_cleanup():
             nonlocal full_msg
@@ -324,6 +620,16 @@ async def stream_agent_chat(
     except Exception as e:
         logging.error(f"Error streaming messages: {e}, {traceback.format_exc()}")
 
+        # 保存已累积的内容到内存存储
+        if accumulated_content:
+            memory_store.add_message(thread_id, {
+                "role": "assistant",
+                "content": "".join(accumulated_content),
+                "type": "ai",
+                "partial": True,
+                "timestamp": asyncio.get_event_loop().time(),
+            })
+
         error_msg = f"Error streaming messages: {e}"
         error_type = "unexpected_error"
 
@@ -340,3 +646,10 @@ async def stream_agent_chat(
             )
 
         yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
+    finally:
+        # 关闭数据库会话
+        try:
+            if db is not None:
+                await db.close()
+        except Exception:
+            pass

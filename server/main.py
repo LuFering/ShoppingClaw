@@ -5,6 +5,10 @@ FastAPI 应用入口 — 精简版
 import logging
 import os
 import sys
+import warnings
+
+# 屏蔽 Pydantic 序列化警告（LangGraph 的 context 序列化时对 dataclass 不兼容）
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
 # 确保 src/ 路径在 Python 搜索路径中，使 import jd 等模块正常工作
 _src_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src')
@@ -40,6 +44,14 @@ async def lifespan(app: FastAPI):
         logger.info("[OK] PostgreSQL initialized")
     except Exception as e:
         logger.warning(f"[WARN] PostgreSQL initialization failed: {e}")
+
+    # 预加载意图识别模型（避免首次请求加载 20+ 秒）
+    try:
+        from src.services.intent_service import get_intent_service
+        get_intent_service()
+        logger.info("[OK] Intent detection model loaded")
+    except Exception as e:
+        logger.warning(f"[WARN] Intent detection model load failed: {e}")
 
     logger.info("[OK] ShoppingClaw API ready")
     yield

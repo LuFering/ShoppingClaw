@@ -11,6 +11,8 @@ from server.utils.auth_middleware import get_required_user
 from server.utils.user_store import User
 from src import config as conf
 from src.agents import agent_manager
+from src.services.memory_store import memory_store
+from src.storage.postgres.manager import pg_manager
 
 chat = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -111,6 +113,8 @@ async def chat_agent(
 ):
     from src.services.chat_stream_service import stream_agent_chat
 
+    if not meta:
+        meta = {}
     if "request_id" not in meta or not meta.get("request_id"):
         meta["request_id"] = str(uuid.uuid4())
 
@@ -123,6 +127,14 @@ async def chat_agent(
         "has_image": bool(image_content),
     })
 
+    # 尝试获取数据库会话
+    _db_session = None
+    try:
+        pg_manager._check_initialized()
+        _db_session = pg_manager.AsyncSession()
+    except Exception:
+        _db_session = None
+
     return StreamingResponse(
         stream_agent_chat(
             agent_name=agent_name,
@@ -131,7 +143,7 @@ async def chat_agent(
             meta=meta,
             image_content=image_content,
             current_user=current_user,
-            db=None,
+            db=_db_session,
         ),
         media_type="application/json",
     )
@@ -145,19 +157,12 @@ async def create_thread(
     current_user: User = Depends(get_required_user),
 ):
     """创建新对话线程 (内存模式)"""
-    import uuid as _uuid
-    from datetime import datetime
-
-    now = datetime.now().isoformat()
-    return {
-        "id": str(_uuid.uuid4()),
-        "user_id": str(current_user.id),
-        "agent_id": thread.agent_id,
-        "title": thread.title or "新的对话",
-        "is_pinned": False,
-        "created_at": now,
-        "updated_at": now,
-    }
+    new_thread = memory_store.create_thread(
+        agent_id=thread.agent_id,
+        title=thread.title or "新的对话",
+        user_id=str(current_user.id),
+    )
+    return new_thread
 
 
 @chat.get("/threads", response_model=list[ThreadResponse])
@@ -167,8 +172,13 @@ async def list_threads(
     offset: int = Query(0, ge=0),
     current_user: User = Depends(get_required_user),
 ):
-    """获取用户对话线程列表 (内存模式 — 返回空列表)"""
-    return []
+    """获取用户对话线程列表 (内存模式)"""
+    return memory_store.list_threads(
+        user_id=str(current_user.id),
+        agent_id=agent_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @chat.delete("/thread/{thread_id}")
@@ -176,6 +186,9 @@ async def delete_thread(
     thread_id: str,
     current_user: User = Depends(get_required_user),
 ):
+    deleted = memory_store.delete_thread(thread_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="线程不存在")
     return {"message": "删除成功"}
 
 
@@ -186,17 +199,14 @@ async def update_thread(
     current_user: User = Depends(get_required_user),
 ):
     """更新对话线程"""
-    from datetime import datetime
-    now = datetime.now().isoformat()
-    return {
-        "id": thread_id,
-        "user_id": str(current_user.id),
-        "agent_id": "",
-        "title": thread_update.title or "对话",
-        "is_pinned": thread_update.is_pinned if thread_update.is_pinned is not None else False,
-        "created_at": now,
-        "updated_at": now,
-    }
+    updated = memory_store.update_thread(
+        thread_id=thread_id,
+        title=thread_update.title,
+        is_pinned=thread_update.is_pinned,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="线程不存在")
+    return updated
 
 
 # ── 历史 & 状态 ───────────────────────────────────────────
@@ -207,8 +217,9 @@ async def get_agent_history(
     thread_id: str,
     current_user: User = Depends(get_required_user),
 ):
-    """获取智能体历史消息 (内存模式 — 返回空列表)"""
-    return {"history": []}
+    """获取智能体历史消息 (内存模式)"""
+    messages = memory_store.get_messages(thread_id)
+    return {"history": messages}
 
 
 @chat.get("/agent/{agent_id}/state")

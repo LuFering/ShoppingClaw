@@ -611,11 +611,22 @@ const closeThinkingSidebar = () => {
 
 // 添加思考步骤
 const addThinkingStep = (step) => {
-  thinkingState.steps.push({
-    ...step,
-    status: step.status || 'active',
-    timestamp: Date.now()
-  })
+  if (!step?.content) return
+  
+  // 检查是否已有活跃的思考步骤（类型为 thinking）
+  const lastStep = thinkingState.steps[thinkingState.steps.length - 1]
+  if (lastStep && lastStep.type === 'thinking' && lastStep.status === 'active') {
+    // 累积内容到最后一个步骤
+    lastStep.content = (lastStep.content || '') + step.content
+  } else {
+    // 创建新步骤
+    thinkingState.steps.push({
+      ...step,
+      status: step.status || 'active',
+      timestamp: Date.now()
+    })
+  }
+  
   // 自动打开边栏
   if (!thinkingState.isOpen) {
     thinkingState.isOpen = true
@@ -636,6 +647,58 @@ const updateLastThinkingStep = (updates) => {
 // 清空思考步骤
 const clearThinkingSteps = () => {
   thinkingState.steps = []
+  thinkingState.planSteps = []
+  thinkingState.toolCalls = []
+}
+
+const normalizeProcessStatus = (status) => {
+  const value = String(status || 'pending').toLowerCase()
+  if (['completed', 'complete', 'done', 'success', 'called'].includes(value)) return 'completed'
+  if (['in_progress', 'running', 'active', 'processing', 'calling'].includes(value)) return 'running'
+  if (['failed', 'error', 'cancelled', 'canceled'].includes(value)) return 'failed'
+  return 'pending'
+}
+
+const applyPlanSteps = (steps = []) => {
+  const normalized = steps.map((step, index) => {
+    const description = step.description || step.content || step.title || `步骤 ${index + 1}`
+    return {
+      ...step,
+      id: String(step.id || `step_${index + 1}`),
+      description,
+      title: step.title || description,
+      status: normalizeProcessStatus(step.status),
+      toolCallIds: step.toolCallIds || step.tool_call_ids || []
+    }
+  })
+  thinkingState.planSteps.splice(0, thinkingState.planSteps.length, ...normalized)
+}
+
+const upsertToolCall = (toolCall = {}) => {
+  const meta = toolCall.tool_meta || {}
+  const toolCallId = String(toolCall.tool_call_id || toolCall.id || Date.now())
+  const existingIndex = thinkingState.toolCalls.findIndex((item) => item.toolCallId === toolCallId || item.id === toolCallId)
+  const item = {
+    id: toolCallId,
+    name: toolCall.function || toolCall.name || meta.name || 'unknown',
+    args: toolCall.args || {},
+    output: toolCall.output ?? toolCall.content ?? null,
+    status: normalizeProcessStatus(toolCall.status),
+    duration: toolCall.duration_ms ?? toolCall.duration ?? null,
+    icon: toolCall.icon || meta.icon,
+    category: meta.category,
+    toolCallId
+  }
+  if (existingIndex >= 0) {
+    thinkingState.toolCalls.splice(existingIndex, 1, {
+      ...thinkingState.toolCalls[existingIndex],
+      ...item,
+      args: Object.keys(item.args || {}).length ? item.args : thinkingState.toolCalls[existingIndex].args,
+      output: item.output ?? thinkingState.toolCalls[existingIndex].output
+    })
+  } else {
+    thinkingState.toolCalls.push(item)
+  }
 }
 
 const handleSendOrStop = async () => {
@@ -675,7 +738,6 @@ const handleSendOrStop = async () => {
       query,
       config: {
         thread_id: threadId,
-        model: currentAgentId.value,
       },
       meta: {}
     })
@@ -713,6 +775,9 @@ const handleSendOrStop = async () => {
 
           if (chunk.status === 'agent_state') {
             ts.agentState = chunk.agent_state
+            if (Array.isArray(chunk.agent_state?.todos)) {
+              applyPlanSteps(chunk.agent_state.todos)
+            }
             continue
           }
           
@@ -729,23 +794,13 @@ const handleSendOrStop = async () => {
           
           // 处理计划/步骤数据
           if (chunk.plan) {
-            thinkingState.planSteps.splice(0, thinkingState.planSteps.length, ...(chunk.plan.steps || []))
+            applyPlanSteps(chunk.plan.steps || [])
             continue
           }
           
           // 处理工具调用数据
           if (chunk.tool_call) {
-            const toolItem = {
-              id: chunk.tool_call.tool_call_id || Date.now().toString(),
-              name: chunk.tool_call.function || chunk.tool_call.name || '',
-              args: chunk.tool_call.args,
-              output: chunk.tool_call.content || null,
-              status: chunk.tool_call.status || 'calling',
-              duration: chunk.tool_call.duration_ms,
-              icon: chunk.tool_call.icon,
-              toolCallId: chunk.tool_call.tool_call_id
-            }
-            thinkingState.toolCalls.push(toolItem)
+            upsertToolCall(chunk.tool_call)
             continue
           }
 

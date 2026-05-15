@@ -5,12 +5,6 @@ from dataclasses import field, dataclass
 from typing import Sequence, Any, Callable, Awaitable, Generic, get_type_hints, Required, NotRequired, get_args, \
     Annotated
 
-try:
-    import nest_asyncio
-    HAS_NEST_ASYNCIO = True
-except ImportError:
-    HAS_NEST_ASYNCIO = False
-
 import langchain
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware, ModelResponse, ExtendedModelResponse
@@ -1220,22 +1214,21 @@ def _add_middleware_edge(
         # 情况 2：可以跳转，添加条件边
         def jump_edge(state: dict[str, Any]) -> str:
             """根据 state 中的 jump_to 字段决定跳转到哪里"""
-            # 从 state 中取出 jump_to 值
             jump_to_value = state.get("jump_to")
 
-            # 简化处理：优先使用 jump_to 值
-            if jump_to_value:
-                # 如果 jump_to 是字符串，直接使用
-                if isinstance(jump_to_value, str):
-                    # 直接返回 jump_to 的值，不再转换
-                    result = jump_to_value
-                    # print(f"[DEBUG jump_edge] jump_to={jump_to_value}, returning={result}")
-                    return result
+            if isinstance(jump_to_value, str):
+                # 必须将 "end"/"model" 解析为实际节点名，
+                # 否则 LangGraph 的 Branch._finish 会 KeyError
+                if jump_to_value == "end":
+                    return end_destination
+                elif jump_to_value == "model":
+                    return model_destination
+                elif jump_to_value == "tools":
+                    return "tools"
+                return jump_to_value  # 未知值回退（落入 destinations 列表）
 
-            # 没有 jump_to 或无法识别，返回默认目的地
-            result = default_destination
-            # print(f"[DEBUG jump_edge] no jump_to, returning default={result}")
-            return result
+            # 没有 jump_to, 返回默认目的地
+            return default_destination
 
         # 构建所有可能的目标节点列表
         destinations = [default_destination]
@@ -1263,51 +1256,20 @@ def _add_middleware_edge(
         )
 
 
-def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
-    """ToolNode的包装器,用于添加日志和增强并行稳定性"""
-    # logging.info("[TOOLS] >>> 进入tools节点")
-    
-    async def _execute_tools():
-        """内部异步执行函数，负责并行调度所有工具"""
-        # logging.info("[TOOLS] 开始并行执行工具调用...")
-        # ainvoke 内部会自动处理多个 tool_calls 的并行 (asyncio.gather)
-        result = await tool_node.ainvoke(state)
-        # logging.info(f"[TOOLS] 工具并行执行完毕，返回结果类型: {type(result)}")
-        return result
+async def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
+    """ToolNode的异步包装器,用于添加日志和增强并行稳定性"""
+    from langchain_core.messages import BaseMessage, ToolMessage
+    from langgraph.types import Command
+    import uuid
 
-    try:
-        # 尝试获取当前是否已有事件循环在运行
-        loop = asyncio.get_running_loop()
-        # 如果有循环在运行，且安装了 nest_asyncio，则应用补丁以支持嵌套
-        if HAS_NEST_ASYNCIO:
-            nest_asyncio.apply()
-            result = asyncio.run(_execute_tools())
-        else:
-            # 如果没有安装补丁，尝试在当前循环中创建任务（但这在同步 wrapper 中很难实现）
-            # 这种情况下，我们只能尝试直接运行，可能会报 RuntimeError
-            logging.warning("[TOOLS] nest_asyncio 未安装，尝试直接运行异步任务...")
-            result = asyncio.run(_execute_tools())
-    except RuntimeError as e:
-        # 如果是因为嵌套循环导致的错误，提示用户安装 nest_asyncio
-        if "cannot be called from a running event loop" in str(e):
-            raise RuntimeError(
-                "检测到嵌套事件循环冲突。请执行 'pip install nest_asyncio' 以支持 Windows 下的并行工具调用。"
-            ) from e
-        raise e
+    result = await tool_node.ainvoke(state)
 
-    # logging.info("[TOOLS] <<< 离开tools节点")
-    return result
-    
-    # 兼容处理：tool_node.invoke 可能返回 list 或 dict
+    # 兼容处理：tool_node.ainvoke 可能返回 list 或 dict
     if isinstance(result, list):
-        from langchain_core.messages import BaseMessage, ToolMessage
-        from langgraph.types import Command
-        import uuid
-        
         # 收集所有需要更新的状态
         all_updates = {}
         valid_messages = []
-        
+
         for item in result:
             if isinstance(item, BaseMessage):
                 # 直接是 Message 对象
@@ -1328,7 +1290,7 @@ def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
                             fixed_messages.append(msg)
                         item.update['messages'] = fixed_messages
                         valid_messages.extend(fixed_messages)
-                    
+
                     # 合并其他 update 字段（如 todos）
                     for key, value in item.update.items():
                         if key != 'messages':
@@ -1336,11 +1298,11 @@ def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
             else:
                 # 其他类型，跳过
                 pass
-        
+
         # 构建返回结果：包含 messages 和其他状态更新
         final_result = {"messages": valid_messages}
         final_result.update(all_updates)
-        
+
         logging.debug(f"[TOOLS] 输出有效消息列表长度: {len(valid_messages)}")
         logging.debug(f"[TOOLS] 输出完整信息: {repr(final_result)}")
         return final_result
@@ -1473,26 +1435,31 @@ def create_agent(
         )
 
     async def amodel_node_wrapper(state: AgentState[Any], runtime: Runtime[ContextT]) -> list[Command[Any]]:
+        import logging
         logging.info("[MODEL] >>> 进入model节点")
-        return await amodel_node(
-            model=model,
-            tool_node=tool_node,
-            system_messages=system_messages,
-            middleware=middleware,
-            initial_response_format=response_format,
-            state=state,
-            runtime=runtime
-        )
+        try:
+            result = await amodel_node(
+                model=model,
+                tool_node=tool_node,
+                system_messages=system_messages,
+                middleware=middleware,
+                initial_response_format=response_format,
+                state=state,
+                runtime=runtime
+            )
+            logging.info(f"[MODEL] <<< 离开model节点, 返回类型: {type(result)}, 长度: {len(result) if isinstance(result, (list, dict)) else 'N/A'}")
+            return result
+        except Exception as e:
+            logging.error(f"[MODEL] 节点异常: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
     graph.add_node("model", RunnableCallable(model_node_wrapper, amodel_node_wrapper))
 
     """添加tools节点"""
-    # 使用异步包装器以支持 StructuredTool
     async def atool_node_wrapper(state):
-        return tool_node_wrapper(state, tool_node)
-    
-    from langchain_core.runnables import RunnableLambda
-    graph.add_node("tools", RunnableLambda(tool_node_wrapper, afunc=atool_node_wrapper))
+        return await tool_node_wrapper(state, tool_node)
+
+    graph.add_node("tools", RunnableCallable(None, afunc=atool_node_wrapper))
 
     """添加 middleware 节点"""
     middleware_node(graph, merged_state_schema, middleware)  # type: ignore[arg-type]

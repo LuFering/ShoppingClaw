@@ -60,8 +60,15 @@ class FeatureExtractor:
         features.append(1.0 if evidence.get("user_profile") else 0.0)
         
         # 3. 证据质量（5维）
+        # research_data 是 List[Dict] 类型（商品列表），直接计算长度
         research_data = evidence.get("research_data") or []
-        products = research_data.get("products", []) if isinstance(research_data, dict) else []
+        if isinstance(research_data, list):
+            products = research_data
+        elif isinstance(research_data, dict):
+            # 兼容旧版嵌套结构
+            products = research_data.get("products", [])
+        else:
+            products = []
         features.append(len(products))  # 商品数量
         
         # 品牌多样性

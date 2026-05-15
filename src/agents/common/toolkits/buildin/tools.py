@@ -399,7 +399,10 @@ def render_product_card(product: dict) -> str:
     logger.info(f"[Tool] 渲染商品卡片: {product.get('title', 'Unknown')}")
     
     title = product.get("title", "未知商品")
-    price = product.get("price", 0)
+    try:
+        price = float(product.get("price", 0))
+    except (ValueError, TypeError):
+        price = 0.0
     platform = product.get("platform", "unknown")
     url = product.get("url", "#")
     image_url = product.get("image_url")
@@ -466,7 +469,11 @@ def format_comparison_table(products: list[dict]) -> str:
     
     for product in products:
         title = product.get("title", "未知")[:15] + "..." if len(product.get("title", "")) > 15 else product.get("title", "未知")
-        price = f"**¥{product.get('price', 0):.2f}**"
+        try:
+            p_price = float(product.get("price", 0))
+        except (ValueError, TypeError):
+            p_price = 0.0
+        price = f"**¥{p_price:.2f}**"
         platform = platform_names.get(product.get("platform", ""), product.get("platform", "-"))
         rating = f"{product.get('rating', '-')}"
         sales = str(product.get('sales_count', '-'))

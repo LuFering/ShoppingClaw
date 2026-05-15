@@ -18,19 +18,42 @@ class GapDetectorMiddleware(AgentMiddleware):
     name = "gap_detector"
     state_schema = GapDetectorState
     
+    def __init__(self):
+        super().__init__()
+        self._turn_counter = 0
+        self._fused = False
+    
     def after_model(self, state: dict, runtime: Runtime) -> dict | None:
         """同步版"""
         return self._detect_gaps(state)
     
     async def aafter_model(self, state: dict, runtime: Runtime) -> dict | None:
         """异步版"""
-        return self._detect_gaps(state)
+        import logging
+        logging.info(f"[GapDetector] >>> 进入 aafter_model 节点")
+        try:
+            result = self._detect_gaps(state)
+            logging.info(f"[GapDetector] <<< 离开 aafter_model 节点, 返回: {result}")
+            return result
+        except Exception as e:
+            logging.error(f"[GapDetector] aafter_model 异常: {type(e).__name__}: {e}", exc_info=True)
+            raise
     
     def _detect_gaps(self, state: dict) -> dict | None:
         """检测证据缺口"""
         import logging
+        logging.info(f"[GapDetector] _detect_gaps 开始执行")
+        
+        # 熔断后跳过检测，让 LLM 回复自然输出
+        if self._fused:
+            logging.info("[GapDetector] 已熔断，跳过检测")
+            return None
+        
         intent = state.get("intent")
+        logging.info(f"[GapDetector] state 中的 intent: {intent}")
+        
         if not intent:
+            logging.warning("[GapDetector] state 中没有 intent 字段，跳过 Gap 检测")
             return None
         
         # 追问阶段豁免：意图明确但有missing_slots，等待用户回答
@@ -76,13 +99,14 @@ class GapDetectorMiddleware(AgentMiddleware):
         }
         
         # 熔断机制：检查是否已经尝试过太多次补证
-        current_turns = state.get("turn_index", 0)
-        current_turns += 1
-        update["turn_index"] = current_turns
+        self._turn_counter += 1
+        current_turns = self._turn_counter
         if result["decision_confidence"] < 0.7:
             if current_turns >= 3:
                 logging.info(f"[GapDetector] 达到最大补证轮次 ({current_turns})，强制放行")
-                update["jump_to"] = None
+                # 进入 model 让 LLM 生成最终回复
+                update["jump_to"] = "model"
+                self._fused = True
             else:
                 update["jump_to"] = "model"
                 logging.info(f"[GapDetector] 证据不足，跳回model (当前轮次: {current_turns})")

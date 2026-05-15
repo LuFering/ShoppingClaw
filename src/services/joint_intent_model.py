@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import BertModel
+from transformers import BertModel, BertConfig
 
 # 延迟导入，避免循环依赖
 def _get_schema():
@@ -11,10 +11,18 @@ def _get_schema():
 class JointIntentSlotModel(nn.Module):
     """JointBERT：意图分类 + 槽位填充联合模型"""
 
-    def __init__(self, bert_model_name: str = "C:\\Users\\25153\\.cache\\huggingface\\hub\\models--hfl--chinese-roberta-wwm-ext\\snapshots\\5c58d0b8ec1d9014354d691c538661bf00bfdb44"):
+    def __init__(self, bert_model_name: str | None = None):
         super().__init__()
         # 使用本地缓存的BERT模型，避免联网下载
-        self.bert = BertModel.from_pretrained(bert_model_name)
+        if bert_model_name is None:
+            # Docker 环境：使用 HuggingFace repo_id
+            bert_model_name = "hfl/chinese-roberta-wwm-ext"
+            self.bert = BertModel.from_pretrained(bert_model_name)
+        else:
+            # 从本地路径加载配置（仅需 config.json），无需联网
+            # 权重由外部调用 load_state_dict(model.pth) 覆盖
+            config = BertConfig.from_pretrained(bert_model_name)
+            self.bert = BertModel(config)
         hidden = self.bert.config.hidden_size  # 768
 
         MAIN_INTENTS, SUB_INTENTS, SLOT_TAGS = _get_schema()

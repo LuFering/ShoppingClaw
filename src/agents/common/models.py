@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -11,8 +12,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-#siliconflow/Pro/deepseek-ai/DeepSeek-V3.2
+# 模型实例缓存，避免同一模型被重复加载
+_model_cache: dict[str, BaseChatModel] = {}
+
 def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
+    # 检查缓存：相同模型名 + 相同 kwargs 直接复用
+    cache_key = f"{fully_specified_name}__{hash(frozenset(kwargs.items()))}" if kwargs else fully_specified_name
+    if cache_key in _model_cache:
+        logging.debug(f"[load_chat_model] cache hit: {fully_specified_name}")
+        return _model_cache[cache_key]
     """加载chat model"""
     provider,model=fully_specified_name.split("/",maxsplit=1)
 
@@ -123,40 +131,51 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
                     try:
                         async for chunk in super()._astream(messages, *args, **kwargs):
                             yield chunk
+                    except asyncio.CancelledError:
+                        # 客户端断开 — 阻止 httpx 在清理时打 decode_complete 错误到 stderr
+                        logging.debug("[DeepSeek] stream cancelled during _astream")
+                        raise
                     except Exception as e:
                         if "reasoning_content" in str(e):
                             logging.warning("[DeepSeek] reasoning_content 错误，重试...")
                             async for chunk in super()._astream(messages, *args, **kwargs):
                                 yield chunk
                         else:
-                            raise e
+                            logging.warning(f"[DeepSeek] streaming error: {type(e).__name__}: {e}")
+                            raise
 
-            return DeepSeekCleanedModel(
+            model_instance = DeepSeekCleanedModel(
                 model=model,
                 api_key=api_key,
                 base_url=base_url,
                 stream_usage=True,
                 extra_body={"enable_thinking": False}
             )
+            _model_cache[cache_key] = model_instance
+            return model_instance
 
-        return init_chat_model(model_spec,**kwargs)
+        model_instance = init_chat_model(model_spec, **kwargs)
+        _model_cache[cache_key] = model_instance
+        return model_instance
     elif provider in["ollama"]:
         from langchain_ollama import ChatOllama
 
-
-
-        return ChatOllama(
+        model_instance = ChatOllama(
             model=model,
             base_url=base_url
         )
+        _model_cache[cache_key] = model_instance
+        return model_instance
     else:
         try:
             from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
+            model_instance = ChatOpenAI(
                 model=model,
                 api_key=api_key,
                 base_url=base_url,
                 stream_usage=True,
             )
+            _model_cache[cache_key] = model_instance
+            return model_instance
         except Exception as e:
             raise ValueError(f"Model provider {provider} load failed:{e}")

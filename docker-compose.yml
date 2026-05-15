@@ -13,6 +13,10 @@ services:
       - ./agents:/app/agents
       - ./deepagents:/app/deepagents
       - ./.env:/app/.env
+      # 本地模型文件(训练后的权重、配置等)
+      - ./models:/app/models
+      # HuggingFace 模型缓存(持久化,避免重复下载)
+      - hf-cache:/root/.cache/huggingface
     ports:
       - "5050:5050"
     networks:
@@ -83,3 +87,7 @@ services:
 networks:
   app-network:
     driver: bridge
+
+volumes:
+  hf-cache:
+    driver: local

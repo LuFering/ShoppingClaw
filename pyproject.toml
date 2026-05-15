@@ -78,6 +78,7 @@ dependencies = [
     # "lightrag-hku>=1.4.6",  # RAG检索，可能依赖torch
     # "rapidocr-onnxruntime>=1.4.4",  # OCR识别，~50MB
     "loguru>=0.7.3",
+    "nest-asyncio>=1.6.0",
     "redis>=5.2.0",
     "lightgbm>=4.6.0",
     "scikit-learn>=1.8.0",

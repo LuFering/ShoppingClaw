@@ -44,12 +44,22 @@ class IntentDetectorMiddleware(AgentMiddleware):
 
     # 异步版（stream_messages 走的是这个）
     async def abefore_agent(self, state: dict, runtime: Runtime) -> dict | None:
+        import logging
+        logging.info(f"[IntentDetector] >>> 进入 abefore_agent")
         text = self._get_last_human_text(state)
-        if not text or "intent" in state:
+        logging.info(f"[IntentDetector] 提取到的文本: {text[:50] if text else None}...")
+        
+        if not text:
+            logging.warning("[IntentDetector] 未找到 HumanMessage，跳过意图识别")
+            return None
+        
+        if "intent" in state:
+            logging.info(f"[IntentDetector] state 已有 intent，跳过重复识别")
             return None
 
         try:
             from src.services.intent_service import get_intent_service
+            logging.info(f"[IntentDetector] 开始调用意图识别服务...")
             intent_result = await asyncio.to_thread(
                 get_intent_service().predict, text, self._threshold
             )
@@ -57,7 +67,7 @@ class IntentDetectorMiddleware(AgentMiddleware):
             return {"intent": intent_result}
         except Exception as e:
             # torch 未安装或模型加载失败时跳过意图识别
-            logging.debug(f"[IntentDetector] Intent detection failed ({type(e).__name__}: {e}), skipping")
+            logging.error(f"[IntentDetector] Intent detection failed ({type(e).__name__}: {e})", exc_info=True)
             return None
 
     @staticmethod

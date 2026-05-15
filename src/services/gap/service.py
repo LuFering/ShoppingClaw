@@ -17,7 +17,7 @@ class GapService:
             # 无论从哪里启动，都根据当前文件位置向上回溯到项目根目录
             current_file = Path(__file__).resolve()
             project_root = current_file.parents[3] # gap -> services -> src -> ShoppingClaw
-            self.model_dir = str(project_root / "model" / "gap_detector")
+            self.model_dir = str(project_root / "models" / "gap_detector")
         else:
             self.model_dir = model_dir
         self.feature_extractor = FeatureExtractor()

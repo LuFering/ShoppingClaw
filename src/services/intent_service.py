@@ -18,7 +18,7 @@ class JointIntentService:
         self._sub_intents = cfg["sub_intents"]
 
         self._tokenizer = BertTokenizer.from_pretrained(model_dir)
-        self._model = JointIntentSlotModel()
+        self._model = JointIntentSlotModel(bert_model_name=model_dir)
         self._model.load_state_dict(
             torch.load(f"{model_dir}/model.pth", map_location="cpu")
         )

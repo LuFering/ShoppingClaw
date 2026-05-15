@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 JUSTONE_API_KEY = os.getenv("JUSTONE_API_KEY")
 JUSTONE_BASE_URL = os.getenv("JUSTONE_BASE_URL", "https://api.justoneapi.com")
 
+# JD SDK singleton state — avoids re-initializing on every tool call
+_jd_initialized: bool = False
+_jd_access_token: str | None = None
+
+# In-memory cache for product details (keyed by sku_id)
+# Prevents re-fetching the same SKU within a single request
+_detail_cache: dict[str, dict] = {}
+
 
 def _parse_sales(sales_str: Optional[str]) -> Optional[int]:
     """解析销量字符串为整数（如'超1万人已购买' → 10000）"""
@@ -52,19 +60,25 @@ def _parse_sales(sales_str: Optional[str]) -> Optional[int]:
 
 
 def init_jd_sdk():
-    """初始化京东SDK认证"""
+    """初始化京东SDK认证（**单例模式**，仅首次调用时真正初始化）"""
+    global _jd_initialized, _jd_access_token
+
+    if _jd_initialized:
+        return True, _jd_access_token
+
     # 从环境变量读取配置
     app_key = os.getenv("JD_APP_KEY")
     app_secret = os.getenv("JD_APP_SECRET")
-    access_token = os.getenv("JD_ACCESS_TOKEN")
-    
+    _jd_access_token = os.getenv("JD_ACCESS_TOKEN")
+
     if not app_key or not app_secret:
         logger.warning("[JD API] 未配置JD_APP_KEY或JD_APP_SECRET")
         return False, None
-    
+
     jd.setDefaultAppInfo(app_key, app_secret)
-    logger.info(f"[JD API] SDK初始化完成 | Access Token: {'已配置' if access_token else '未配置'}")
-    return True, access_token
+    _jd_initialized = True
+    logger.info(f"[JD API] SDK初始化完成（首次）| Access Token: {'已配置' if _jd_access_token else '未配置'}")
+    return True, _jd_access_token
 
 
 # ==================== 工具1: jd_deep_search - 深度商品搜索 ====================
@@ -613,7 +627,13 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
     - promo_info, rank_info, key_specs
     """
     logger.info(f"[Tool] 获取商品完整详情: {sku_id}")
-    
+
+    # 缓存命中 — 同一SKU可能在一次请求中被多次查询
+    cached = _detail_cache.get(sku_id)
+    if cached is not None:
+        logger.info(f"[Tool] 商品详情缓存命中: {sku_id}")
+        return cached
+
     # 初始化Product兼容结构
     detail = {
         "id": f"jd_{sku_id}",
@@ -785,18 +805,16 @@ def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
                             "title": r.get('title')
                         } for r in rank_list]
                     }
-                
+
                 # 补充店铺名称和URL
                 detail['shop_name'] = stock.get('D', {}).get('shopName')
                 detail['url'] = f"https://item.jd.com/{sku_id}.html"
-                
-                # 补充店铺名称和URL
-                detail['shop_name'] = stock.get('D', {}).get('shopName')
-                detail['url'] = f"https://item.jd.com/{sku_id}.html"
-                
+
         except Exception as e:
             logger.warning(f"[Tool] JustoneAPI详情失败: {e}")
-    
+
+    # 写入缓存
+    _detail_cache[sku_id] = detail
     return detail
 
 

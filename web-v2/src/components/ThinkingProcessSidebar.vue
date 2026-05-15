@@ -67,7 +67,7 @@
           </section>
 
           <!-- ═══ Steps/Plan Section ═══ -->
-          <section v-if="planSteps.length > 0" class="steps-section">
+          <section v-if="normalizedPlanSteps.length > 0" class="steps-section">
             <div
               @click="sections.steps.expanded = !sections.steps.expanded"
               class="section-header"
@@ -79,7 +79,7 @@
               />
               <ListChecks size="13" class="section-icon steps" />
               <span class="section-title">任务进度</span>
-              <span class="step-counter">{{ completedStepsCount }}/{{ planSteps.length }}</span>
+              <span class="step-counter">{{ completedStepsCount }}/{{ normalizedPlanSteps.length }}</span>
             </div>
             <div v-if="sections.steps.expanded" class="section-content steps-content">
               <!-- Progress Bar -->
@@ -93,19 +93,21 @@
               <!-- Steps List -->
               <div class="steps-list">
                 <div
-                  v-for="step in planSteps"
+                  v-for="step in normalizedPlanSteps"
                   :key="step.id"
                   @click="selectStep(step.id)"
                   class="step-item"
                   :class="{
                     'selected': selectedStepId === step.id,
                     'running': step.status === 'running',
-                    'completed': step.status === 'completed'
+                    'completed': step.status === 'completed',
+                    'failed': step.status === 'failed'
                   }"
                 >
                   <div class="step-status">
                     <CheckCircle v-if="step.status === 'completed'" size="14" class="status-icon completed" />
                     <LoaderCircle v-else-if="step.status === 'running'" size="14" class="status-icon running" />
+                    <AlertCircle v-else-if="step.status === 'failed'" size="14" class="status-icon failed" />
                     <Circle v-else size="14" class="status-icon pending" />
                   </div>
                   <span class="step-description">{{ step.description || step.title }}</span>
@@ -152,7 +154,7 @@
                       :class="{ 'expanded': expandedToolIds.has(item.id) }"
                     />
                     <span v-if="item.icon" class="tool-icon">{{ item.icon }}</span>
-                    <LoaderCircle v-else-if="item.status === 'calling'" size="14" class="tool-loading" />
+                    <LoaderCircle v-else-if="isToolRunning(item)" size="14" class="tool-loading" />
                     <Zap v-else size="14" class="tool-icon-default" />
                     <div class="tool-info">
                       <span class="tool-name">{{ item.name }}</span>
@@ -174,7 +176,7 @@
                       <div class="detail-label">Output</div>
                       <pre class="detail-content">{{ safeStringify(item.output) }}</pre>
                     </div>
-                    <div v-if="item.status === 'calling' && !item.output" class="tool-running">
+                    <div v-if="isToolRunning(item) && !item.output" class="tool-running">
                       <LoaderCircle size="14" class="animate-spin" />
                       <span>执行中...</span>
                     </div>
@@ -265,8 +267,44 @@ const thinkingItems = computed(() =>
   props.thinkingSteps.filter(s => s.type === 'thinking' && s.content)
 )
 
+const normalizeStatus = (status) => {
+  const value = String(status || 'pending').toLowerCase()
+  if (['completed', 'complete', 'done', 'success', 'called'].includes(value)) return 'completed'
+  if (['running', 'in_progress', 'active', 'processing', 'calling'].includes(value)) return 'running'
+  if (['failed', 'error', 'cancelled', 'canceled'].includes(value)) return 'failed'
+  return 'pending'
+}
+
+const normalizedPlanSteps = computed(() =>
+  (props.planSteps || []).map((step, index) => {
+    const description = step.description || step.content || step.title || `步骤 ${index + 1}`
+    return {
+      ...step,
+      id: String(step.id || `step_${index + 1}`),
+      description,
+      title: step.title || description,
+      status: normalizeStatus(step.status),
+      toolCallIds: step.toolCallIds || step.tool_call_ids || []
+    }
+  })
+)
+
 const toolItems = computed(() =>
-  props.toolCalls || []
+  (props.toolCalls || []).map((tool, index) => {
+    const meta = tool.tool_meta || {}
+    const toolCallId = String(tool.toolCallId || tool.tool_call_id || tool.id || '')
+    return {
+      ...tool,
+      id: String(tool.id || toolCallId || `${tool.name || 'tool'}-${index}`),
+      name: tool.name || tool.function || meta.name || 'unknown',
+      args: tool.args || {},
+      output: tool.output ?? tool.content ?? null,
+      status: normalizeStatus(tool.status),
+      duration: tool.duration ?? tool.duration_ms ?? null,
+      icon: tool.icon || meta.icon,
+      toolCallId
+    }
+  })
 )
 
 const aggregatedThinkingContent = computed(() =>
@@ -280,21 +318,21 @@ const isCurrentlyThinking = computed(() => {
 })
 
 const completedStepsCount = computed(() =>
-  props.planSteps.filter(s => s.status === 'completed').length
+  normalizedPlanSteps.value.filter(s => s.status === 'completed').length
 )
 
 const allStepsCompleted = computed(() =>
-  props.planSteps.length > 0 && props.planSteps.every(s => s.status === 'completed')
+  normalizedPlanSteps.value.length > 0 && normalizedPlanSteps.value.every(s => s.status === 'completed')
 )
 
 const progressPercent = computed(() => {
-  const total = props.planSteps.length || 1
+  const total = normalizedPlanSteps.value.length || 1
   const done = completedStepsCount.value
   return Math.round((done / total) * 100)
 })
 
 const hasAnyContent = computed(() =>
-  thinkingItems.value.length > 0 || props.planSteps.length > 0 || toolItems.value.length > 0
+  thinkingItems.value.length > 0 || normalizedPlanSteps.value.length > 0 || toolItems.value.length > 0
 )
 
 const hasCompletedSteps = computed(() => completedStepsCount.value > 0)
@@ -309,7 +347,7 @@ const headerTitle = computed(() => {
 // Step filtering for tools
 const stepToolCallIds = computed(() => {
   if (!selectedStepId.value) return null
-  const step = props.planSteps.find(s => s.id === selectedStepId.value)
+  const step = normalizedPlanSteps.value.find(s => s.id === selectedStepId.value)
   if (!step?.toolCallIds?.length) return new Set()
   return new Set(step.toolCallIds)
 })
@@ -341,8 +379,11 @@ const toggleToolExpand = (id) => {
   }
 }
 
+const isToolRunning = (tool) => tool.status === 'running'
+
 const getToolArg = (tool) => {
   if (!tool.args) return ''
+  if (typeof tool.args === 'string') return tool.args.slice(0, 80)
   const fn = tool.name || ''
   if (fn.includes('search')) return tool.args.query || tool.args.search_query || ''
   if (fn.includes('exec') || fn === 'execute') return tool.args.command || ''
@@ -576,7 +617,7 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
   // Section Base Styles
   section {
     border: 1px solid var(--gray-200);
-    border-radius: 12px;
+    border-radius: 8px;
     background: var(--gray-0);
     overflow: hidden;
     transition: all 0.2s ease;
@@ -789,7 +830,13 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
         }
 
         &.running {
-          background: var(--gray-50);
+          background: linear-gradient(90deg, var(--main-50), var(--gray-0));
+          border-left: 2px solid var(--main-400);
+        }
+
+        &.failed {
+          background: #fffbeb;
+          border-left: 2px solid #f59e0b;
         }
 
         .step-status {
@@ -814,6 +861,10 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
             &.pending {
               color: var(--gray-300);
             }
+
+            &.failed {
+              color: #f59e0b;
+            }
           }
         }
 
@@ -829,6 +880,11 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
 
           .running & {
             color: var(--gray-900);
+            font-weight: 500;
+          }
+
+          .failed & {
+            color: #92400e;
             font-weight: 500;
           }
 
@@ -852,7 +908,7 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
   // Tools Section
   .tools-content {
     padding: 8px;
-    background: var(--gray-50);
+    background: linear-gradient(180deg, var(--gray-50), var(--gray-0));
     border-radius: 8px;
 
     .tools-list {
@@ -885,6 +941,7 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
           &.expanded {
             background: var(--gray-0);
             border-color: var(--gray-200);
+            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
           }
 
           .tool-chevron {
