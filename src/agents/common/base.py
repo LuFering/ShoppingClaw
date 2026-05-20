@@ -62,18 +62,32 @@ class BaseAgent:
         # 返回消息流给前端：
         # - messages: token 级正文和 reasoning_content
         # - updates: 节点级别的状态更新，用于捕获工具执行后的模型总结
-        logging.info(f"[Stream Start] graph.astream 开始迭代 (mode: messages + updates)")
+        # - custom: 中间件通过 get_stream_writer() 写入的自定义事件（如 thinking_process）
+        logging.info(f"[Stream Start] graph.astream 开始迭代 (mode: messages + updates + custom)")
         async for chunk in graph.astream(
                 input={"messages": messages},
-                stream_mode=["messages", "updates"],
+                stream_mode=["messages", "updates", "custom"],
                 context=context,
                 config=input_config,
         ):
             # LangGraph 混合模式返回的是 (namespace, data) 元组
             if isinstance(chunk, tuple) and len(chunk) == 2:
                 namespace, data = chunk
-                # 如果 data 是字典（updates），尝试清洗其中的 Overwrite 对象
+                logging.info(f"[base.py] chunk received: namespace={namespace}, data type={type(data).__name__}")
+                # 如果 data 是字典（updates 或 custom），尝试清洗其中的 Overwrite 对象
                 if isinstance(data, dict):
+                    # 判断是否来自 custom 模式（中间件自定义事件）
+                    # custom 模式的 namespace 格式: ("custom", "thinking_process") 或 ["custom", "thinking_process"]
+                    is_custom_mode = False
+                    if isinstance(namespace, tuple) and len(namespace) >= 1 and namespace[0] == "custom":
+                        is_custom_mode = True
+                    elif isinstance(namespace, list) and len(namespace) >= 1 and namespace[0] == "custom":
+                        is_custom_mode = True
+                    elif isinstance(namespace, str) and namespace == "custom":
+                        is_custom_mode = True
+                    
+                    stream_mode_for_data = "custom" if is_custom_mode else "updates"
+                    logging.info(f"[base.py] dict data keys={list(data.keys())}, inferred mode={stream_mode_for_data}")
                     cleaned_data = {}
                     for k, v in data.items():
                         if hasattr(v, 'model_dump'):
@@ -82,7 +96,7 @@ class BaseAgent:
                             cleaned_data[k] = v
                         else:
                             cleaned_data[k] = f"<{type(v).__name__}>"
-                    yield cleaned_data, {"stream_mode": "updates", "namespace": namespace}
+                    yield cleaned_data, {"stream_mode": stream_mode_for_data, "namespace": namespace}
                 else:
                     # messages 模式通常直接返回消息对象
                     yield data, {"stream_mode": "messages", "namespace": namespace}

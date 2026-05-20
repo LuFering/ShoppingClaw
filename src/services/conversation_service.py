@@ -14,7 +14,7 @@ ATTACHMENTS_BUCKET = "chat-attachments"
 
 
 async def require_user_conversation(conv_repo: ConversationRepository, thread_id: str, user_id: str):
-    conversation = await conv_repo.get_conversation_by_thread_id(thread_id)
+    conversation = await conv_repo.get_by_thread_id(thread_id)
     if not conversation or conversation.user_id != str(user_id) or conversation.status == "deleted":
         raise HTTPException(status_code=404, detail="对话线程不存在")
     return conversation
@@ -154,7 +154,7 @@ async def list_threads_view(
     offset: int = 0,
 ) -> list[dict]:
     conv_repo = ConversationRepository(db)
-    conversations = await conv_repo.list_conversations(
+    conversations = await conv_repo.list_by_user(
         user_id=str(current_user_id),
         agent_id=agent_id,
         status="active",

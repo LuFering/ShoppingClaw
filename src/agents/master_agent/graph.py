@@ -7,10 +7,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.agents.common.base import BaseAgent
 from src.agents.common.backends import StateBackend
 from src.agents.common.middleware.filesystem import FilesystemMiddleware
-from src.agents.common.middleware.intent_detector import IntentDetectorMiddleware
+# from src.agents.common.middleware.intent_detector import IntentDetectorMiddleware  # 暂时禁用
 from src.agents.common.middleware.patch_tool_calls import PatchToolCallsMiddleware
-from src.agents.common.middleware.evidence_collector import EvidenceCollectorMiddleware
-from src.agents.common.middleware.gap_detector import GapDetectorMiddleware
+# from src.agents.common.middleware.evidence_collector import EvidenceCollectorMiddleware  # 暂时禁用
+# from src.agents.common.middleware.gap_detector import GapDetectorMiddleware  # 暂时禁用
 from src.agents.common.middleware.skills import SkillsMiddleware
 from src.agents.common.middleware.subagents import SubAgentMiddleware
 from src.agents.common.middleware.summarization import SummaryOffloadMiddleware
@@ -81,6 +81,7 @@ class MasterAgent(BaseAgent):
         super().__init__(**kwargs)
         self.graph=None
         self.checkpointer=None
+        self.sse_middleware=None  # SSEMonitoringMiddleware 实例，供 chat_stream_service 访问
 
     async def get_tools(self):
         """获取所有已注册的硬编码工具实例（仅buildin类别）"""
@@ -96,9 +97,45 @@ class MasterAgent(BaseAgent):
         ]
 
     async def _get_checkpointer(self):
-        """获取检查点器（目前使用内存存储）"""
+        """获取检查点器（PostgreSQL 持久化）"""
         if self.checkpointer is None:
-            self.checkpointer = MemorySaver()
+            # ═══ 使用 PostgreSQL Checkpointer（生产环境）═══
+            from src.config import config as conf
+            from src.agents.common.backends.postgres_checkpointer import get_postgres_checkpointer
+            
+            try:
+                # 直接从环境变量获取 PostgreSQL 连接字符串
+                import os
+                db_url = os.getenv('POSTGRES_URL') or os.getenv('DATABASE_URL')
+                
+                # LangGraph Checkpointer 需要纯 PostgreSQL 格式，不是 SQLAlchemy 格式
+                if db_url and db_url.startswith('postgresql+asyncpg://'):
+                    db_url = db_url.replace('postgresql+asyncpg://', 'postgresql://')
+                elif db_url and db_url.startswith('postgresql+psycopg://'):
+                    db_url = db_url.replace('postgresql+psycopg://', 'postgresql://')
+                
+                if not db_url:
+                    #  fallback 到手动拼接
+                    db_user = os.getenv('POSTGRES_USER', 'postgres')
+                    db_password = os.getenv('POSTGRES_PASSWORD', 'postgres')
+                    db_host = os.getenv('POSTGRES_HOST', 'postgres')  # Docker 内使用服务名
+                    db_port = os.getenv('POSTGRES_PORT', '5432')
+                    db_name = os.getenv('POSTGRES_DB', 'shoppingclaw')
+                    db_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+                
+                checkpointer_backend = get_postgres_checkpointer(db_url)
+                self.checkpointer = await checkpointer_backend.get_checkpointer()
+                
+                import logging
+                logging.info("[MasterAgent] ✅ Using PostgreSQL Checkpointer")
+                
+            except Exception as e:
+                # ═══ Fallback: 使用 MemorySaver（开发环境或数据库不可用时）═══
+                from langgraph.checkpoint.memory import MemorySaver
+                import logging
+                logging.warning(f"[MasterAgent] ⚠️ PostgreSQL Checkpointer failed, using MemorySaver: {e}")
+                self.checkpointer = MemorySaver()
+        
         return self.checkpointer
     
     async def get_graph(self, **kwargs):
@@ -146,27 +183,55 @@ class MasterAgent(BaseAgent):
 
         # 5. 组装 Graph
         import logging
+        from src.agents.common.middleware.content_guard import ContentGuardMiddleware
+        from src.agents.common.middleware.offload import ToolResultOffloadMiddleware
+        from src.agents.common.middleware.sse_monitor import SSEMonitoringMiddleware
+        # from src.agents.common.middleware.state_injector import StateInjectorMiddleware  # 暂时禁用
+        from src.agents.common.middleware.thinkingprocess import ThinkingProcessMiddleware
         from src.agents.master_agent.agent_demo import create_master_agent
         # logging.info("[MasterAgent] 正在编译 LangGraph...")
+        
+        # 创建状态后端（用于工具结果卸载）
+        from src.agents.common.backends import FilesystemBackend
+        state_backend = FilesystemBackend(root_dir="saves/state")
+
+        # 创建 SSE 监控中间件（保存引用供 chat_stream_service 获取事件）
+        sse_monitor = SSEMonitoringMiddleware()
+        self.sse_middleware = sse_monitor
+
         graph = create_master_agent(
             model=model,
             context_schema=MasterContext,  # ← 传入 Context Schema 类
             tools=tools,
             middleware=[
-                IntentDetectorMiddleware(),
-                PatchToolCallsMiddleware(),  # 修复不同模型的工具调用格式差异
-                GapDetectorMiddleware(),  # 检测证据缺口（必须先注册，后执行）
-                EvidenceCollectorMiddleware(),  # 结构化SubAgent输出（后注册，先执行）
-                ToolCallLimitMiddleware(run_limit=10,thread_limit=20, exit_behavior="end"),  # 安全锁：防止死循环
-                TodoListMiddleware(),  # 赋予 Agent 拆解任务的能力
+                # ═══ 第一层：监控与安全 ═══
+                sse_monitor,                         # 1. 工具调用监控（最外层，捕获所有调用）
+                ContentGuardMiddleware(strict_mode=False),  # 2. 内容安全审查
+                
+                # ═══ 第二层：意图与规划 ═══
+                #IntentDetectorMiddleware(),          # 3. 意图检测
+                PatchToolCallsMiddleware(),          # 4. 修复工具调用格式
+                
+                # ═══ 第三层：证据收集与缺口检测 ═══
+                #GapDetectorMiddleware(),             # 5. 检测证据缺口
+                #EvidenceCollectorMiddleware(),       # 6. 结构化 SubAgent 输出
+                #StateInjectorMiddleware(),           # 7. 将 state 注入 LLM 可见上下文
+                
+                # ═══ 第四层：工具执行控制 ═══
+                ToolResultOffloadMiddleware(state_backend),  # 8. 大型结果卸载
+                ToolCallLimitMiddleware(run_limit=10, thread_limit=20, exit_behavior="end"),  # 9. 调用次数限制
+                TodoListMiddleware(),                # 10. 任务拆解
 
-            FilesystemMiddleware(backend=_create_fs_backend),  # 赋予 Agent 读写文件能力
-            #     # SkillsMiddleware(),  # 暂时禁用：需要配置 backend 和 sources
-            subagents_middleware,       # 注入子智能体调度能力
-            #     summary_middleware,         # 注入长对话压缩能力
+                # ═══ 第五层：文件系统与子智能体 ═══
+                FilesystemMiddleware(backend=_create_fs_backend),  # 11. 文件读写能力
+                subagents_middleware,                # 12. 子智能体调度
 
+                # ═══ 第六层：后处理 ═══
+                ThinkingProcessMiddleware(),         # 13. 思考过程提取
+                # summary_middleware,                # 13. 长对话压缩（暂时禁用）
             ],
             checkpointer=await self._get_checkpointer(),
+            # interrupt_after=["tools"],  # 已移除：工具执行后不应全局中断，应由具体工具内部调用 interrupt()
         )
         # logging.info("[MasterAgent] LangGraph 编译完成")
         self.graph = graph

@@ -443,13 +443,13 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
 .thinking-sidebar {
   width: 0;
   height: 100%;
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
+  background-color: var(--gray-0);
   transition: all 0.3s ease;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--gray-200);
+  border: none;
   overflow: hidden;
+  flex-shrink: 0;
 
   .sidebar-content {
     width: 420px;
@@ -476,6 +476,7 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
   &.sidebar-open {
     width: 420px;
     max-width: 500px;
+    border-left: 1px solid var(--gray-200);
   }
 
   // Header
@@ -487,7 +488,7 @@ watch(() => toolItems.value.length, scrollToolsToBottom)
     padding: 0 16px;
     border-bottom: 1px solid var(--gray-150);
     flex-shrink: 0;
-    background: rgba(255, 255, 255, 0.95);
+    background-color: var(--gray-0);
 
     .header-left {
       display: flex;

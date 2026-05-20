@@ -38,6 +38,10 @@ _jd_access_token: str | None = None
 # Prevents re-fetching the same SKU within a single request
 _detail_cache: dict[str, dict] = {}
 
+# In-memory cache for search results (keyed by "keyword:page")
+# Prevents redundant API calls when researcher retries or searches overlapping keywords
+_search_cache: dict[str, dict] = {}
+
 
 def _parse_sales(sales_str: Optional[str]) -> Optional[int]:
     """解析销量字符串为整数（如'超1万人已购买' → 10000）"""
@@ -520,7 +524,14 @@ def search_products(
     - good_rate（额外字段，非Product标准）
     """
     logger.info(f"[Tool] 整合搜索: {keyword} | 页码: {page}")
-    
+
+    # 缓存命中 — 同一关键词+页码在一次请求中可能被重复搜索
+    cache_key = f"{keyword}:{page}"
+    cached = _search_cache.get(cache_key)
+    if cached is not None:
+        logger.info(f"[Tool] 搜索缓存命中: {cache_key}")
+        return cached
+
     products = []
     
     # 1. 调用官方API获取基础数据（好评率、店铺ID）
@@ -589,11 +600,13 @@ def search_products(
         except Exception as e:
             logger.warning(f"[Tool] JustoneAPI搜索失败: {e}")
     
-    return {
+    result = {
         "status": "success",
         "count": len(products),
         "products": products  # 已是Product兼容结构
     }
+    _search_cache[cache_key] = result
+    return result
 
 
 # ==================== 工具9: get_product_full_detail - 完整详情（官方+Justone） ====================

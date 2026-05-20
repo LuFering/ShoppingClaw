@@ -8,6 +8,7 @@ import router from './router'
 import Antd from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
 import '@/assets/css/main.css'
+import '@/assets/styles/agent-flow.css'  // Agent 流程可视化样式
 
 const app = createApp(App)
 const pinia = createPinia()

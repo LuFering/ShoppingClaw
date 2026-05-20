@@ -282,12 +282,14 @@ def ask_user_question(
     options: Annotated[list[dict] | None, "兼容字段：单个问题候选项（建议优先使用 questions）"] = None,
     multi_select: Annotated[bool, "兼容字段：单个问题是否允许多选"] = False,
     allow_other: Annotated[bool, "兼容字段：单个问题是否允许 Other 自定义答案"] = True,
-) -> dict:
+) -> str:
     """向用户发起问题并等待回答。
-    
-    注意：此工具需要配合 LangGraph 的 interrupt 机制使用。
-    如果未启用 checkpointer，工具会返回问题信息但不真正中断，
-    Agent 需要在后续对话中自行处理用户回复。
+
+    此工具将问题格式化为自然语言文本返回。
+    Agent 应将返回内容直接展示给用户，然后在下一轮对话中根据用户回答继续执行。
+
+    注意：不要在回复中使用"让我向您提问"等暴露工具调用的表述，
+    直接把问题自然呈现给用户。
     """
     input_questions = questions
     if not input_questions:
@@ -305,28 +307,29 @@ def ask_user_question(
     if not input_questions:
         raise ValueError("questions 至少需要包含一个有效问题")
 
-    try:
-        # 尝试使用 interrupt（需要 checkpointer 支持）
-        interrupt_payload = {
-            "questions": input_questions,
-            "source": "ask_user_question",
-        }
-        answer = interrupt(interrupt_payload)
+    # 格式化为自然语言问题文本
+    lines = []
+    for i, q in enumerate(input_questions):
+        q_text = q.get("question", "")
+        opts = q.get("options", [])
+        multi = q.get("multi_select", False)
+        allow = q.get("allow_other", True)
 
-        return {
-            "questions": input_questions,
-            "answer": answer,
-            "status": "answered"
-        }
-    except Exception as e:
-        # 如果 interrupt 失败（没有 checkpointer），返回问题信息让 Agent 自行处理
-        logger.warning(f"interrupt 失败，返回问题信息: {e}")
-        return {
-            "questions": input_questions,
-            "answer": None,
-            "status": "pending",
-            "error": f"需要启用 checkpointer 才能使用中断功能: {str(e)}"
-        }
+        if len(input_questions) > 1:
+            lines.append(f"**{i+1}. {q_text}**")
+        else:
+            lines.append(f"{q_text}")
+
+        if opts:
+            labels = [opt.get("label", opt.get("value", str(opt))) for opt in opts]
+            if multi:
+                lines.append(f"（可多选：{' | '.join(labels)}）")
+            else:
+                lines.append(f"（{' / '.join(labels)}）")
+        if allow:
+            lines.append("（也可以直接告诉我你的想法）")
+
+    return "\n\n".join(lines)
 
 
 # ==================== 用户画像查询工具 ====================

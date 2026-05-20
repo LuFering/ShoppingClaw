@@ -1,50 +1,58 @@
+import random
+
 import torch
 import torch.nn as nn
 from transformers import BertModel, BertConfig
 
-# 延迟导入，避免循环依赖
+# Disable the background safetensors auto-conversion thread that tries to
+# reach huggingface.co even when local_files_only=True (crashes on mainland
+# China networks with ConnectError).
+from transformers import safetensors_conversion as _sc
+_sc.auto_conversion = lambda *a, **kw: None
+
+
 def _get_schema():
     from src.agents.common.intent_schema import MAIN_INTENTS, SUB_INTENTS, SLOT_TAGS
     return MAIN_INTENTS, SUB_INTENTS, SLOT_TAGS
 
 
 class JointIntentSlotModel(nn.Module):
-    """JointBERT：意图分类 + 槽位填充联合模型"""
+    """JointBERT: intent classification + slot filling with scheduled sampling."""
 
-    def __init__(self, bert_model_name: str | None = None):
+    def __init__(self, bert_model_name: str | None = None,
+                 label_smoothing: float = 0.1,
+                 slot_loss_weight: float = 2.0,
+                 scheduled_sampling_prob: float = 0.3):
         super().__init__()
-        # 使用本地缓存的BERT模型，避免联网下载
-        if bert_model_name is None:
-            # Docker 环境：使用 HuggingFace repo_id
-            bert_model_name = "hfl/chinese-roberta-wwm-ext"
-            self.bert = BertModel.from_pretrained(bert_model_name)
-        else:
-            # 从本地路径加载配置（仅需 config.json），无需联网
-            # 权重由外部调用 load_state_dict(model.pth) 覆盖
-            config = BertConfig.from_pretrained(bert_model_name)
-            self.bert = BertModel(config)
-        hidden = self.bert.config.hidden_size  # 768
+        self.label_smoothing = label_smoothing
+        self.slot_loss_weight = slot_loss_weight
+        self.scheduled_sampling_prob = scheduled_sampling_prob
 
+        if bert_model_name is None:
+            bert_model_name = "hfl/chinese-roberta-wwm-ext"
+        self.bert = BertModel.from_pretrained(bert_model_name, local_files_only=True)
+
+        hidden = self.bert.config.hidden_size  # 768
         MAIN_INTENTS, SUB_INTENTS, SLOT_TAGS = _get_schema()
         n_main = len(MAIN_INTENTS)
         n_sub = len(SUB_INTENTS)
         n_slot = len(SLOT_TAGS)
 
-        # 主意图头
         self.main_clf = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(hidden, n_main)
         )
 
-        # 子意图头：拼接 [CLS] 向量 + 主意图 softmax 概率
+        # Sub-intent head: [CLS] + main intent probabilities
         self.sub_clf = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(hidden + n_main, hidden // 2),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden // 2, n_sub)
         )
 
-        # 槽位序列标注头
+        # Slot sequence labeling head
         self.slot_clf = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(hidden, n_slot)
@@ -59,14 +67,22 @@ class JointIntentSlotModel(nn.Module):
             slot_labels: torch.Tensor | None = None
     ) -> dict:
         out = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        seq_out = out.last_hidden_state  # [B, L, H]
-        cls_out = out.pooler_output  # [B, H]
+        seq_out = out.last_hidden_state   # [B, L, H]
+        cls_out = out.pooler_output       # [B, H]
 
-        # 主意图
         main_logits = self.main_clf(cls_out)  # [B, n_main]
 
-        # 子意图：用真实主意图（训练）或预测概率（推理）拼接
-        if main_intent_labels is not None:
+        # Sub-intent: scheduled sampling to reduce exposure bias
+        # During training, use predicted main intent with probability `scheduled_sampling_prob`
+        if main_intent_labels is not None and self.training:
+            use_predicted = random.random() < self.scheduled_sampling_prob
+            if use_predicted:
+                main_onehot = torch.softmax(main_logits, dim=-1).detach()
+            else:
+                main_onehot = torch.zeros_like(main_logits).scatter_(
+                    1, main_intent_labels.unsqueeze(1), 1.0
+                )
+        elif main_intent_labels is not None:
             main_onehot = torch.zeros_like(main_logits).scatter_(
                 1, main_intent_labels.unsqueeze(1), 1.0
             )
@@ -77,7 +93,6 @@ class JointIntentSlotModel(nn.Module):
             torch.cat([cls_out, main_onehot], dim=-1)
         )  # [B, n_sub]
 
-        # 槽位
         slot_logits = self.slot_clf(seq_out)  # [B, L, n_slot]
 
         result = {
@@ -87,12 +102,16 @@ class JointIntentSlotModel(nn.Module):
         }
 
         if main_intent_labels is not None:
-            loss_main = nn.CrossEntropyLoss()(main_logits, main_intent_labels)
-            loss_sub = nn.CrossEntropyLoss()(sub_logits, sub_intent_labels)
+            loss_main = nn.CrossEntropyLoss(
+                label_smoothing=self.label_smoothing
+            )(main_logits, main_intent_labels)
+            loss_sub = nn.CrossEntropyLoss(
+                label_smoothing=self.label_smoothing
+            )(sub_logits, sub_intent_labels)
             loss_slot = nn.CrossEntropyLoss(ignore_index=-100)(
                 slot_logits.view(-1, slot_logits.size(-1)),
                 slot_labels.view(-1)
             )
-            result["loss"] = loss_main + loss_sub + loss_slot
+            result["loss"] = loss_main + loss_sub + self.slot_loss_weight * loss_slot
 
         return result

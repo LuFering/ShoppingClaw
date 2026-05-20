@@ -149,7 +149,8 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
                 api_key=api_key,
                 base_url=base_url,
                 stream_usage=True,
-                extra_body={"enable_thinking": False}
+                max_tokens=8192,
+                extra_body={"enable_thinking": True}
             )
             _model_cache[cache_key] = model_instance
             return model_instance

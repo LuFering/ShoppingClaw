@@ -16,6 +16,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import StructuredTool
+from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
 from src.agents.common.backends import BackendProtocol
@@ -584,6 +585,18 @@ def _build_task_tool(  # noqa: C901
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
 
+        # SSE 进度事件：子智能体开始执行
+        try:
+            writer = get_stream_writer()
+            writer({
+                "status": "subagent_progress",
+                "event": "started",
+                "subagent_type": subagent_type,
+                "description": description,
+            })
+        except Exception:
+            pass
+
         max_retries = 2
         result = None
         total_tool_calls = 0
@@ -602,18 +615,46 @@ def _build_task_tool(  # noqa: C901
                 break
             logging.warning(f"[SubAgent] {subagent_type} 输出格式验证失败（第{attempt + 1}次），正在重试...")
             if attempt < max_retries - 1:
+                # SSE 进度事件：重试
+                try:
+                    writer = get_stream_writer()
+                    writer({
+                        "status": "subagent_progress",
+                        "event": "retry",
+                        "subagent_type": subagent_type,
+                        "attempt": attempt + 2,
+                    })
+                except Exception:
+                    pass
+                # 保留第一轮完整消息历史（含工具调用结果），仅追加格式化指令
+                previous_messages = list(result["messages"])
+                previous_messages.append(
+                    HumanMessage(content=(
+                        f"[系统] 输出格式校验未通过，请直接修正 JSON 格式。"
+                        f"不要重新调用任何工具，基于已有数据重新输出即可。\n{validated_or_error}"
+                    ))
+                )
                 subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
-                subagent_state["messages"] = [
-                    HumanMessage(content=description),
-                    AIMessage(content=message_text),
-                    HumanMessage(content=f"[系统] 你的输出格式不符合要求，请修正。\n{validated_or_error}"),
-                ]
+                subagent_state["messages"] = previous_messages
 
         if total_tool_calls > 20:
             logging.warning(f"[SubAgent] {subagent_type} 本轮调用工具{total_tool_calls}次（含{attempt+1}次重试），频率偏高请关注")
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
+
+        # SSE 进度事件：子智能体执行完成
+        try:
+            writer = get_stream_writer()
+            writer({
+                "status": "subagent_progress",
+                "event": "completed",
+                "subagent_type": subagent_type,
+                "tool_calls": total_tool_calls,
+            })
+        except Exception:
+            pass
+
         return _return_command_with_state_update(result, runtime.tool_call_id, content_override=message_text)
 
     async def atask(
@@ -631,6 +672,18 @@ def _build_task_tool(  # noqa: C901
         try:
             subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
             logging.info(f"\n{'='*50}\n[MASTER AGENT 调度指令]\n目标子智能体: {subagent_type}\n任务描述: {description}\n{'='*50}\n")
+
+            # SSE 进度事件：子智能体开始执行
+            try:
+                writer = get_stream_writer()
+                writer({
+                    "status": "subagent_progress",
+                    "event": "started",
+                    "subagent_type": subagent_type,
+                    "description": description,
+                })
+            except Exception:
+                pass
 
             max_retries = 2
             result = None
@@ -650,12 +703,28 @@ def _build_task_tool(  # noqa: C901
                     break
                 logging.warning(f"[SubAgent] {subagent_type} 输出格式验证失败（第{attempt + 1}次），正在重试...")
                 if attempt < max_retries - 1:
+                    # SSE 进度事件：重试
+                    try:
+                        writer = get_stream_writer()
+                        writer({
+                            "status": "subagent_progress",
+                            "event": "retry",
+                            "subagent_type": subagent_type,
+                            "attempt": attempt + 2,
+                        })
+                    except Exception:
+                        pass
+                    # 保留第一轮完整消息历史（含工具调用结果），仅追加格式化指令
+                    # 避免重试时重复执行搜索/详情等耗时工具
+                    previous_messages = list(result["messages"])
+                    previous_messages.append(
+                        HumanMessage(content=(
+                            f"[系统] 输出格式校验未通过，请直接修正 JSON 格式。"
+                            f"不要重新调用任何工具，基于已有数据重新输出即可。\n{validated_or_error}"
+                        ))
+                    )
                     subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
-                    subagent_state["messages"] = [
-                        HumanMessage(content=description),
-                        AIMessage(content=message_text),
-                        HumanMessage(content=f"[系统] 你的输出格式不符合要求，请修正。\n{validated_or_error}"),
-                    ]
+                    subagent_state["messages"] = previous_messages
         except Exception as e:
             err_msg = f"[SubAgent] {subagent_type} 执行失败: {e}"
             logging.error(err_msg, exc_info=False)
@@ -666,6 +735,19 @@ def _build_task_tool(  # noqa: C901
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
+
+        # SSE 进度事件：子智能体执行完成
+        try:
+            writer = get_stream_writer()
+            writer({
+                "status": "subagent_progress",
+                "event": "completed",
+                "subagent_type": subagent_type,
+                "tool_calls": total_tool_calls,
+            })
+        except Exception:
+            pass
+
         return _return_command_with_state_update(result, runtime.tool_call_id, content_override=message_text)
 
     return StructuredTool.from_function(

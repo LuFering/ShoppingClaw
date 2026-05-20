@@ -250,6 +250,16 @@ def model_node(
         runtime=runtime
     )
 
+    # 在发送请求前，执行 before_model 中间件注入 state（同步版）
+    for m in middleware:
+        if m.__class__.before_model is not AgentMiddleware.before_model:
+            try:
+                injected = m.before_model(state, runtime, request)
+                if injected is not None:
+                    request = injected
+            except Exception:
+                pass  # 注入失败不影响主流程
+
     if _get_model_call(middleware) is None:  # 如果 model_call_handler 是 None
         model_response = _sync_execute_model(request, tool_node)  # 调用模型，执行操作，返回模型结果
         commands = _build_commands(model_response)
@@ -306,6 +316,16 @@ async def amodel_node(
         state=state,
         runtime=runtime
     )
+
+    # 在发送请求前，执行 before_model 中间件注入 state
+    for m in middleware:
+        if m.__class__.abefore_model is not AgentMiddleware.abefore_model:
+            try:
+                injected = await m.abefore_model(state, runtime, request)
+                if injected is not None:
+                    request = injected
+            except Exception:
+                pass  # 注入失败不影响主流程
 
     # 获取异步 model_call 处理器
     async_handler = _get_async_model_call(middleware)
@@ -374,10 +394,8 @@ def _get_entry_node(
     """entry_node节点判断"""
     if before_agent:
         entry_node = f"{before_agent[0].name}.before_agent"
-    elif before_model:
-        entry_node = f"{before_model[0].name}.before_model"
     else:
-        entry_node = "model"
+        entry_node = "model"  # before_model 不再作为独立节点
     # logging.debug(f"输出结果before_agent:{repr(entry_node)}")
     # logging.info(f"<<<<<<<<<<<<离开【_get_entry_node】")
     return entry_node
@@ -387,12 +405,7 @@ def _get_loop_entry_node(
         before_model: Sequence[AgentMiddleware[StateT_co, ContextT]],
 ) -> str:
     """loop循环entry节点判断"""
-    if before_model:
-        loop_entry_node = f"{before_model[0].name}.before_model"
-    else:
-        loop_entry_node = "model"
-
-    return loop_entry_node
+    return "model"  # before_model 不再作为独立节点，直接在 model_node 内部执行
 
 
 def _get_loop_exit_node(
@@ -791,28 +804,9 @@ def middleware_node(
                 input_schema=merged_state_schema
             )
 
-        # before_model
-        if (
-                m.__class__.before_model is not AgentMiddleware.before_model
-                or m.__class__.abefore_model is not AgentMiddleware.abefore_model
-        ):
-            sync_before_model = (
-                m.before_model
-                if m.__class__.before_model is not AgentMiddleware.before_model
-                else None
-            )
-            async_before_model = (
-                m.abefore_model
-                if m.__class__.abefore_model is not AgentMiddleware.abefore_model
-                else None
-            )
-            before_model_node = RunnableCallable(sync_before_model, async_before_model)
-            # logging.debug(f"-> 添加节点: {m.name}.before_model")
-            graph.add_node(
-                f"{m.name}.before_model",
-                before_model_node,
-                input_schema=merged_state_schema
-            )
+        # before_model — 不在图中注册为独立节点，已在 amodel_node/model_node 内部执行
+        # before_model 需要 (state, runtime, request) 三参数，独立节点只有 (state, runtime)
+        # 因此改为在 model_node 内部直接调用 m.abefore_model(state, runtime, request)
 
         # after_agent
         if (
@@ -1154,7 +1148,7 @@ def _choose_model_to_tools_edge(
             return "tools"
 
         # 步骤 6: 默认情况 → 返回 model 继续循环
-        # 这通常发生在：有工具调用但都已处理完毕，可能需要重试或继续
+        # 这通常发生在：有工具调用但都已处理完毕，需要 LLM 基于工具结果生成总结
         return model_destinations
 
     return model_to_tools
@@ -1257,49 +1251,72 @@ def _add_middleware_edge(
 
 
 async def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict:
-    """ToolNode的异步包装器,用于添加日志和增强并行稳定性"""
-    from langchain_core.messages import BaseMessage, ToolMessage
+    """ToolNode的异步包装器,用于添加日志和增强并行稳定性
+
+    重要：DeepSeek 要求每个 ToolMessage 的 tool_call_id 必须匹配前一条 AIMessage 中的
+    tool_calls。因此当 ToolMessage 缺少 tool_call_id 时，不能随机生成 UUID，而应从
+    前一条 AIMessage 的 tool_calls 中按位置匹配。
+    """
+    from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
     from langgraph.types import Command
-    import uuid
 
     result = await tool_node.ainvoke(state)
 
+    # 从前一条 AIMessage 提取 tool_call_ids，用于回填空的 tool_call_id
+    _fallback_ids = []
+    for msg in reversed(state.get("messages", [])):
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            _fallback_ids = [tc["id"] for tc in msg.tool_calls if tc.get("id")]
+            break
+
     # 兼容处理：tool_node.ainvoke 可能返回 list 或 dict
     if isinstance(result, list):
-        # 收集所有需要更新的状态
         all_updates = {}
         valid_messages = []
+        _fallback_idx = 0
 
         for item in result:
             if isinstance(item, BaseMessage):
-                # 直接是 Message 对象
                 if isinstance(item, ToolMessage) and not item.tool_call_id:
-                    item.tool_call_id = str(uuid.uuid4())
-                    logging.warning(f"[TOOLS] 修复空 tool_call_id，生成新ID: {item.tool_call_id}")
+                    if _fallback_idx < len(_fallback_ids):
+                        item.tool_call_id = _fallback_ids[_fallback_idx]
+                        logging.info(f"[TOOLS] 从 AIMessage 回填 tool_call_id: {item.tool_call_id}")
+                    else:
+                        logging.warning(
+                            f"[TOOLS] ToolMessage 缺少 tool_call_id 且无法匹配，"
+                            f"工具名={item.name}，跳过该消息以避免 DeepSeek 400 错误"
+                        )
+                        _fallback_idx += 1
+                        continue  # 跳过无法匹配的 ToolMessage
+                    _fallback_idx += 1
                 valid_messages.append(item)
             elif isinstance(item, Command):
-                # Command 对象，需要修复其 update 中的 messages，并合并 update
                 if item.update:
-                    # 修复 messages 中的空 tool_call_id
                     if 'messages' in item.update:
                         fixed_messages = []
                         for msg in item.update['messages']:
                             if isinstance(msg, ToolMessage) and not msg.tool_call_id:
-                                msg.tool_call_id = str(uuid.uuid4())
-                                logging.warning(f"[TOOLS] 修复 Command 中的空 tool_call_id，生成新ID: {msg.tool_call_id}")
+                                if _fallback_idx < len(_fallback_ids):
+                                    msg.tool_call_id = _fallback_ids[_fallback_idx]
+                                    logging.info(f"[TOOLS] 从 AIMessage 回填 Command 中的 tool_call_id: {msg.tool_call_id}")
+                                else:
+                                    logging.warning(
+                                        f"[TOOLS] Command 中的 ToolMessage 缺少 tool_call_id 且无法匹配，"
+                                        f"工具名={msg.name}，跳过该消息"
+                                    )
+                                    _fallback_idx += 1
+                                    continue
+                                _fallback_idx += 1
                             fixed_messages.append(msg)
                         item.update['messages'] = fixed_messages
                         valid_messages.extend(fixed_messages)
 
-                    # 合并其他 update 字段（如 todos）
                     for key, value in item.update.items():
                         if key != 'messages':
                             all_updates[key] = value
             else:
-                # 其他类型，跳过
                 pass
 
-        # 构建返回结果：包含 messages 和其他状态更新
         final_result = {"messages": valid_messages}
         final_result.update(all_updates)
 
@@ -1312,7 +1329,6 @@ async def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict
         logging.debug(f"[TOOLS] 输出完整信息{repr(result)}")
         return result
     else:
-        # 如果返回了其他类型（如 Command），记录错误并返回空更新
         logging.error(f"[TOOLS] 未知返回类型: {type(result)}, 内容: {result}")
         return {}
 
@@ -1502,25 +1518,8 @@ def create_agent(
             can_jump_to=_get_can_jump_to(middleware_before_agent[-1], "before_agent"),
         )
 
-    """构建before_model middleware 边"""
-    for m1, m2 in itertools.pairwise(middleware_before_model):
-        _add_middleware_edge(
-            graph,
-            name=f"{m1.name}.before_model",
-            default_destination=f"{m2.name}.before_model",
-            model_destination=loop_entry_node,
-            end_destination=exit_node,
-            can_jump_to=_get_can_jump_to(m1, "before_model"),
-        )
-    if middleware_before_model:
-        _add_middleware_edge(
-            graph,
-            name=f"{middleware_before_model[-1].name}.before_model",
-            default_destination="model",
-            model_destination=loop_entry_node,
-            end_destination=exit_node,
-            can_jump_to=_get_can_jump_to(middleware_before_model[-1], "before_model"),
-        )
+    # before_model 不再注册为独立节点，已在 model_node 内部直接调用
+    # 无需构建 before_model 边
 
     """构建从 model 到 tools 的条件边"""
     if not middleware_after_model:

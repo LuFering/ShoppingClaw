@@ -2,6 +2,7 @@
 import logging
 import traceback
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -145,7 +146,13 @@ async def chat_agent(
             current_user=current_user,
             db=_db_session,
         ),
-        media_type="application/json",
+        media_type="text/event-stream",  # ✅ 标准 SSE 格式
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # 禁用 nginx 缓冲
+            "Access-Control-Allow-Origin": "*",  # CORS 支持
+        }
     )
 
 
@@ -207,6 +214,303 @@ async def update_thread(
     if not updated:
         raise HTTPException(status_code=404, detail="线程不存在")
     return updated
+
+
+# ── 会话管理 API（PostgreSQL 版）──
+
+@chat.post("/sessions", response_model=ThreadResponse)
+async def create_session(
+    session_create: ThreadCreate,
+    current_user: User = Depends(get_required_user),
+):
+    """创建新会话（PostgreSQL 持久化）"""
+    from src.services.conversation_service import create_thread_view
+    
+    _db_session = None
+    try:
+        pg_manager._check_initialized()
+        _db_session = pg_manager.AsyncSession()
+    except Exception:
+        _db_session = None
+    
+    if not _db_session:
+        raise HTTPException(status_code=503, detail="数据库不可用")
+    
+    try:
+        result = await create_thread_view(
+            agent_id=session_create.agent_id,
+            title=session_create.title,
+            metadata=session_create.metadata,
+            db=_db_session,
+            current_user_id=str(current_user.id),
+        )
+        return result
+    finally:
+        await _db_session.close()
+
+
+@chat.get("/sessions", response_model=list[ThreadResponse])
+async def list_sessions(
+    agent_id: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_required_user),
+):
+    """列出用户所有会话（PostgreSQL 持久化 + 分页）"""
+    from src.services.conversation_service import list_threads_view
+    
+    _db_session = None
+    try:
+        pg_manager._check_initialized()
+        _db_session = pg_manager.AsyncSession()
+    except Exception:
+        _db_session = None
+    
+    if not _db_session:
+        # Fallback 到内存模式
+        return memory_store.list_threads(
+            user_id=str(current_user.id),
+            agent_id=agent_id,
+            limit=limit,
+            offset=offset,
+        )
+    
+    try:
+        result = await list_threads_view(
+            agent_id=agent_id,
+            db=_db_session,
+            current_user_id=str(current_user.id),
+            limit=limit,
+            offset=offset,
+        )
+        return result
+    finally:
+        await _db_session.close()
+
+
+@chat.delete("/sessions/{thread_id}")
+async def delete_session(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    """删除会话（软删除，PostgreSQL）"""
+    from src.services.conversation_service import delete_thread_view
+    
+    _db_session = None
+    try:
+        pg_manager._check_initialized()
+        _db_session = pg_manager.AsyncSession()
+    except Exception:
+        _db_session = None
+    
+    if not _db_session:
+        raise HTTPException(status_code=503, detail="数据库不可用")
+    
+    try:
+        result = await delete_thread_view(
+            thread_id=thread_id,
+            db=_db_session,
+            current_user_id=str(current_user.id),
+        )
+        return result
+    finally:
+        await _db_session.close()
+
+
+@chat.patch("/sessions/{thread_id}/title")
+async def update_session_title(
+    thread_id: str,
+    title_update: dict = Body(...),
+    current_user: User = Depends(get_required_user),
+):
+    """修改会话标题（PostgreSQL）"""
+    from src.services.conversation_service import update_thread_view
+    
+    new_title = title_update.get("title")
+    if not new_title:
+        raise HTTPException(status_code=400, detail="标题不能为空")
+    
+    _db_session = None
+    try:
+        pg_manager._check_initialized()
+        _db_session = pg_manager.AsyncSession()
+    except Exception:
+        _db_session = None
+    
+    if not _db_session:
+        raise HTTPException(status_code=503, detail="数据库不可用")
+    
+    try:
+        result = await update_thread_view(
+            thread_id=thread_id,
+            title=new_title,
+            db=_db_session,
+            current_user_id=str(current_user.id),
+        )
+        return result
+    finally:
+        await _db_session.close()
+
+
+@chat.post("/agent/{agent_id}/stop")
+async def stop_generation(
+    agent_id: str,
+    thread_id: str = Body(..., embed=True),
+    current_user: User = Depends(get_required_user),
+):
+    """停止正在生成的消息"""
+    from src.services.sse_session_manager import get_session_manager
+    
+    manager = get_session_manager()
+    manager.deactivate_session(thread_id)
+    
+    return {
+        "message": "生成已停止",
+        "thread_id": thread_id,
+    }
+
+
+@chat.post("/history/{thread_id}/regenerate")
+async def regenerate_last_message(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    """重新生成最后一条回复"""
+    # TODO: 实现重新生成逻辑
+    # 1. 获取历史消息
+    # 2. 删除最后一条 AI 消息
+    # 3. 重新调用 Agent
+    raise HTTPException(
+        status_code=501,
+        detail="重新生成功能尚未实现",
+    )
+
+
+@chat.delete("/history/{thread_id}/messages/{msg_id}")
+async def delete_message(
+    thread_id: str,
+    msg_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    """删除单条消息"""
+    # TODO: 实现消息删除逻辑
+    # 1. 验证消息属于当前用户
+    # 2. 从数据库中删除
+    raise HTTPException(
+        status_code=501,
+        detail="消息删除功能尚未实现",
+    )
+
+
+# ── 用户记忆管理 API ────────────────────────────────────
+
+@chat.get("/memory")
+async def get_user_memory(
+    current_user: User = Depends(get_required_user),
+):
+    """获取用户全局记忆（AGENTS.md）"""
+    from src.services.user_memory import get_user_memory_service
+    
+    memory_service = get_user_memory_service()
+    global_memory = await memory_service.get_global_memory(str(current_user.id))
+    
+    return {
+        "user_id": str(current_user.id),
+        "global_memory": global_memory,
+        "has_memory": bool(global_memory),
+    }
+
+
+@chat.put("/memory")
+async def update_user_memory(
+    memory_update: dict = Body(...),
+    current_user: User = Depends(get_required_user),
+):
+    """更新用户全局记忆（AGENTS.md）"""
+    from src.services.user_memory import get_user_memory_service
+    
+    content = memory_update.get("content", "")
+    if not content:
+        raise HTTPException(status_code=400, detail="记忆内容不能为空")
+    
+    memory_service = get_user_memory_service()
+    await memory_service.update_global_memory(str(current_user.id), content)
+    
+    return {
+        "message": "记忆已更新",
+        "user_id": str(current_user.id),
+        "content_length": len(content),
+    }
+
+
+@chat.get("/memory/session/{thread_id}")
+async def get_session_context(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    """获取会话上下文（CONTEXT.md）"""
+    from src.services.user_memory import get_user_memory_service
+    
+    memory_service = get_user_memory_service()
+    session_context = await memory_service.get_session_context(thread_id)
+    
+    return {
+        "thread_id": thread_id,
+        "session_context": session_context,
+        "has_context": bool(session_context),
+    }
+
+
+@chat.put("/memory/session/{thread_id}")
+async def update_session_context(
+    thread_id: str,
+    context_update: dict = Body(...),
+    current_user: User = Depends(get_required_user),
+):
+    """更新会话上下文（CONTEXT.md）"""
+    from src.services.user_memory import get_user_memory_service
+    
+    content = context_update.get("content", "")
+    if not content:
+        raise HTTPException(status_code=400, detail="上下文内容不能为空")
+    
+    memory_service = get_user_memory_service()
+    await memory_service.update_session_context(thread_id, content)
+    
+    return {
+        "message": "会话上下文已更新",
+        "thread_id": thread_id,
+        "content_length": len(content),
+    }
+
+
+# ── 系统统计 API ────────────────────────────────────────
+
+@chat.get("/system/statistics")
+async def get_system_statistics(
+    current_user: User = Depends(get_required_user),
+):
+    """获取系统使用统计"""
+    from src.services.sse_session_manager import get_session_manager
+    
+    # SSE 会话统计
+    sse_manager = get_session_manager()
+    sse_stats = sse_manager.get_stats()
+    
+    # 内存存储统计
+    memory_stats = {
+        "total_threads": len(memory_store.threads),
+        "active_threads": len([
+            t for t in memory_store.threads.values()
+            if t.get("user_id") == str(current_user.id)
+        ]),
+    }
+    
+    return {
+        "sse_sessions": sse_stats,
+        "memory_store": memory_stats,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
 
 # ── 历史 & 状态 ───────────────────────────────────────────

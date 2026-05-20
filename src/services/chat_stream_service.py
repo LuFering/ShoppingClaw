@@ -12,12 +12,20 @@ from src.repositories.agent_config_repository import AgentConfigRepository
 from src.repositories.conversation_repository import ConversationRepository
 from src.storage.postgres.manager import pg_manager
 from src.services.memory_store import memory_store
+# ═══ 新增：历史管理与用户记忆 ═══
+from src.services.history_manager import HistoryManager
+from src.services.user_memory import get_user_memory_service
+# ═══ 新增：SSE 协议支持 ═══
+from src.services.sse_protocol import EventType
+from src.services.sse_adapter import format_sse_event, convert_legacy_chunk_to_sse
+from src.agents.common.middleware.sse_monitor import SSEMonitoringMiddleware
+from src.services.sse_session_manager import get_session_manager
 
 
 def extract_agent_state(values: dict) -> dict:
     todos = values.get("todos")
     result = {
-        "todos": list(todos)[:20],
+        "todos": list(todos)[:20] if todos else [],
         "files": values.get("files")
     }
     return result
@@ -42,7 +50,7 @@ def _truncate(value, limit: int = 3000):
     if isinstance(value, str):
         return value if len(value) <= limit else value[:limit] + f"... ({len(value)} chars total)"
     text = _safe_json_dumps(value)
-    return value if len(text) <= limit else text[:limit] + f"... ({len(text)} chars total)"
+    return value if len(text) <= limit else text[:limit] + f"... ({len(value)} chars total)"
 
 
 def _message_text(content) -> str:
@@ -161,15 +169,38 @@ async def save_partial_message(
         error_message=None,
         error_type=None
 ):
-    """保存部分消息到数据库(临时占位实现)"""
-    # TODO: 实现完整的消息保存逻辑
+    """保存部分消息到数据库（使用 ConversationRepository）
+    
+    Args:
+        conv_repo: ConversationRepository 实例
+        thread_id: 会话 ID
+        full_msg: AIMessage 对象
+        param: 兼容参数（未使用）
+        error_message: 错误信息
+        error_type: 错误类型
+    """
     if conv_repo is None:
         logging.warning("Database not available, skipping message save")
         return
 
     try:
-        # 这里应该调用 conv_repo 保存消息
-        pass
+        # 将 LangChain Message 转换为字典格式
+        message_dict = {
+            "role": "ai",
+            "content": full_msg.content if hasattr(full_msg, 'content') else str(full_msg),
+            "type": "ai",
+            "timestamp": asyncio.get_event_loop().time(),
+        }
+        
+        if error_message:
+            message_dict["error_message"] = error_message
+        if error_type:
+            message_dict["error_type"] = error_type
+        
+        # 追加到数据库
+        await conv_repo.add_message(thread_id, message_dict)
+        logging.debug(f"[SaveMessage] Saved AI message to thread {thread_id}")
+        
     except Exception as e:
         logging.error(f"Failed to save partial message: {e}")
 
@@ -201,15 +232,22 @@ async def stream_agent_chat(
 ):
     start_time = asyncio.get_event_loop().time()  # ← 性能监控
 
+    # ═══ 初始化 SSE 会话管理器 ═══
+    thread_id = config.get("thread_id") or str(uuid.uuid4())
+    session_manager = get_session_manager()
+    await session_manager.create_session(thread_id)
+    
+    # ═══ SSE 监控中间件引用（延迟获取：get_graph() 在 stream_messages 内部首次调用时创建）═══
+    sse_middleware = None  # 在首次 drain 前从 agent.sse_middleware 获取
+
     # TODO:优化成Streamable HTTP
     def make_chunk(content=None, **kwargs):
-        """实现 SSE 协议的数据格式部分"""
-        return (
-                json.dumps(  # 将 request_id、response 等内容打包成一个 JSON 字符串
-                    {"request_id": meta.get("request_id"), "response": content, **kwargs}, ensure_ascii=False
-                ).encode("utf-8")  # 将这个字符串转换成字节
-                + b"\n"
-        )
+        """实现 SSE 协议的数据格式部分 - 兼容旧格式"""
+        chunk_data = {"request_id": meta.get("request_id"), "response": content, **kwargs}
+        
+        # ═══ 转换为新的 SSE 事件格式 ═══
+        sse_events = convert_legacy_chunk_to_sse(chunk_data)
+        return "".join(sse_events).encode("utf-8")
 
     if image_content:
         human_message = HumanMessage(
@@ -387,17 +425,33 @@ async def stream_agent_chat(
 
         full_msg = None
         accumulated_content = []
+        last_reasoning_length = 0  # 记录上一次发送的 reasoning_content 长度
         # 流式执行 Agent 推理
         async for chunk in agent.stream_messages(messages, input_context=input_context):
+            # ═══ 处理 SSE 监控中间件事件 ═══
+            if sse_middleware is None:
+                sse_middleware = getattr(agent, 'sse_middleware', None)
+            if sse_middleware is not None:
+                middleware_events = sse_middleware.drain_events()
+                for event in middleware_events:
+                    await session_manager.emit(thread_id, event)
+                    yield format_sse_event(event["type"], event).encode("utf-8") + b"\n"
+            
             msg = None
             metadata = {}
 
             # 健壮性解包：兼容 base.py 的不同返回格式
             if isinstance(chunk, tuple):
+                # 处理嵌套 tuple: ((message, mode), metadata)
                 if len(chunk) == 2:
-                    msg, metadata = chunk
+                    inner, metadata = chunk
+                    if isinstance(inner, tuple) and len(inner) >= 1:
+                        msg = inner[0]
+                        if isinstance(inner[0], str) and len(inner) == 2:
+                            msg = inner[1]
+                    else:
+                        msg = inner
                 else:
-                    # 如果元组长度不对，尝试从最后一个元素找 metadata
                     msg = chunk[0]
                     metadata = chunk[-1] if isinstance(chunk[-1], dict) else {}
             elif isinstance(chunk, dict):
@@ -416,12 +470,18 @@ async def stream_agent_chat(
                 additional_kwargs = getattr(msg, 'additional_kwargs', {})
                 reasoning_content = additional_kwargs.get('reasoning_content', '')
                 
-                # 发送思考过程（如果有）
+                # 发送思考过程（如果有）- 只发送增量部分
                 if reasoning_content:
-                    yield make_chunk(thinking_step={
-                        "type": "thinking",
-                        "content": reasoning_content
-                    })
+                    # DeepSeek 的 reasoning_content 是累积模式，需要提取增量
+                    new_reasoning = reasoning_content[last_reasoning_length:]
+                    if new_reasoning:  # 只有当有新内容时才发送
+                        logging.debug(f"[Reasoning] 总长度={len(reasoning_content)}, 上次长度={last_reasoning_length}, 增量长度={len(new_reasoning)}")
+                        yield make_chunk(
+                            status="thinking_process",
+                            event="thinking",
+                            content=new_reasoning
+                        )
+                        last_reasoning_length = len(reasoning_content)  # 更新长度
 
                 for tool_chunk in getattr(msg, "tool_call_chunks", None) or []:
                     tool_call_id = tool_chunk.get("id")
@@ -433,7 +493,7 @@ async def stream_agent_chat(
                             "args": tool_chunk.get("args") or {},
                         })
 
-                if content:
+                if content is not None:  # 允许空字符串，只要不是 None
                     accumulated_content.append(content)
 
                 # # 敏感词检查（每 10 个 chunk 检查一次）
@@ -471,6 +531,38 @@ async def stream_agent_chat(
                 if isinstance(msg, ToolMessage):
                     yield emit_tool_result(msg)
 
+                # ═══ 处理中间件通过 custom 模式写入的自定义 SSE 事件 ═══
+                if isinstance(msg, dict) and msg.get("status") == "thinking_process" and msg.get("event"):
+                    # 直接转换为标准 SSE 格式，绕过默认的 make_chunk 逻辑
+                    legacy_chunk = {
+                        "status": "thinking_process",
+                        "event": msg.get("event"),
+                        "content": msg.get("content"),
+                        "plan": msg.get("plan"),
+                        "tool_call": msg.get("tool_call"),
+                    }
+                    sse_events = convert_legacy_chunk_to_sse(legacy_chunk)
+                    for sse in sse_events:
+                        yield sse.encode("utf-8") + b"\n"
+                    continue
+
+                # ═══ 处理 custom 模式下的其他自定义事件 ═══
+                if isinstance(msg, dict) and (metadata or {}).get("stream_mode") == "custom":
+                    # 尝试识别并转换
+                    if msg.get("status") == "thinking_process" and msg.get("event"):
+
+                        legacy_chunk = {
+                            "status": "thinking_process",
+                            "event": msg.get("event"),
+                            "content": msg.get("content"),
+                            "plan": msg.get("plan"),
+                            "tool_call": msg.get("tool_call"),
+                        }
+                        sse_events = convert_legacy_chunk_to_sse(legacy_chunk)
+                        for sse in sse_events:
+                            yield sse.encode("utf-8") + b"\n"
+                        continue
+
                 if not is_process_update:
                     # 暴力序列化方案：确保 100% 不报错
                     try:
@@ -495,18 +587,6 @@ async def stream_agent_chat(
                         # 即使这里报错，也发送一个极简的错误占位符，绝不让流断开
                         logging.error(f"[CRITICAL] Serialization error: {e}")
                         yield make_chunk(msg={"error": "serialization_failed"}, metadata={}, status="loading")
-
-                # 捕获 updates 模式下的节点状态，用于获取工具执行后的模型总结
-                if is_process_update and isinstance(msg, dict):
-                    for node_name, node_output in msg.items():
-                        if node_name == "model" and isinstance(node_output, dict):
-                            model_messages = node_output.get("messages", [])
-                            for m in model_messages:
-                                if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
-                                    # 这是模型在工具执行后生成的最终回复
-                                    content = _message_text(m.content)
-                                    if content:
-                                        yield make_chunk(content=content, msg=m.model_dump(), metadata=metadata, status="loading")
 
                 try:  # 如果是工具调用，更新 agent_state
                     if msg_dict.get("type") == "tool":
@@ -538,8 +618,10 @@ async def stream_agent_chat(
         try:  # 获取最终 agent_state（TODO、files 等）
             graph = await agent.get_graph()
             state = await graph.aget_state(langgraph_config)
-            agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
-        except Exception:
+            state_values = getattr(state, "values", {}) if state else {}
+            agent_state = extract_agent_state(state_values)
+        except Exception as e:
+            logging.error(f"Error getting final state: {e}")
             agent_state = {}
 
         if agent_state:
@@ -577,11 +659,36 @@ async def stream_agent_chat(
             })
 
         # 完成信号
-        yield make_chunk(status="finished", meta=meta)
+        meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+        
+        # ═══ 发送 DONE 事件（含统计信息）═══
+        if sse_middleware is None:
+            sse_middleware = getattr(agent, 'sse_middleware', None)
+        if sse_middleware is not None:
+            stats = sse_middleware.get_stats()
+        else:
+            stats = {"total_tool_calls": 0, "total_duration_ms": 0, "failed_calls": 0}
+        done_event = {
+            "type": EventType.DONE,
+            "statistics": {
+                "total_tool_calls": stats["total_tool_calls"],
+                "total_duration_ms": stats["total_duration_ms"],
+                "failed_calls": stats["failed_calls"],
+                "time_cost": meta["time_cost"],
+            }
+        }
+        await session_manager.emit(thread_id, done_event)
+        yield format_sse_event(EventType.DONE, done_event).encode("utf-8") + b"\n"
+        
+        # ═══ 停用会话 ═══
+        session_manager.deactivate_session(thread_id)
 
     # 异常处理（断开连接）
     except (asyncio.CancelledError, ConnectionError) as e:
         logging.warning(f"Client disconnected, cancelling stream: {e}")
+        
+        # ═══ 清理会话 ═══
+        session_manager.deactivate_session(thread_id)
 
         # 保存已累积的内容到内存存储
         if accumulated_content:

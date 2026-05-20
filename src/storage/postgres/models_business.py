@@ -2,6 +2,7 @@
 from typing import Any
 
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, UniqueConstraint, Index, Text, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
 
 from src.utils.datetime_utils import utc_now_naive, format_utc_datetime
@@ -168,3 +169,44 @@ class KnowledgeRetrievalLog(Base):
     is_bad_case = Column(Boolean, default=False)
     bad_case_note = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=utc_now_naive, index=True)
+
+
+class Conversation(Base):
+    """对话会话表 - 事件溯源架构"""
+    __tablename__ = "conversations"
+
+    __table_args__ = (
+        Index("ix_conversations_user_updated", "user_id", "updated_at"),
+        Index("ix_conversations_agent_status", "agent_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    thread_id = Column(String(64), nullable=False, unique=True, index=True)  # LangGraph thread_id
+    user_id = Column(String(64), nullable=False, index=True)  # 用户 ID
+    agent_id = Column(String(64), nullable=False, index=True)  # Agent ID
+
+    title = Column(String(200), nullable=False, default="新对话")
+    status = Column(String(20), nullable=False, default="active", index=True)  # active/archived/deleted
+    is_pinned = Column(Boolean, nullable=False, default=False)
+
+    # 元数据（存储附件、标签等扩展信息）
+    conv_metadata = Column("metadata", JSON, nullable=False, default=dict)
+
+    # 消息历史（JSONB 数组，事件溯源）
+    messages = Column(JSONB, nullable=False, default=list)
+
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.thread_id,
+            "user_id": self.user_id,
+            "agent_id": self.agent_id,
+            "title": self.title,
+            "status": self.status,
+            "is_pinned": bool(self.is_pinned),
+            "metadata": self.conv_metadata or {},
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }

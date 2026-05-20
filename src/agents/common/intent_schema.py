@@ -65,6 +65,11 @@ INTENT_SCHEMA = {
         "required": ["brand"],
         "optional": ["category"]
     },
+    "greeting": {
+        "sub_intents": None,
+        "required": [],
+        "optional": []
+    },
     "unknown": {
         "sub_intents": None,
         "required": [],
@@ -76,7 +81,7 @@ INTENT_SCHEMA = {
 
 MAIN_INTENTS = list(INTENT_SCHEMA.keys())
 # ['product_recommend', 'product_comparison', 'order_query',
-#  'after_sales', 'price_check', 'store_search', 'unknown']
+#  'after_sales', 'price_check', 'store_search', 'greeting', 'unknown']
 
 SUB_INTENTS = [
     "single_product", "multi_compare",
@@ -119,6 +124,7 @@ VALID_SUB_INTENTS = {
     "after_sales": {"return_request", "repair_request"},
     "price_check": {"none"},
     "store_search": {"none"},
+    "greeting": {"none"},
     "unknown": {"none"}
 }
 

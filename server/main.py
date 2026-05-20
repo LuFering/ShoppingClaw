@@ -2,6 +2,7 @@
 ShoppingClaw API Server
 FastAPI 应用入口 — 精简版
 """
+import asyncio
 import logging
 import os
 import sys
@@ -22,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from server.routers import router
 from server.routers.auth_router import auth as auth_router
+from server.routers.models_router import router as models_router
+from server.middleware.audit import AuditMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,25 +40,66 @@ async def lifespan(app: FastAPI):
     # 确保 saves 目录存在
     os.makedirs("saves", exist_ok=True)
 
-    # 初始化 PostgreSQL manager
+    # Phase 1: 快速就绪（DB + 基础路由）
     from src.storage.postgres.manager import pg_manager
     try:
         pg_manager.initialize()
-        logger.info("[OK] PostgreSQL initialized")
+        await pg_manager.create_business_tables()
+        logger.info("[OK] PostgreSQL initialized and tables created")
     except Exception as e:
         logger.warning(f"[WARN] PostgreSQL initialization failed: {e}")
 
-    # 预加载意图识别模型（避免首次请求加载 20+ 秒）
+    logger.info("[OK] API ready (models loading in background)")
+
+    # Phase 2: 后台加载 ML 模型（不阻塞就绪）
+    asyncio.create_task(warmup_models())
+
+    # Phase 3: 启动 SSE 会话清理任务（每小时清理不活跃的会话）
+    cleanup_task = asyncio.create_task(_periodic_session_cleanup(interval=3600))
+
+    yield
+
+    # 停止清理任务
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+    logger.info("[STOP] ShoppingClaw API shutting down...")
+    
+    # 清理 Redis 连接
+    from src.services.redis_cache import get_redis_cache
+    try:
+        cache = get_redis_cache()
+        await cache.disconnect()
+        logger.info("[OK] Redis disconnected")
+    except Exception as e:
+        logger.warning(f"[WARN] Redis disconnect failed: {e}")
+
+
+async def warmup_models():
+    """后台加载 ML 模型"""
     try:
         from src.services.intent_service import get_intent_service
-        get_intent_service()
+        await asyncio.to_thread(get_intent_service)
         logger.info("[OK] Intent detection model loaded")
     except Exception as e:
         logger.warning(f"[WARN] Intent detection model load failed: {e}")
 
-    logger.info("[OK] ShoppingClaw API ready")
-    yield
-    logger.info("[STOP] ShoppingClaw API shutting down...")
+
+async def _periodic_session_cleanup(interval: int = 3600):
+    """定期清理不活跃的 SSE 会话（每小时一次）"""
+    from src.services.sse_session_manager import get_session_manager
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            manager = get_session_manager()
+            manager.cleanup_inactive_sessions(max_age=3600)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"[WARN] Session cleanup failed: {e}")
 
 
 app = FastAPI(
@@ -67,18 +111,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS — allow_origins 与 allow_credentials 不允许同时使用通配符
+# 配置允许的来源列表
+_allowed_origins = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[origin.strip() for origin in _allowed_origins if origin.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# 审计日志中间件
+app.add_middleware(AuditMiddleware, enable_audit=True)
+
 # 注册路由
 app.include_router(router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
+app.include_router(models_router, prefix="/api")
 
 
 @app.get("/api/system/health")

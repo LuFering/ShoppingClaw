@@ -145,67 +145,71 @@
                 <span class="generating-text">正在生成回复...</span>
               </div>
             </div>
+            <!-- 底部占位，防止消息被输入框遮挡 -->
+            <div class="chat-bottom-spacer"></div>
           </div>
-          <div class="bottom" :class="{ 'start-screen': !conversations.length }">
-            <div class="message-input-wrapper">
-              <div v-if="isLoadingMessages" class="chat-loading">
-                <div class="loading-spinner"></div>
-                <span>正在加载消息...</span>
-              </div>
+        </div>
+        <!-- 悬浮底部输入框 -->
+        <div class="bottom" :class="{ 'start-screen': !conversations.length }">
+          <div class="message-input-wrapper">
+            <div v-if="isLoadingMessages" class="chat-loading">
+              <div class="loading-spinner"></div>
+              <span>正在加载消息...</span>
+            </div>
 
-              <div v-if="!conversations.length" class="chat-examples-input">
-                <h1>{{ currentAgentName }}，有什么可以帮您？</h1>
-              </div>
+            <div v-if="!conversations.length" class="chat-examples-input">
+              <h1>{{ currentAgentName }}，有什么可以帮您？</h1>
+            </div>
 
-              <div v-if="showStartAgentSegment" class="agent-segment-wrapper">
-                <a-segmented
-                  :value="currentAgentId"
-                  :options="agentSegmentOptions"
-                  @change="handleStartAgentChange"
-                />
-              </div>
+            <div v-if="showStartAgentSegment" class="agent-segment-wrapper">
+              <a-segmented
+                :value="currentAgentId"
+                :options="agentSegmentOptions"
+                @change="handleStartAgentChange"
+              />
+            </div>
 
-              <AgentInputArea
-                ref="messageInputRef"
-                v-model="userInput"
-                :is-loading="isProcessing"
-                :disabled="!currentAgent"
-                :send-button-disabled="(!userInput || !currentAgent) && !isProcessing"
-                placeholder="输入问题..."
-                :supports-file-upload="false"
-                :agent-id="currentAgentId"
-                :thread-id="currentChatId"
-                :ensure-thread="ensureActiveThread"
-                :has-state-content="false"
-                :is-panel-open="false"
-                @send="handleSendOrStop"
-              >
-                <template #actions-left-extra>
-                  <slot name="input-actions-left"></slot>
-                </template>
-              </AgentInputArea>
+            <AgentInputArea
+              ref="messageInputRef"
+              v-model="userInput"
+              :is-loading="isProcessing"
+              :disabled="!currentAgent"
+              :send-button-disabled="(!userInput || !currentAgent) && !isProcessing"
+              placeholder="输入问题..."
+              :supports-file-upload="false"
+              :agent-id="currentAgentId"
+              :thread-id="currentChatId"
+              :ensure-thread="ensureActiveThread"
+              :has-state-content="false"
+              :is-panel-open="false"
+              @send="handleSendOrStop"
+            >
+              <template #actions-left-extra>
+                <slot name="input-actions-left"></slot>
+              </template>
+            </AgentInputArea>
 
-              <!-- 示例问题 -->
-              <div class="example-questions" v-if="!conversations.length && exampleQuestions.length > 0">
-                <div class="example-chips">
-                  <div v-for="question in exampleQuestions" :key="question.id"
-                    class="example-chip" @click="handleExampleClick(question.text)">
-                    {{ question.text }}
-                  </div>
+            <!-- 示例问题 -->
+            <div class="example-questions" v-if="!conversations.length && exampleQuestions.length > 0">
+              <div class="example-chips">
+                <div v-for="question in exampleQuestions" :key="question.id"
+                  class="example-chip" @click="handleExampleClick(question.text)">
+                  {{ question.text }}
                 </div>
               </div>
+            </div>
 
-              <div class="bottom-actions" v-if="conversations.length > 0">
-                <p class="note">当前智能体：{{ currentThreadAgentName }}；请注意辨别内容的可靠性</p>
-              </div>
+            <div class="bottom-actions" v-if="conversations.length > 0">
+              <p class="note">当前智能体：{{ currentThreadAgentName }}；请注意辨别内容的可靠性</p>
             </div>
           </div>
         </div>
       </div>
     </div>
     
-    <!-- 右侧思考过程边栏 -->
+    <!-- 右侧思考过程边栏 (保留兼容) -->
     <ThinkingProcessSidebar
+      v-if="!useNewFlowPanel"
       :is-open="thinkingState.isOpen"
       :thinking-steps="thinkingState.steps"
       :plan-steps="thinkingState.planSteps || []"
@@ -214,6 +218,23 @@
       :has-error="false"
       :is-initial-render="thinkingState.isInitialRender"
       @close="closeThinkingSidebar"
+      class="chat-container-sidebar chat-container-sidebar--right"
+    />
+    
+    <!-- 新流程面板 (ScienceClaw 风格) -->
+    <AgentFlowPanel
+      v-else
+      :is-open="thinkingState.isOpen"
+      :thinking-steps="thinkingState.steps"
+      :plan-steps="thinkingState.planSteps || []"
+      :tool-calls="thinkingState.toolCalls || []"
+      :is-processing="isProcessing"
+      :has-error="false"
+      :is-initial-render="thinkingState.isInitialRender"
+      @close="closeThinkingSidebar"
+      @step-select="handleStepSelect"
+      @tool-click="handleToolClick"
+      class="chat-container-sidebar chat-container-sidebar--right"
     />
   </div>
 </template>
@@ -224,6 +245,9 @@ import AgentInputArea from '@/components/AgentInputArea.vue'
 import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import ChatSidebarComponent from '@/components/ChatSidebarComponent.vue'
 import ThinkingProcessSidebar from '@/components/ThinkingProcessSidebar.vue'
+import AgentFlowPanel from '@/components/AgentFlowPanel.vue'
+import StepMessage from '@/components/StepMessage.vue'
+import ToolCallCard from '@/components/ToolCallCard.vue'
 import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, Smartphone, Laptop, Home, Clock, Star, ChevronRight, Brain } from 'lucide-vue-next'
 import { handleChatError } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
@@ -373,6 +397,9 @@ const thinkingState = reactive({
   toolCalls: [],
   isInitialRender: true
 })
+
+// 使用新流程面板 (ScienceClaw 风格)
+const useNewFlowPanel = ref(true)
 
 const threads = ref([])
 const threadMessages = ref({})
@@ -659,6 +686,17 @@ const normalizeProcessStatus = (status) => {
   return 'pending'
 }
 
+// 新流程面板的事件处理
+const handleStepSelect = (stepId) => {
+  console.log('选中步骤:', stepId)
+  // 可以在这里添加步骤选择逻辑，比如高亮相关工具调用
+}
+
+const handleToolClick = (tool) => {
+  console.log('点击工具:', tool)
+  // 可以在这里添加工具详情展示逻辑
+}
+
 const applyPlanSteps = (steps = []) => {
   const normalized = steps.map((step, index) => {
     const description = step.description || step.content || step.title || `步骤 ${index + 1}`
@@ -701,6 +739,131 @@ const upsertToolCall = (toolCall = {}) => {
   }
 }
 
+// ═══ SSE 事件处理函数（新协议）═══
+const handleSSEEvent = (eventType, data, context) => {
+  const { ts, aiMsgIndex, streamingContent, threadId } = context
+  
+  switch (eventType) {
+    case 'message_chunk':
+      // 流式文本块
+      if (data.content) {
+        let idx = aiMsgIndex
+        let content = streamingContent
+        content += data.content
+        if (idx < 0) {
+          idx = ts.onGoingConv.messages.length
+          ts.onGoingConv.messages.push({
+            type: 'ai',
+            content,
+            id: Date.now(),
+          })
+        } else {
+          ts.onGoingConv.messages[idx].content = content
+        }
+        context.aiMsgIndex = idx
+        context.streamingContent = content
+      }
+      break
+      
+    case 'thinking':
+      // 思考过程
+      if (data.content) {
+        addThinkingStep({
+          type: 'thinking',
+          content: data.content,
+        })
+      }
+      break
+      
+    case 'plan':
+    case 'plan_update':
+      // 计划更新
+      if (data.steps) {
+        applyPlanSteps(data.steps)
+      }
+      break
+      
+    case 'step_start':
+      // 步骤开始
+      upsertToolCall({
+        tool_call_id: data.step_id || `step_${Date.now()}`,
+        function: data.step_name || 'unknown',
+        name: data.step_name || 'unknown',
+        status: 'running',
+        args: data.context || {},
+      })
+      break
+      
+    case 'step_complete':
+      // 步骤完成
+      upsertToolCall({
+        tool_call_id: data.step_id,
+        function: data.step_name,
+        name: data.step_name,
+        status: 'completed',
+        duration_ms: data.duration_ms,
+      })
+      break
+      
+    case 'tool_start':
+      // 工具调用开始
+      upsertToolCall({
+        tool_call_id: data.tool_call_id || `tool_${Date.now()}`,
+        function: data.tool_name,
+        name: data.tool_name,
+        status: 'calling',
+        args: data.arguments || {},
+        icon: data.meta?.icon,
+        category: data.meta?.category,
+      })
+      break
+      
+    case 'tool_complete':
+      // 工具调用完成
+      upsertToolCall({
+        tool_call_id: data.tool_call_id,
+        function: data.tool_name,
+        name: data.tool_name,
+        status: 'completed',
+        duration_ms: data.duration_ms,
+        result_preview: data.result_preview,
+      })
+      break
+      
+    case 'agent_state':
+      // Agent 状态更新
+      ts.agentState = data
+      if (Array.isArray(data.todos)) {
+        applyPlanSteps(data.todos)
+      }
+      break
+      
+    case 'error':
+      // 错误事件
+      throw new Error(data.error || 'Unknown error')
+      
+    case 'done':
+      // 完成事件（含统计信息）
+      console.log('[SSE] Stream completed:', data.statistics)
+      break
+      
+    default:
+      // 兼容旧格式
+      if (data.status === 'agent_state') {
+        ts.agentState = data.agent_state
+        if (Array.isArray(data.agent_state?.todos)) {
+          applyPlanSteps(data.agent_state.todos)
+        }
+      } else if (data.thinking_step) {
+        addThinkingStep(data.thinking_step)
+      } else if (data.plan) {
+        applyPlanSteps(data.plan.steps || [])
+      } else if (data.tool_call) {
+        upsertToolCall(data.tool_call)
+      }
+  }
+}
+
 const handleSendOrStop = async () => {
   if (isProcessing.value) {
     // 停止生成
@@ -732,6 +895,7 @@ const handleSendOrStop = async () => {
   clearThinkingSteps()
   
   let streamingContent = ''
+  let aiMsgIndex = -1  // 当前正在流式输出的 AI 消息在 messages 数组中的索引
 
   try {
     const response = await agentApi.sendAgentMessage(currentAgentId.value, {
@@ -746,10 +910,19 @@ const handleSendOrStop = async () => {
       throw new Error(`HTTP ${response.status}`)
     }
 
-    let aiMsgIndex = -1  // 当前正在流式输出的 AI 消息在 messages 数组中的索引
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let currentEvent = null  // 当前 SSE 事件类型
+    let eventId = ''  // 当前事件 ID
+
+    // 创建可变的 context 对象，用于在 handleSSEEvent 和外部之间共享状态
+    const streamContext = {
+      ts,
+      aiMsgIndex: -1,
+      streamingContent: '',
+      threadId,
+    }
 
     while (true) {
       const { done, value } = await reader.read()
@@ -762,81 +935,29 @@ const handleSendOrStop = async () => {
       for (const line of lines) {
         const trimmed = line.trim()
         if (!trimmed) continue
-        try {
-          const chunk = JSON.parse(trimmed)
-
-          // 处理错误状态
-          if (chunk.status === 'error') {
-            throw new Error(chunk.error_message || '流式响应出错')
+        
+        // ═══ 解析标准 SSE 格式 ═══
+        if (trimmed.startsWith('event:')) {
+          // 事件类型行
+          currentEvent = trimmed.slice(6).trim()
+        } else if (trimmed.startsWith('id:')) {
+          // 事件 ID 行
+          eventId = trimmed.slice(3).trim()
+        } else if (trimmed.startsWith('data:')) {
+          // 数据行
+          try {
+            const data = JSON.parse(trimmed.slice(5))
+            
+            // ═══ 处理新协议事件 ═══
+            handleSSEEvent(currentEvent, data, streamContext)
+            
+            // 同步 context 中的状态到局部变量
+            aiMsgIndex = streamContext.aiMsgIndex
+            streamingContent = streamContext.streamingContent
+            
+          } catch (e) {
+            console.warn('Failed to parse SSE data:', e)
           }
-
-          // 跳过 init / finished / agent_state 等控制帧（不生成消息）
-          if (chunk.status === 'init' || chunk.status === 'finished') continue
-
-          if (chunk.status === 'agent_state') {
-            ts.agentState = chunk.agent_state
-            if (Array.isArray(chunk.agent_state?.todos)) {
-              applyPlanSteps(chunk.agent_state.todos)
-            }
-            continue
-          }
-          
-          // 处理思考过程数据
-          if (chunk.thinking_step) {
-            addThinkingStep(chunk.thinking_step)
-            continue
-          }
-          
-          if (chunk.thinking_update) {
-            updateLastThinkingStep(chunk.thinking_update)
-            continue
-          }
-          
-          // 处理计划/步骤数据
-          if (chunk.plan) {
-            applyPlanSteps(chunk.plan.steps || [])
-            continue
-          }
-          
-          // 处理工具调用数据
-          if (chunk.tool_call) {
-            upsertToolCall(chunk.tool_call)
-            continue
-          }
-
-          // 流式文本: 后端把 token 放在 response 字段中
-          const token = chunk.response || chunk.content || ''
-          const msgType = chunk.msg?.type
-
-          if (msgType === 'tool') {
-            // 工具消息：追加为独立消息
-            ts.onGoingConv.messages.push({
-              type: 'tool',
-              content: chunk.msg?.content || '',
-              tool_name: chunk.msg?.name || '',
-              tool_call_id: chunk.msg?.tool_call_id || '',
-              id: Date.now(),
-            })
-            aiMsgIndex = -1  // 工具消息后下一段文本是新 AI 消息
-          } else if (token) {
-            // AI 文本 token: 累积到当前 AI 消息
-            streamingContent += token
-            if (aiMsgIndex < 0) {
-              aiMsgIndex = ts.onGoingConv.messages.length
-              ts.onGoingConv.messages.push({
-                type: 'ai',
-                content: streamingContent,
-                id: Date.now(),
-              })
-            } else {
-              ts.onGoingConv.messages[aiMsgIndex].content = streamingContent
-            }
-          }
-        } catch (e) {
-          if (e.message && !e.message.startsWith('HTTP')) {
-            throw e  // 状态 error 抛出的异常直接向上传递
-          }
-          // 忽略 JSON 解析错误
         }
       }
     }
@@ -970,7 +1091,9 @@ defineExpose({
 .chat-content-container {
   flex: 1;
   display: flex;
+  flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
 .chat-main {
@@ -986,6 +1109,11 @@ defineExpose({
   max-width: 800px;
   width: 100%;
   margin: 0 auto;
+}
+
+.chat-bottom-spacer {
+  height: 180px;
+  flex-shrink: 0;
 }
 
 .conv-box {
@@ -1019,16 +1147,32 @@ defineExpose({
 }
 
 .bottom {
-  padding: 0 24px 24px;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 16px 24px 24px;
   max-width: 800px;
   width: 100%;
   margin: 0 auto;
+  background: linear-gradient(to top, var(--gray-0) 80%, transparent);
+  pointer-events: none;
+
+  .message-input-wrapper {
+    pointer-events: auto;
+  }
+}
+
+.message-input-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .chat-examples-input {
   text-align: center;
-  padding: 24px 0 16px;
-  h1 { font-size: 1.5rem; font-weight: 600; color: var(--gray-900); }
+  padding: 8px 0 12px;
+  h1 { font-size: 1.5rem; font-weight: 600; color: var(--gray-900); margin: 0; }
 }
 
 .agent-segment-wrapper {
