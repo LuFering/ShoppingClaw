@@ -935,7 +935,7 @@ class JDScraper:
 #### 4.4.1 业务数据模型
 
 ```python
-# src/storage/postgres/models.py
+# src/storage/postgres/model.py
 from sqlalchemy import Column, String, DateTime, JSON, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
