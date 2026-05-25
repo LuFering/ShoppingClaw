@@ -8,7 +8,11 @@ test
 tests
 saves
 models
+model
 src/config/saves
+.claude/
+.postman/
+.uv-cache/
 # Python
 __pycache__/
 *.py[cod]
@@ -87,3 +91,37 @@ logs/
 
 # Docker volumes (if accidentally created locally)
 docker/volumes/
+
+# Model & training data
+model/
+models/
+*.joblib
+*.pth
+*.pckl
+*.safetensors
+
+# Development docs & scripts
+docs_develop/
+scripts/augment_training_data.py
+scripts/fix_intent_labels.py
+scripts/fix_training_data.py
+scripts/data/
+
+# Temp/utility scripts at root
+_fx.py
+add_debug_logs.py
+reapply_fixes.py
+test_advanced_chat.py
+test_chat_api.py
+test_docker_api.py
+
+# Postman
+.postman/
+postman/
+
+# Temp markdown docs
+THINKING_SIDEBAR_OPTIMIZATION.md
+THINKING_SIDEBAR_USAGE.md
+
+# Duplicate template
+path/to/your/app/
