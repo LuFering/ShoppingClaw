@@ -18,11 +18,11 @@
     <nav class="login-navbar">
       <div class="navbar-content">
         <div class="brand-container" @click="goHome" style="cursor: pointer">
-          <img v-if="brandLogo" :src="brandLogo" alt="logo" class="brand-logo" />
+          <img v-if="brandLogo" :src="brandLogo" alt="ShoppingClaw" class="brand-logo" />
           <h1 class="brand-text">
             <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
             <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
-            <span class="brand-main">{{ brandName }}</span>
+            <span v-if="!brandOrgName || brandName !== brandOrgName" class="brand-main">{{ brandName }}</span>
           </h1>
         </div>
       </div>
@@ -31,12 +31,7 @@
     <!-- 主要内容区：居中卡片 -->
     <main class="login-main">
       <div class="login-card">
-        <!-- 左侧图片 -->
-        <div class="card-side is-image">
-          <img :src="loginBgImage" alt="登录背景" class="login-bg-image" />
-        </div>
-
-        <!-- 右侧表单 -->
+        <!-- 登录表单 -->
         <div class="card-side is-form">
           <div class="form-wrapper">
             <header class="form-header">
@@ -248,6 +243,7 @@ import { useUserStore } from '@/stores/user'
 import { useInfoStore } from '@/stores/info'
 import { useAgentStore } from '@/stores/agent'
 import { message } from 'ant-design-vue'
+import parrotLogo from '@/assets/parrot-logo.png'
 const healthApi = {
   checkHealth: async () => {
     const resp = await fetch('/api/system/health')
@@ -265,11 +261,8 @@ const infoStore = useInfoStore()
 const agentStore = useAgentStore()
 
 // 品牌展示数据
-const loginBgImage = computed(() => {
-  return infoStore.organization?.login_bg || '/login-bg.jpg'
-})
 const brandLogo = computed(() => {
-  return infoStore.organization?.logo || ''
+  return parrotLogo
 })
 const brandOrgName = computed(() => {
   return infoStore.organization?.name?.trim() || ''
@@ -653,7 +646,7 @@ onUnmounted(() => {
 }
 
 .login-card {
-  width: 900px;
+  width: 460px;
   max-width: 95vw;
   height: 560px;
   max-height: 80vh;
@@ -664,27 +657,9 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.card-side {
-  position: relative;
-}
-
-/* Image Side */
-.card-side.is-image {
-  flex: 1.4;
-  background-color: var(--main-10);
-  overflow: hidden;
-
-  .login-bg-image {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    object-position: center;
-  }
-}
-
 /* Form Side */
 .card-side.is-form {
-  flex: 1;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -925,15 +900,10 @@ onUnmounted(() => {
   }
 
   .login-card {
-    flex-direction: column;
     height: auto;
     max-height: none;
     width: 100%;
     margin-top: 20px;
-  }
-
-  .card-side.is-image {
-    display: none;
   }
 
   .card-side.is-form {

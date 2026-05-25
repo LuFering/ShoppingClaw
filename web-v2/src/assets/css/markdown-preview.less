@@ -48,5 +48,38 @@
       margin: 12px 0 8px;
       font-weight: 600;
     }
+
+    // 商品卡片图片
+    img.product-card-image {
+      max-width: 240px;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+      margin: 8px 0;
+    }
+    img {
+      max-width: 100%;
+      height: auto;
+    }
+
+    // 对比表格
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 12px 0;
+      font-size: 0.9rem;
+      th, td {
+        padding: 8px 12px;
+        border: 1px solid var(--gray-200);
+        text-align: left;
+        vertical-align: middle;
+      }
+      th {
+        background-color: var(--gray-50);
+        font-weight: 600;
+      }
+      tr:nth-child(even) {
+        background-color: var(--gray-10);
+      }
+    }
   }
 }

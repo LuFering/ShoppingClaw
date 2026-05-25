@@ -3,6 +3,7 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { Bot } from 'lucide-vue-next'
 import { useUserStore } from '@/stores/user'
 import UserMenuButton from '@/components/UserMenuButton.vue'
+import parrotLogo from '@/assets/parrot-logo.png'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -22,7 +23,7 @@ const mainList = [
     <div class="header">
       <div class="logo circle">
         <router-link to="/">
-          <Bot size="22" />
+          <img :src="parrotLogo" alt="ShoppingClaw" />
         </router-link>
       </div>
       <div class="nav">
@@ -116,17 +117,20 @@ div.header,
     height: 34px;
     margin: 6px 0 20px 0;
 
+    & > a {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
+    }
+
     img {
       width: 100%;
       height: 100%;
+      object-fit: contain;
       border-radius: 4px;
-    }
-
-    & > a {
-      text-decoration: none;
-      font-size: 24px;
-      font-weight: bold;
-      color: var(--gray-900);
     }
   }
 

@@ -431,7 +431,20 @@ def render_product_card(product: dict) -> str:
         # 使用 HTML 标签控制图片大小，适配 Streamlit
         card.append(f'\n<img src="{image_url}" width="200">')
         
-    return "\n".join(card)
+    # Return structured JSON for frontend SSE interception
+    import json
+    return json.dumps({
+        "type": "product_card",
+        "data": {
+            "title": title,
+            "price": price,
+            "platform": platform,
+            "url": url,
+            "image_url": image_url,
+            "rating": rating,
+            "shop_name": shop_name,
+        }
+    }, ensure_ascii=False)
 
 
 @tool(

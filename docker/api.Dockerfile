@@ -23,6 +23,7 @@ RUN set -ex \
     && apt-get install -y --no-install-recommends --fix-missing \
         curl \
         libpq5 \
+        libgomp1 \
     # (D) 清理垃圾,减小体积
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -34,6 +35,7 @@ COPY uv.lock /app/uv.lock
 
 # 安装依赖(使用清华源加速)
 # 注意：从 pyproject.toml 提取依赖并写入临时文件，然后安装
+ENV UV_HTTP_TIMEOUT=600
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv && python3 -c "import tomllib; data = tomllib.load(open('pyproject.toml', 'rb')); open('/tmp/requirements.txt', 'w').write('\n'.join(data['project']['dependencies']))" && uv pip install -r /tmp/requirements.txt
 
@@ -45,3 +47,4 @@ COPY src/ /app/src/
 COPY server/ /app/server/
 COPY agents/ /app/agents/
 COPY deepagents/ /app/deepagents/
+COPY models/ /app/models/

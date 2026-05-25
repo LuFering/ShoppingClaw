@@ -7,9 +7,8 @@
       <div class="sidebar-header">
         <div class="header-brand">
           <img
-            v-if="!userStore.isAdmin && (organization.logo || organization.avatar)"
-            :src="organization.logo || organization.avatar"
-            alt="logo"
+            :src="parrotLogo"
+            alt="ShoppingClaw"
             class="brand-logo"
           />
           <div class="header-title">{{ branding.name || organization.name || 'ShoppingClaw' }}</div>
@@ -119,13 +118,12 @@ import {
 import dayjs, { parseToShanghai } from '@/utils/time'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useInfoStore } from '@/stores/info'
-import { useUserStore } from '@/stores/user'
 import { storeToRefs } from 'pinia'
+import parrotLogo from '@/assets/parrot-logo.png'
 
 // 使用 chatUI store
 const chatUIStore = useChatUIStore()
 const infoStore = useInfoStore()
-const userStore = useUserStore()
 
 const { branding, organization } = storeToRefs(infoStore)
 
@@ -322,7 +320,7 @@ const togglePin = (chatId) => {
       width: 26px;
       height: 26px;
       border-radius: 6px;
-      object-fit: cover;
+      object-fit: contain;
       flex-shrink: 0;
       border: 1px solid var(--gray-100);
       background: var(--gray-0);

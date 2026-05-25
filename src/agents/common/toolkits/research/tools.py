@@ -23,6 +23,7 @@ from src.agents.common.toolkits.research.schemas import (
     JustoneProductSearchInput,
     JustoneProductDetailInput,
 )
+from src.services.cache_decorator import redis_cache
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ def init_jd_sdk():
     icon="🔍",
     args_schema=JdDeepSearchInput,
 )
+@redis_cache(ttl=300, prefix="jd_search_v2")
 def jd_deep_search(
     keyword: str,
     max_pages: int = 3,
@@ -499,6 +501,7 @@ def jd_product_mobile_detail(
     display_name="商品搜索（官方+Justone整合）",
     icon="🔍",
 )
+@redis_cache(ttl=300, prefix="jd_search_integrated_v2")
 def search_products(
     keyword: str,
     page: int = 1,
@@ -617,6 +620,7 @@ def search_products(
     display_name="商品完整详情（官方+Justone整合）",
     icon="📊",
 )
+@redis_cache(ttl=600, prefix="jd_detail_v2")
 def get_product_full_detail(sku_id: str) -> Dict[str, Any]:
     """
     获取商品完整详情，**整合官方所有可用API + Justone详情API**。
@@ -903,6 +907,7 @@ def get_products_specs_batch(sku_ids: List[str]) -> Dict[str, Any]:
     icon="🔥",
     args_schema=JustoneProductSearchInput,
 )
+@redis_cache(ttl=300, prefix="justone_search_v2")
 def justone_product_search(
     keyword: str,
     page: int = 1,
@@ -1000,6 +1005,7 @@ def justone_product_search(
     icon="📊",
     args_schema=JustoneProductDetailInput,
 )
+@redis_cache(ttl=600, prefix="justone_detail_v2")
 def justone_product_full_detail(
     sku_id: str,
 ) -> Dict[str, Any]:

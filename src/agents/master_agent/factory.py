@@ -1282,12 +1282,13 @@ async def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict
                         item.tool_call_id = _fallback_ids[_fallback_idx]
                         logging.info(f"[TOOLS] 从 AIMessage 回填 tool_call_id: {item.tool_call_id}")
                     else:
+                        # Generate UUID instead of skipping - skipping causes DeepSeek 400
+                        import uuid
+                        item.tool_call_id = str(uuid.uuid4())
                         logging.warning(
-                            f"[TOOLS] ToolMessage 缺少 tool_call_id 且无法匹配，"
-                            f"工具名={item.name}，跳过该消息以避免 DeepSeek 400 错误"
+                            f"[TOOLS] ToolMessage missing tool_call_id, generated UUID: {item.tool_call_id}"
                         )
-                        _fallback_idx += 1
-                        continue  # 跳过无法匹配的 ToolMessage
+                    _fallback_idx += 1
                     _fallback_idx += 1
                 valid_messages.append(item)
             elif isinstance(item, Command):
@@ -1300,12 +1301,13 @@ async def tool_node_wrapper(state: AgentState[Any], tool_node: ToolNode) -> dict
                                     msg.tool_call_id = _fallback_ids[_fallback_idx]
                                     logging.info(f"[TOOLS] 从 AIMessage 回填 Command 中的 tool_call_id: {msg.tool_call_id}")
                                 else:
+                                    # Generate UUID instead of skipping
+                                    import uuid
+                                    msg.tool_call_id = str(uuid.uuid4())
                                     logging.warning(
-                                        f"[TOOLS] Command 中的 ToolMessage 缺少 tool_call_id 且无法匹配，"
-                                        f"工具名={msg.name}，跳过该消息"
+                                        f"[TOOLS] Command ToolMessage missing tool_call_id, generated UUID: {msg.tool_call_id}"
                                     )
-                                    _fallback_idx += 1
-                                    continue
+                                _fallback_idx += 1
                                 _fallback_idx += 1
                             fixed_messages.append(msg)
                         item.update['messages'] = fixed_messages

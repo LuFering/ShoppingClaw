@@ -36,6 +36,19 @@ const router = createRouter({
       ]
     },
     {
+      path: '/test-product-card',
+      name: 'TestProductCard',
+      component: BlankLayout,
+      children: [
+        {
+          path: '',
+          name: 'TestProductCardPage',
+          component: () => import('../views/TestProductCard.vue'),
+          meta: { requiresAuth: false }
+        }
+      ]
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('../views/EmptyView.vue'),

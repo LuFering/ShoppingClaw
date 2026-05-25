@@ -12,6 +12,10 @@ from src.repositories.agent_config_repository import AgentConfigRepository
 from src.repositories.conversation_repository import ConversationRepository
 from src.storage.postgres.manager import pg_manager
 from src.services.memory_store import memory_store
+from src.services.redis_store import MessageStoreBridge
+
+# 统一存储桥接实例
+_store_bridge = MessageStoreBridge()
 # ═══ 新增：历史管理与用户记忆 ═══
 from src.services.history_manager import HistoryManager
 from src.services.user_memory import get_user_memory_service
@@ -375,6 +379,16 @@ async def stream_agent_chat(
         if started_at:
             duration_ms = int((asyncio.get_event_loop().time() - started_at) * 1000)
         meta_info = _tool_meta(function)
+        # 记录完成的工具调用（持久化用）
+        _completed_tool_calls.append({
+            "id": tool_call_id,
+            "name": function,
+            "args": cached.get("args", {}),
+            "status": "completed",
+            "duration_ms": duration_ms,
+            "icon": meta_info.get("icon"),
+            "category": meta_info.get("category"),
+        })
         return make_chunk(
             status="thinking_process",
             event="tool_result",
@@ -397,22 +411,23 @@ async def stream_agent_chat(
         conv_repo = None
         if db is not None:
             conv_repo = ConversationRepository(db)
-            save_msg = getattr(conv_repo, 'add_message_by_thread_id', None)
-            if save_msg:
-                try:
-                    await save_msg(
-                        thread_id=thread_id,
-                        role="user",
-                        content=query,
-                        message_type=message_type,
-                        image_content=image_content,
-                        extra_metadata={"raw_message": human_message.model_dump()},
-                    )
-                except Exception as e:
-                    logging.error(f"Error saving user message to db: {e}")
+            try:
+                await conv_repo.add_message(
+                    thread_id=thread_id,
+                    message={
+                        "role": "user",
+                        "content": query,
+                        "type": "human",
+                        "message_type": message_type,
+                        "image_content": image_content,
+                        "raw_message": human_message.model_dump() if hasattr(human_message, 'model_dump') else str(human_message),
+                    },
+                )
+            except Exception as e:
+                logging.error(f"Error saving user message to db: {e}")
 
-        # 始终存入内存存储 (供 History API 读取)
-        memory_store.add_message(thread_id, {
+        # 始终存入统一存储桥接 (供 History API 读取)
+        await _store_bridge.add_message(thread_id, {
             "role": "user",
             "content": query,
             "type": "human",
@@ -420,12 +435,46 @@ async def stream_agent_chat(
             "timestamp": asyncio.get_event_loop().time(),
         })
 
+        # ═══ 自动标题生成：首条用户消息时自动生成对话标题 ═══
+        user_msgs = await _store_bridge.get_messages(thread_id)
+        user_msg_count = sum(1 for m in user_msgs if m.get("role") == "user")
+        title_updated = False
+        if user_msg_count == 1:
+            # 第一条用户消息，自动生成标题（截取前30个字符）
+            generated_title = query.strip()
+            # 清理换行和多余空格
+            generated_title = " ".join(generated_title.split())
+            if len(generated_title) > 30:
+                generated_title = generated_title[:30] + "..."
+            if generated_title:
+                logging.info(f"[AutoTitle] 为线程 {thread_id} 自动生成标题: {generated_title}")
+                # 更新统一存储桥接
+                await _store_bridge.update_thread(thread_id, title=generated_title)
+                # 更新 PostgreSQL
+                if conv_repo:
+                    try:
+                        await conv_repo.update_title(thread_id, generated_title)
+                    except Exception as e:
+                        logging.warning(f"[AutoTitle] PostgreSQL 标题更新失败: {e}")
+                # 发送 title_update SSE 事件给前端
+                title_event = {
+                    "type": EventType.TITLE,
+                    "thread_id": thread_id,
+                    "title": generated_title,
+                }
+                yield format_sse_event(EventType.TITLE, title_event).encode("utf-8") + b"\n"
+                title_updated = True
+
         # 先构建 langgraph_config
         langgraph_config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
 
         full_msg = None
         accumulated_content = []
+        _pg_full_text: list[str] = []  # PostgreSQL 用：完整文本，不清空，保证 PG 存整段
         last_reasoning_length = 0  # 记录上一次发送的 reasoning_content 长度
+        # 思考过程持久化：累积整个流式过程中的思考数据
+        _thinking_chunks: list[str] = []  # 推理文本片段
+        _completed_tool_calls: list[dict] = []  # 工具调用完成记录
         # 流式执行 Agent 推理
         async for chunk in agent.stream_messages(messages, input_context=input_context):
             # ═══ 处理 SSE 监控中间件事件 ═══
@@ -433,6 +482,9 @@ async def stream_agent_chat(
                 sse_middleware = getattr(agent, 'sse_middleware', None)
             if sse_middleware is not None:
                 middleware_events = sse_middleware.drain_events()
+                if middleware_events:
+                    names = [e.get("tool_name", e.get("type", "?")) for e in middleware_events]
+                    print(f"[SSE-DRAIN] drained {len(middleware_events)} events: {names}", flush=True)
                 for event in middleware_events:
                     await session_manager.emit(thread_id, event)
                     yield format_sse_event(event["type"], event).encode("utf-8") + b"\n"
@@ -482,6 +534,7 @@ async def stream_agent_chat(
                             content=new_reasoning
                         )
                         last_reasoning_length = len(reasoning_content)  # 更新长度
+                        _thinking_chunks.append(new_reasoning)  # 持久化用
 
                 for tool_chunk in getattr(msg, "tool_call_chunks", None) or []:
                     tool_call_id = tool_chunk.get("id")
@@ -495,6 +548,7 @@ async def stream_agent_chat(
 
                 if content is not None:  # 允许空字符串，只要不是 None
                     accumulated_content.append(content)
+                    _pg_full_text.append(content)
 
                 # # 敏感词检查（每 10 个 chunk 检查一次）
                 # content_for_check = "".join(accumulated_content[-10:])
@@ -530,6 +584,55 @@ async def stream_agent_chat(
 
                 if isinstance(msg, ToolMessage):
                     yield emit_tool_result(msg)
+                    # 持久化 render_product_card 结果到存储，供历史记录加载
+                    _tool_name = getattr(msg, "name", "")
+                    if _tool_name == "render_product_card":
+                        _card_content = getattr(msg, "content", "")
+                        if _card_content:
+                            try:
+                                _card_data = json.loads(_card_content) if isinstance(_card_content, str) else _card_content
+                                _cards = []
+                                if isinstance(_card_data, dict):
+                                    if _card_data.get("type") == "product_card" and _card_data.get("data"):
+                                        _cards = [_card_data["data"]]
+                                    elif _card_data.get("cards"):
+                                        _cards = _card_data["cards"]
+                                if _cards:
+                                    _now = asyncio.get_event_loop().time()
+                                    # 先保存卡片之前已累积的文本，确保历史消息的正确顺序
+                                    if accumulated_content:
+                                        _prev_text = "".join(accumulated_content)
+                                        if _prev_text.strip():
+                                            _txt_msg = {
+                                                "role": "assistant",
+                                                "type": "ai",
+                                                "content": _prev_text,
+                                                "timestamp": _now,
+                                            }
+                                            await _store_bridge.add_message(thread_id, _txt_msg)
+                                            if conv_repo:
+                                                try:
+                                                    await conv_repo.add_message(thread_id, _txt_msg)
+                                                except Exception as _e2:
+                                                    pass
+                                        accumulated_content.clear()
+                                    # 保存商品卡片（同步写入 PostgreSQL）
+                                    _card_msg = {
+                                        "role": "tool",
+                                        "type": "ai",
+                                        "content": "",
+                                        "tool_name": "render_product_card",
+                                        "productCards": _cards,
+                                        "timestamp": _now,
+                                    }
+                                    await _store_bridge.add_message(thread_id, _card_msg)
+                                    if conv_repo:
+                                        try:
+                                            await conv_repo.add_message(thread_id, _card_msg)
+                                        except Exception as _e3:
+                                            pass
+                            except Exception as _e:
+                                logging.warning(f"保存商品卡片到内存失败: {_e}")
 
                 # ═══ 处理中间件通过 custom 模式写入的自定义 SSE 事件 ═══
                 if isinstance(msg, dict) and msg.get("status") == "thinking_process" and msg.get("event"):
@@ -600,7 +703,7 @@ async def stream_agent_chat(
                                 yield plan_chunk
                 except Exception as e:
                     logging.error(f"Error processing tool message: {e}")
-        full_msg = _ensure_full_msg(full_msg, accumulated_content)
+        full_msg = _ensure_full_msg(full_msg, _pg_full_text)
 
         # if conf.enable_content_guard and hasattr(full_msg, "content") and await content_guard.check(full_msg.content):
         #     if conv_repo:
@@ -651,12 +754,47 @@ async def stream_agent_chat(
 
         # 保存 AI 响应到内存存储 (供 History API 读取)
         if accumulated_content:
-            memory_store.add_message(thread_id, {
+            ai_content = "".join(accumulated_content)
+            _now = asyncio.get_event_loop().time()
+            await _store_bridge.add_message(thread_id, {
                 "role": "assistant",
-                "content": "".join(accumulated_content),
+                "content": ai_content,
                 "type": "ai",
-                "timestamp": asyncio.get_event_loop().time(),
+                "timestamp": _now,
             })
+            # 同步保存剩余文本到 PostgreSQL（卡片前的文本已在流式过程中增量保存）
+            if conv_repo:
+                try:
+                    await conv_repo.add_message(
+                        thread_id=thread_id,
+                        message={
+                            "role": "assistant",
+                            "content": ai_content,
+                            "type": "ai",
+                        },
+                    )
+                except Exception as e:
+                    logging.error(f"Error saving AI message to PostgreSQL: {e}")
+
+        # 保存思考过程到存储（供 History API 加载时恢复）
+        if _thinking_chunks or _completed_tool_calls:
+            _thinking_msg = {
+                "role": "system",
+                "type": "thinking",
+                "content": "",
+                "thinkingProcess": {
+                    "steps": [{"type": "thinking", "content": c} for c in _thinking_chunks],
+                    "planSteps": _todos_to_plan_steps(agent_state.get("todos") if isinstance(agent_state, dict) else None) or [],
+                    "toolCalls": _completed_tool_calls,
+                },
+                "timestamp": asyncio.get_event_loop().time(),
+            }
+            await _store_bridge.add_message(thread_id, _thinking_msg)
+            if conv_repo:
+                try:
+                    await conv_repo.add_message(thread_id, _thinking_msg)
+                except Exception as _e:
+                    logging.warning(f"保存思考过程到 PostgreSQL 失败: {_e}")
 
         # 完成信号
         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
@@ -690,9 +828,9 @@ async def stream_agent_chat(
         # ═══ 清理会话 ═══
         session_manager.deactivate_session(thread_id)
 
-        # 保存已累积的内容到内存存储
+        # 保存已累积的内容到统一存储桥接
         if accumulated_content:
-            memory_store.add_message(thread_id, {
+            await _store_bridge.add_message(thread_id, {
                 "role": "assistant",
                 "content": "".join(accumulated_content),
                 "type": "ai",
@@ -702,7 +840,7 @@ async def stream_agent_chat(
 
         async def save_cleanup():
             nonlocal full_msg
-            full_msg = _ensure_full_msg(full_msg, accumulated_content)
+            full_msg = _ensure_full_msg(full_msg, _pg_full_text)
 
             async with pg_manager.get_async_session_context() as new_db:
                 new_conv_repo = ConversationRepository(new_db)
@@ -727,9 +865,9 @@ async def stream_agent_chat(
     except Exception as e:
         logging.error(f"Error streaming messages: {e}, {traceback.format_exc()}")
 
-        # 保存已累积的内容到内存存储
+        # 保存已累积的内容到统一存储桥接
         if accumulated_content:
-            memory_store.add_message(thread_id, {
+            await _store_bridge.add_message(thread_id, {
                 "role": "assistant",
                 "content": "".join(accumulated_content),
                 "type": "ai",
@@ -740,7 +878,7 @@ async def stream_agent_chat(
         error_msg = f"Error streaming messages: {e}"
         error_type = "unexpected_error"
 
-        full_msg = _ensure_full_msg(full_msg, accumulated_content)
+        full_msg = _ensure_full_msg(full_msg, _pg_full_text)
 
         async with pg_manager.get_async_session_context() as new_db:
             new_conv_repo = ConversationRepository(new_db)

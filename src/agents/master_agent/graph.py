@@ -90,10 +90,15 @@ class MasterAgent(BaseAgent):
         all_tools = get_all_tool_instances()
         extra_meta = get_all_extra_metadata()
         
-        # 只保留 buildin 类别的工具
+        # 已由 Prompt 注入替代的工具（不应作为 Tool 暴露给 LLM）
+        # ask_user_question → BASE_PROMPT.md「澄清与追问」章节，由 LLM 自然对话完成
+        _deprecated_tool_names = {"ask_user_question"}
+        
+        # 只保留 buildin 类别的工具，并排除已弃用的工具
         return [
             tool for tool in all_tools 
             if extra_meta.get(tool.name, ToolExtraMetadata()).category == "buildin"
+            and tool.name not in _deprecated_tool_names
         ]
 
     async def _get_checkpointer(self):
@@ -198,6 +203,7 @@ class MasterAgent(BaseAgent):
         # 创建 SSE 监控中间件（保存引用供 chat_stream_service 获取事件）
         sse_monitor = SSEMonitoringMiddleware()
         self.sse_middleware = sse_monitor
+        logging.info("[GRAPH-DEBUG] SSEMonitoringMiddleware created and registered")
 
         graph = create_master_agent(
             model=model,

@@ -124,8 +124,9 @@ async def create_thread_view(
     metadata: dict | None,
     db: AsyncSession,
     current_user_id: str,
+    specified_thread_id: str | None = None,
 ) -> dict:
-    thread_id = str(uuid.uuid4())
+    thread_id = specified_thread_id or str(uuid.uuid4())
     conv_repo = ConversationRepository(db)
     conversation = await conv_repo.create_conversation(
         user_id=str(current_user_id),

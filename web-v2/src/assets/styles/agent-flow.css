@@ -1,0 +1,251 @@
+/**
+ * Agent 流程可视化组件全局样式增强
+ * 融合 ScienceClaw 设计语言与 ShoppingClaw 现有风格
+ */
+
+/* ===== 流程面板动画优化 ===== */
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideOutRight {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+.agent-flow-panel.panel-open {
+  animation: slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ===== 步骤状态颜色系统 ===== */
+:root {
+  --step-pending: #d1d5db;
+  --step-running: #3b82f6;
+  --step-completed: #10b981;
+  --step-failed: #ef4444;
+  
+  --tool-calling: #3b82f6;
+  --tool-called: #10b981;
+  --tool-error: #ef4444;
+  
+  --thinking-bg: rgba(245, 158, 11, 0.05);
+  --thinking-border: rgba(245, 158, 11, 0.15);
+  
+  --progress-gradient: linear-gradient(90deg, #3b82f6, #60a5fa);
+  --progress-completed: linear-gradient(90deg, #10b981, #34d399);
+}
+
+/* ===== 加载动画优化 ===== */
+.spinner-ring {
+  border: 2px solid var(--border-light, #e0e7ff);
+  border-top-color: var(--step-running);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ===== 脉冲点动画 ===== */
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--step-running);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { 
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% { 
+    opacity: 0.4;
+    transform: scale(0.8);
+  }
+}
+
+/* ===== 思考点动画 ===== */
+.thinking-dots .dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--step-running);
+  animation: bounce 1.4s infinite;
+}
+
+.thinking-dots .dot:nth-child(1) { animation-delay: 0ms; }
+.thinking-dots .dot:nth-child(2) { animation-delay: 200ms; }
+.thinking-dots .dot:nth-child(3) { animation-delay: 400ms; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-4px); }
+}
+
+/* ===== 进度条动画 ===== */
+.progress-bar-fill {
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ===== 工具卡片悬停效果 ===== */
+.tool-call-card {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tool-call-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* ===== 步骤项选择效果 ===== */
+.step-message.selected {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.2);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+/* ===== 展开/折叠过渡 ===== */
+.section-expand-enter-active,
+.section-expand-leave-active {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tools-expand-enter-active,
+.tools-expand-leave-active {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.detail-expand-enter-active,
+.detail-expand-leave-active {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ===== 滚动条美化 ===== */
+.thinking-content::-webkit-scrollbar,
+.tools-content::-webkit-scrollbar,
+.steps-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.thinking-content::-webkit-scrollbar-track,
+.tools-content::-webkit-scrollbar-track,
+.steps-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thinking-content::-webkit-scrollbar-thumb,
+.tools-content::-webkit-scrollbar-thumb,
+.steps-content::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 3px;
+}
+
+.thinking-content::-webkit-scrollbar-thumb:hover,
+.tools-content::-webkit-scrollbar-thumb:hover,
+.steps-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+/* ===== 暗色模式适配 ===== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --step-pending: #4b5563;
+    --thinking-bg: rgba(245, 158, 11, 0.08);
+    --thinking-border: rgba(245, 158, 11, 0.2);
+  }
+  
+  .agent-flow-panel {
+    background: rgba(17, 24, 39, 0.98);
+    border-left-color: rgba(55, 65, 81, 0.5);
+  }
+  
+  .tool-call-card {
+    background: rgba(31, 41, 55, 0.8);
+    border-color: rgba(55, 65, 81, 0.5);
+  }
+  
+  .tool-call-card:hover {
+    border-color: rgba(75, 85, 99, 0.6);
+  }
+  
+  .detail-content {
+    background: rgba(17, 24, 39, 0.6);
+    border-color: rgba(55, 65, 81, 0.5);
+  }
+}
+
+/* ===== 响应式优化 ===== */
+@media (max-width: 768px) {
+  .agent-flow-panel {
+    width: 100%;
+    box-shadow: -2px 0 16px rgba(0, 0, 0, 0.1);
+  }
+  
+  .panel-header {
+    padding: 12px 16px;
+  }
+  
+  .section-header {
+    padding: 10px 12px;
+  }
+  
+  .thinking-content,
+  .tools-content,
+  .steps-content {
+    padding: 12px;
+  }
+}
+
+/* ===== 性能优化：减少重绘 ===== */
+.agent-flow-panel,
+.tool-call-card,
+.step-message {
+  will-change: transform;
+}
+
+/* ===== 可访问性增强 ===== */
+.close-btn:focus-visible,
+.section-header:focus-visible,
+.tool-header:focus-visible,
+.step-message:focus-visible {
+  outline: 2px solid var(--step-running);
+  outline-offset: 2px;
+}
+
+/* ===== 打印样式 ===== */
+@media print {
+  .agent-flow-panel {
+    position: static;
+    width: 100%;
+    height: auto;
+    transform: none !important;
+    box-shadow: none;
+    border: 1px solid #000;
+  }
+  
+  .panel-header,
+  .section-header {
+    cursor: default;
+  }
+  
+  .close-btn,
+  .filter-badge {
+    display: none;
+  }
+}

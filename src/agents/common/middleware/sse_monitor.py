@@ -10,10 +10,37 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 from uuid import uuid4
 
+
+import json
+import logging
+
+_log = logging.getLogger(__name__)
+
 from src.agents.common.middleware.base import AgentMiddleware, ToolCallRequest
 from src.services.sse_protocol import EventType
 from src.services.tool_registry import get_tool_registry
 
+
+def _serialize_tool_result(result) -> str | None:
+    """Serialize tool result to JSON string for frontend parsing."""
+    if result is None:
+        return None
+    if isinstance(result, str):
+        return result
+    if isinstance(result, (dict, list)):
+        try:
+            return json.dumps(result, ensure_ascii=False, default=str)
+        except Exception:
+            return str(result)
+    content_attr = getattr(result, "content", None)
+    if content_attr is not None:
+        if isinstance(content_attr, str):
+            return content_attr
+        try:
+            return json.dumps(content_attr, ensure_ascii=False, default=str)
+        except Exception:
+            return str(content_attr)
+    return str(result)
 
 class SSEMonitoringMiddleware(AgentMiddleware):
     """
@@ -56,6 +83,7 @@ class SSEMonitoringMiddleware(AgentMiddleware):
             工具调用结果
         """
         tool_name = request.tool_call.get("name", "unknown")
+        _log.info(f"[SSE-DEBUG] wrap_tool_call ENTER: tool={tool_name}")
         tool_args = request.tool_call.get("args", {})
         
         # 获取工具元数据
@@ -87,11 +115,15 @@ class SSEMonitoringMiddleware(AgentMiddleware):
             duration_ms = int((time.time() - start_time) * 1000)
             
             # ═══ 发送 tool_complete 事件 ═══
+            result_content = _serialize_tool_result(result)
+            _log.info(f"[SSE-DEBUG] tool_complete: tool={tool_name} rc_len={len(result_content) if result_content else 0}")
+
             self._emit({
                 "type": EventType.TOOL_COMPLETE,
                 "tool_name": tool_name,
                 "tool_call_id": request.tool_call.get("id", ""),
                 "result_preview": str(result)[:500] if result else "",  # 截断预览
+                "result_content": result_content,
                 "duration_ms": duration_ms,
                 "meta": {
                     "icon": meta.icon,

@@ -137,6 +137,7 @@ def convert_legacy_chunk_to_sse(chunk: Dict[str, Any]) -> list[str]:
                 "tool_name": tool_call.get("function") or tool_call.get("name", ""),
                 "tool_call_id": tool_call.get("tool_call_id", ""),
                 "result_preview": str(tool_call.get("content", ""))[:500],
+                "result_content": tool_call.get("content", ""),
                 "duration_ms": tool_call.get("duration_ms"),
                 "meta": tool_call.get("tool_meta", {}),
             }))

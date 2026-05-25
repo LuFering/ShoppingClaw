@@ -398,6 +398,9 @@ const thinkingState = reactive({
   isInitialRender: true
 })
 
+// 每个线程的思考过程快照（切换对话时恢复）
+const savedThinkingStates = ref({})
+
 // 使用新流程面板 (ScienceClaw 风格)
 const useNewFlowPanel = ref(true)
 
@@ -556,12 +559,30 @@ const selectChat = async (threadId) => {
   if (!threadId || threadId === currentChatId.value) return
   chatState.currentThreadId = threadId
   chatUIStore.isLoadingMessages = true
+  // 切换对话时恢复该对话的思考过程快照
+  restoreThinkingState(threadId)
   try {
     const agentId = currentThread.value?.agent_id || currentAgentId.value
     const [historyRes] = await Promise.all([
       agentApi.getAgentHistory(agentId, threadId),
     ])
-    threadMessages.value[threadId] = historyRes?.history || []
+    const messages = historyRes?.history || []
+    threadMessages.value[threadId] = messages
+    
+    // 从后端历史消息中恢复思考过程（仅在内存快照不存在时）
+    if (!savedThinkingStates.value[threadId]) {
+      const thinkingMsg = messages.find(m => m.type === 'thinking' && m.thinkingProcess)
+      if (thinkingMsg) {
+        const tp = thinkingMsg.thinkingProcess
+        savedThinkingStates.value[threadId] = {
+          steps: tp.steps || [],
+          planSteps: tp.planSteps || [],
+          toolCalls: tp.toolCalls || [],
+        }
+        // 重新恢复（现在有数据了）
+        restoreThinkingState(threadId)
+      }
+    }
   } catch (error) {
     console.error('Failed to load messages:', error)
   } finally {
@@ -573,6 +594,8 @@ const deleteChat = async (threadId) => {
   try {
     await threadApi.deleteThread(threadId)
     threads.value = threads.value.filter((t) => t.id !== threadId)
+    // 清理已删除线程的思考过程快照
+    delete savedThinkingStates.value[threadId]
     if (currentChatId.value === threadId) {
       chatState.currentThreadId = null
       chatState.threadStates = {}
@@ -676,6 +699,28 @@ const clearThinkingSteps = () => {
   thinkingState.steps = []
   thinkingState.planSteps = []
   thinkingState.toolCalls = []
+}
+
+// 保存当前思考过程到线程快照
+const snapshotThinkingState = (threadId) => {
+  if (!threadId) return
+  savedThinkingStates.value[threadId] = {
+    steps: [...thinkingState.steps],
+    planSteps: [...thinkingState.planSteps],
+    toolCalls: [...thinkingState.toolCalls],
+  }
+}
+
+// 从线程快照恢复思考过程
+const restoreThinkingState = (threadId) => {
+  const saved = threadId ? savedThinkingStates.value[threadId] : null
+  if (saved) {
+    thinkingState.steps.splice(0, thinkingState.steps.length, ...(saved.steps || []))
+    thinkingState.planSteps.splice(0, thinkingState.planSteps.length, ...(saved.planSteps || []))
+    thinkingState.toolCalls.splice(0, thinkingState.toolCalls.length, ...(saved.toolCalls || []))
+  } else {
+    clearThinkingSteps()
+  }
 }
 
 const normalizeProcessStatus = (status) => {
@@ -828,6 +873,40 @@ const handleSSEEvent = (eventType, data, context) => {
         duration_ms: data.duration_ms,
         result_preview: data.result_preview,
       })
+      
+      // 检查是否是商品卡片工具，如果是则添加到消息中
+      if (data.tool_name === 'render_product_card' && data.result_content) {
+        try {
+          const result = typeof data.result_content === 'string' 
+            ? JSON.parse(data.result_content) 
+            : data.result_content
+          
+          // 兼容两种格式：{type: "product_card", data: {...}} 或 {cards: [...]}
+          let cards = []
+          if (result.type === 'product_card' && result.data) {
+            cards = [result.data]
+          } else if (result.cards && result.cards.length > 0) {
+            cards = result.cards
+          }
+          
+          if (cards.length > 0) {
+            // 关闭当前文本消息，让后续文本另起一条新消息
+            // 这样卡片就能自然插入到前后文本之间
+            context.aiMsgIndex = -1
+            context.streamingContent = ''
+            
+            // 创建独立的卡片消息，与文本消息交错排列
+            context.ts.onGoingConv.messages.push({
+              type: 'ai',
+              content: '',
+              productCards: cards,
+              id: Date.now(),
+            })
+          }
+        } catch (e) {
+          console.warn('Failed to parse product card data:', e)
+        }
+      }
       break
       
     case 'agent_state':
@@ -835,6 +914,16 @@ const handleSSEEvent = (eventType, data, context) => {
       ts.agentState = data
       if (Array.isArray(data.todos)) {
         applyPlanSteps(data.todos)
+      }
+      break
+      
+    case 'title':
+      // 自动标题更新（后端根据首条消息自动生成）
+      if (data.thread_id && data.title) {
+        const targetThread = threads.value.find((t) => t.id === data.thread_id)
+        if (targetThread) {
+          targetThread.title = data.title
+        }
       }
       break
       
@@ -997,6 +1086,8 @@ const handleSendOrStop = async () => {
     })
   } finally {
     ts.isStreaming = false
+    // 保存当前线程的思考过程快照
+    snapshotThinkingState(threadId)
     ts.onGoingConv = createOnGoingConvState()
   }
 }

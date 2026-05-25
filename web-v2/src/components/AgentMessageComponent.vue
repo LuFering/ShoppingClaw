@@ -2,7 +2,8 @@
   <div v-if="message.message_type === 'multimodal_image' && message.image_content" class="message-image">
     <img :src="`data:image/jpeg;base64,${message.image_content}`" alt="上传的图片" />
   </div>
-  <div class="message-box" :class="[message.type, customClasses]">
+  <!-- 思考过程数据消息不渲染到对话区（仅用于恢复右侧思考面板） -->
+  <div v-if="message.type !== 'thinking'" class="message-box" :class="[message.type, customClasses]">
     <!-- 用户消息 -->
     <div v-if="message.type === 'human'" class="message-copy-btn human-copy"
       @click="copyToClipboard(message.content)" :class="{ 'is-copied': isCopied }">
@@ -23,6 +24,24 @@
         :modelValue="message.content.trim()"
         class="message-md"
       />
+      
+      <!-- 商品卡片展示 -->
+      <div v-if="message.productCards && message.productCards.length > 0" class="product-cards-section">
+        <div 
+          v-for="(card, index) in message.productCards" 
+          :key="index"
+          class="single-card-wrapper"
+        >
+          <ProductCardTool 
+            :tool-call="{
+              tool_call_result: {
+                content: JSON.stringify({ cards: [card] })
+              }
+            }"
+          />
+        </div>
+      </div>
+      
       <div v-else-if="isProcessing" class="empty-block" style="padding: 8px 0; color: var(--gray-400);">
         思考中...
       </div>
@@ -51,6 +70,7 @@ import { computed, ref } from 'vue'
 import { Copy, Check } from 'lucide-vue-next'
 import { MdPreview } from 'md-editor-v3'
 import 'md-editor-v3/lib/preview.css'
+import ProductCardTool from './ToolCallingResult/tools/ProductCardTool.vue'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -248,6 +268,65 @@ const getErrorMessage = computed(() => {
       border-radius: 8px;
     }
     p:last-child { margin-bottom: 0; }
+
+    // 商品卡片图片
+    img.product-card-image {
+      max-width: 240px;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+      margin: 8px 0;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      &:hover {
+        transform: scale(1.02);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+      }
+    }
+    
+    // 商品卡片区域
+    .product-cards-section {
+      margin-top: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    
+    .single-card-wrapper {
+      width: 100%;
+    }
+    
+    img {
+      max-width: 100%;
+      height: auto;
+    }
+
+    // 对比表格
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 12px 0;
+      font-size: 0.9rem;
+      th, td {
+        padding: 8px 12px;
+        border: 1px solid var(--gray-200);
+        text-align: left;
+        vertical-align: middle;
+      }
+      th {
+        background-color: var(--gray-50);
+        font-weight: 600;
+        color: var(--gray-800);
+      }
+      tr:nth-child(even) {
+        background-color: var(--gray-10);
+      }
+      tr:hover {
+        background-color: var(--main-50);
+      }
+      img {
+        display: block;
+        margin: 0 auto;
+      }
+    }
   }
 }
 </style>
