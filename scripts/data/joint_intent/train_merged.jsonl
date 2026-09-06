@@ -1,0 +1,371 @@
+{"text": "想买个游戏本，预�?000左右", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 3, "end": 6, "value": "游戏�?}, {"entity": "budget_max", "start": 7, "end": 13, "value": "8000"}]}
+{"text": "有没有适合跑步的运动鞋�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 11, "value": "运动�?}]}
+{"text": "预算5000的手机推荐一�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "5000"}, {"entity": "category", "start": 7, "end": 9, "value": "手机"}]}
+{"text": "降噪好的耳机有吗", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "耳机"}]}
+{"text": "新家装修，要买台75寸电�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 11, "end": 13, "value": "电视"}]}
+{"text": "面试要穿西装，推荐一�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "西装"}]}
+{"text": "宝宝出生要买婴儿车，轻便点的", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "婴儿�?}]}
+{"text": "有没有画质好的投影仪�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 7, "end": 10, "value": "投影�?}]}
+{"text": "预算3000的笔记本电脑", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "3000"}, {"entity": "category", "start": 7, "end": 10, "value": "笔记�?}, {"entity": "category", "start": 10, "end": 12, "value": "电脑"}]}
+{"text": "A和B哪个更适合日常使用�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": []}
+{"text": "新家装修，要买台电视", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "电视"}]}
+{"text": "宝宝快出生了，要买婴儿车", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 9, "end": 12, "value": "婴儿�?}]}
+{"text": "画质好的电视哪个�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "电视"}]}
+{"text": "有没有轻便的婴儿�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "婴儿�?}]}
+{"text": "预算1000的西装推�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "1000"}, {"entity": "category", "start": 7, "end": 9, "value": "西装"}]}
+{"text": "想入手一个游戏本", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 5, "end": 8, "value": "游戏�?}]}
+{"text": "有没有适合跑步的运动鞋", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 11, "value": "运动�?}]}
+{"text": "预算5000的手机推�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "5000"}, {"entity": "category", "start": 7, "end": 9, "value": "手机"}]}
+{"text": "新家装修要买电视", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 8, "value": "电视"}]}
+{"text": "宝宝出生买婴儿车", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 5, "end": 8, "value": "婴儿�?}]}
+{"text": "画质好的75寸电�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 7, "end": 9, "value": "电视"}]}
+{"text": "预算1000的西�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "1000"}, {"entity": "category", "start": 7, "end": 9, "value": "西装"}]}
+{"text": "轻便好收纳的婴儿�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "婴儿�?}]}
+{"text": "想买个降噪耳机", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 5, "end": 7, "value": "耳机"}]}
+{"text": "预算300的手机推�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 5, "value": "300"}, {"entity": "category", "start": 6, "end": 8, "value": "手机"}]}
+{"text": "有没有适合跑步的鞋�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": []}
+{"text": "A和B哪个更好", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": []}
+{"text": "面试要穿西装，推荐一�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "西装"}]}
+{"text": "降噪好的耳机有吗", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "耳机"}]}
+{"text": "预算800的笔记本电脑", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 5, "value": "800"}, {"entity": "category", "start": 6, "end": 9, "value": "笔记�?}, {"entity": "category", "start": 9, "end": 11, "value": "电脑"}]}
+{"text": "想买无线鼠标，品牌有哪些", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": []}
+{"text": "预算1000的相机推�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "1000"}, {"entity": "category", "start": 7, "end": 9, "value": "相机"}]}
+{"text": "有没有性价比高的空调？", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "空调"}]}
+{"text": "预算5000的笔记本电脑", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "5000"}, {"entity": "category", "start": 7, "end": 10, "value": "笔记�?}, {"entity": "category", "start": 10, "end": 12, "value": "电脑"}]}
+{"text": "想买无线耳机，降噪要�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "耳机"}]}
+{"text": "哪个品牌相机性价比高", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "相机"}]}
+{"text": "预算2000的智能手�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "2000"}, {"entity": "category", "start": 7, "end": 11, "value": "智能手表"}]}
+{"text": "想买降噪耳机，预�?00�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "耳机"}, {"entity": "budget_max", "start": 7, "end": 12, "value": "300"}]}
+{"text": "有没有适合通勤的耳机推荐", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "耳机"}]}
+{"text": "预算800，哪个手机拍照好", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 5, "value": "800"}, {"entity": "category", "start": 8, "end": 10, "value": "手机"}]}
+{"text": "面试穿什么衣服合�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": []}
+{"text": "A和B哪个更值得�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": []}
+{"text": "预算2000，推荐笔记本电脑", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "2000"}, {"entity": "category", "start": 9, "end": 12, "value": "笔记�?}, {"entity": "category", "start": 12, "end": 14, "value": "电脑"}]}
+{"text": "有没有性价比高的电�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "电视"}]}
+{"text": "运动鞋要轻便，预�?00", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "运动�?}, {"entity": "budget_max", "start": 7, "end": 12, "value": "500"}]}
+{"text": "哪个品牌相机更耐用", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "相机"}]}
+{"text": "预算500的无线耳机", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 5, "value": "500"}, {"entity": "category", "start": 8, "end": 10, "value": "耳机"}]}
+{"text": "性能好的笔记本电�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 4, "end": 7, "value": "笔记�?}, {"entity": "category", "start": 7, "end": 9, "value": "电脑"}]}
+{"text": "预算3000的手�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "3000"}, {"entity": "category", "start": 7, "end": 9, "value": "手机"}]}
+{"text": "母婴用品推荐哪些", "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": []}
+{"text": "品牌多点的电饭煲选哪�?, "main_intent": "product_recommend", "sub_intent": "multi_compare", "slots": [{"entity": "category", "start": 5, "end": 8, "value": "电饭�?}]}
+{"text": "iPhone 14和三星S23哪个更值得�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 9, "value": "iPhone 14"}, {"entity": "brand", "start": 10, "end": 12, "value": "三星"}]}
+{"text": "RTX 3060�?070显卡差多�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 8, "value": "RTX 3060"}]}
+{"text": "华为Mate50和OPPO Find X6对比", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "华为"}, {"entity": "brand", "start": 9, "end": 13, "value": "OPPO"}]}
+{"text": "小米电视和索尼电视哪个画质好", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "小米"}, {"entity": "category", "start": 2, "end": 4, "value": "电视"}, {"entity": "brand", "start": 5, "end": 7, "value": "索尼"}, {"entity": "category", "start": 7, "end": 9, "value": "电视"}]}
+{"text": "戴森吸尘器和小狗吸尘器哪个强", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "戴森"}, {"entity": "category", "start": 2, "end": 5, "value": "吸尘�?}, {"entity": "category", "start": 8, "end": 11, "value": "吸尘�?}]}
+{"text": "AirPods Pro和索尼XM5哪个降噪�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 11, "value": "AirPods Pro"}, {"entity": "brand", "start": 12, "end": 14, "value": "索尼"}]}
+{"text": "小米手环和华为手表哪个更实用", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "小米"}, {"entity": "category", "start": 2, "end": 4, "value": "手环"}, {"entity": "brand", "start": 5, "end": 7, "value": "华为"}, {"entity": "category", "start": 7, "end": 9, "value": "手表"}]}
+{"text": "格力空调和美的空调哪个省�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "格力"}, {"entity": "category", "start": 2, "end": 4, "value": "空调"}, {"entity": "category", "start": 7, "end": 9, "value": "空调"}]}
+{"text": "阿迪达斯和耐克运动鞋哪个舒�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 4, "value": "阿迪达斯"}, {"entity": "brand", "start": 5, "end": 7, "value": "耐克"}, {"entity": "category", "start": 7, "end": 10, "value": "运动�?}]}
+{"text": "苹果手表和华为手表哪个续航久", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "苹果"}, {"entity": "category", "start": 2, "end": 4, "value": "手表"}, {"entity": "brand", "start": 5, "end": 7, "value": "华为"}, {"entity": "category", "start": 7, "end": 9, "value": "手表"}]}
+{"text": "RTX 4060�?070哪个性能更强", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 8, "value": "RTX 4060"}]}
+{"text": "小米13和华为P60哪个拍照更好", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "小米"}, {"entity": "brand", "start": 5, "end": 7, "value": "华为"}]}
+{"text": "OLED和QLED电视哪个更护�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "category", "start": 9, "end": 11, "value": "电视"}]}
+{"text": "羽绒服和棉服哪个更适合冬天", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "羽绒�?}, {"entity": "category", "start": 4, "end": 6, "value": "棉服"}]}
+{"text": "电动牙刷和普通牙刷哪个更实用", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "电动牙刷"}]}
+{"text": "戴森吸尘器和莱克哪个更省�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "戴森"}, {"entity": "category", "start": 2, "end": 5, "value": "吸尘�?}]}
+{"text": "婴儿推车和童车哪个更安全", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "推车"}, {"entity": "category", "start": 5, "end": 7, "value": "童车"}]}
+{"text": "运动鞋和皮鞋哪个更舒�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "运动�?}, {"entity": "category", "start": 4, "end": 6, "value": "皮鞋"}]}
+{"text": "智能手表和传统手表哪个更方便", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "智能手表"}, {"entity": "category", "start": 7, "end": 9, "value": "手表"}]}
+{"text": "华为Mate50和vivo X90对比怎么�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "华为"}, {"entity": "brand", "start": 9, "end": 13, "value": "vivo"}]}
+{"text": "PS5和Xbox Series X哪个更强", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 3, "value": "PS5"}, {"entity": "product_a", "start": 4, "end": 17, "value": "Xbox Series X"}]}
+{"text": "小米手环8和华为GT4哪个更好", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "小米"}, {"entity": "category", "start": 2, "end": 4, "value": "手环"}, {"entity": "brand", "start": 6, "end": 8, "value": "华为"}]}
+{"text": "戴森吹风机和松下EH-NA9对比", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "戴森"}, {"entity": "category", "start": 2, "end": 5, "value": "吹风�?}, {"entity": "product_a", "start": 6, "end": 14, "value": "松下EH-NA9"}]}
+{"text": "海尔冰箱和西门子冰箱哪个更省�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "海尔"}, {"entity": "category", "start": 2, "end": 4, "value": "冰箱"}, {"entity": "category", "start": 8, "end": 10, "value": "冰箱"}]}
+{"text": "苹果AirPods Pro和索尼XM5哪个降噪�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "苹果"}, {"entity": "product_a", "start": 2, "end": 13, "value": "AirPods Pro"}, {"entity": "brand", "start": 14, "end": 16, "value": "索尼"}]}
+{"text": "小米电视和TCL电视哪个画质�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "小米"}, {"entity": "category", "start": 2, "end": 4, "value": "电视"}, {"entity": "category", "start": 8, "end": 10, "value": "电视"}]}
+{"text": "安踏跑鞋和李宁跑鞋哪个更舒�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "安踏"}, {"entity": "category", "start": 2, "end": 4, "value": "跑鞋"}, {"entity": "brand", "start": 5, "end": 7, "value": "李宁"}, {"entity": "category", "start": 7, "end": 9, "value": "跑鞋"}]}
+{"text": "联想拯救者和雷蛇幻锋Pro哪个适合游戏", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "联想"}, {"entity": "product_a", "start": 6, "end": 10, "value": "雷蛇幻锋"}]}
+{"text": "华为Mate 60和OPPO Find X7对比怎么�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "华为"}, {"entity": "brand", "start": 10, "end": 14, "value": "OPPO"}]}
+{"text": "MacBook Air和联想小新哪个好�?, "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 11, "value": "MacBook Air"}, {"entity": "brand", "start": 12, "end": 14, "value": "联想"}]}
+{"text": "小米手环8和华为GT4哪个更准", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "小米"}, {"entity": "category", "start": 2, "end": 4, "value": "手环"}, {"entity": "brand", "start": 6, "end": 8, "value": "华为"}]}
+{"text": "PS5和Xbox Series X哪个游戏体验更好", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 3, "value": "PS5"}, {"entity": "product_a", "start": 4, "end": 17, "value": "Xbox Series X"}]}
+{"text": "Nike和Adidas运动鞋哪个更适合跑步", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "category", "start": 11, "end": 14, "value": "运动�?}]}
+{"text": "ROG�?6和联想拯救者哪个性能更强", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 6, "value": "ROG�?6"}, {"entity": "brand", "start": 7, "end": 9, "value": "联想"}]}
+{"text": "Apple Watch和华为Watch GT4哪个续航更长", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 12, "end": 14, "value": "华为"}]}
+{"text": "想买个降噪耳机", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 5, "end": 7, "value": "耳机"}]}
+{"text": "有没有适合跑步的鞋�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": []}
+{"text": "预算5000的手�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "5000"}, {"entity": "category", "start": 7, "end": 9, "value": "手机"}]}
+{"text": "降噪好的耳机有吗", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "耳机"}]}
+{"text": "空调和电扇哪个更省电", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "空调"}]}
+{"text": "铝框行李箱和拉链箱哪个耐用", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": []}
+{"text": "婴儿推车和背带哪个方�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "推车"}, {"entity": "category", "start": 5, "end": 7, "value": "背带"}]}
+{"text": "蓝牙音箱和普通音箱哪个音质好", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "音箱"}, {"entity": "category", "start": 7, "end": 9, "value": "音箱"}]}
+{"text": "运动鞋和皮鞋哪个适合上班", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "运动�?}, {"entity": "category", "start": 4, "end": 6, "value": "皮鞋"}]}
+{"text": "笔记本电脑和平板哪个更适合学习", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "笔记�?}, {"entity": "category", "start": 3, "end": 5, "value": "电脑"}, {"entity": "category", "start": 6, "end": 8, "value": "平板"}]}
+{"text": "哪种运动鞋更耐穿", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 5, "value": "运动�?}]}
+{"text": "预算两万的笔记本电脑哪个�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 5, "end": 8, "value": "笔记�?}, {"entity": "category", "start": 8, "end": 10, "value": "电脑"}]}
+{"text": "婴儿推车和童车哪个更实用", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "推车"}, {"entity": "category", "start": 5, "end": 7, "value": "童车"}]}
+{"text": "电动牙刷和普通牙刷哪个好�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "电动牙刷"}]}
+{"text": "智能手表和普通手表哪个值得�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "智能手表"}, {"entity": "category", "start": 7, "end": 9, "value": "手表"}]}
+{"text": "哪种蓝牙耳机音质更好", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 6, "value": "蓝牙耳机"}]}
+{"text": "儿童奶粉和成人奶粉有什么区�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": []}
+{"text": "洗地机和扫地机器人哪个好�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "洗地�?}, {"entity": "category", "start": 4, "end": 9, "value": "扫地机器�?}]}
+{"text": "哪种羽绒服保暖性更�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 5, "value": "羽绒�?}]}
+{"text": "折叠沙发和布艺沙发哪个舒�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "沙发"}, {"entity": "category", "start": 7, "end": 9, "value": "沙发"}]}
+{"text": "哪种蓝牙耳机音质�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 6, "value": "蓝牙耳机"}]}
+{"text": "预算三千的笔记本电脑推荐", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 5, "end": 8, "value": "笔记�?}, {"entity": "category", "start": 8, "end": 10, "value": "电脑"}]}
+{"text": "运动鞋和板鞋哪个更舒�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "运动�?}, {"entity": "category", "start": 4, "end": 6, "value": "板鞋"}]}
+{"text": "电饭煲和压力锅哪个好�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "电饭�?}, {"entity": "category", "start": 4, "end": 7, "value": "压力�?}]}
+{"text": "婴儿车和推车哪个更方�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "婴儿�?}, {"entity": "category", "start": 4, "end": 6, "value": "推车"}]}
+{"text": "石英表和机械表哪个准", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": []}
+{"text": "电动牙刷和普通牙刷哪个好", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "电动牙刷"}]}
+{"text": "扫地机器人和吸尘器哪个强", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 5, "value": "扫地机器�?}, {"entity": "category", "start": 6, "end": 9, "value": "吸尘�?}]}
+{"text": "登山包和双肩包哪个合�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": []}
+{"text": "哪种保温杯保热时间长", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 5, "value": "保温�?}]}
+{"text": "哪种保温杯更耐用", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 5, "value": "保温�?}]}
+{"text": "预算2000的笔记本哪个�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "budget_max", "start": 0, "end": 6, "value": "2000"}, {"entity": "category", "start": 7, "end": 10, "value": "笔记�?}]}
+{"text": "婴儿推车和童车哪个更安全", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "推车"}, {"entity": "category", "start": 5, "end": 7, "value": "童车"}]}
+{"text": "有没有适合夏天穿的短裤", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": []}
+{"text": "无线耳机和有线耳机哪个清晰", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "耳机"}, {"entity": "category", "start": 7, "end": 9, "value": "耳机"}]}
+{"text": "哪种沙发更舒�?, "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "沙发"}]}
+{"text": "有没有适合送女友的香水", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": []}
+{"text": "哪种电饭煲煮饭更好吃", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 5, "value": "电饭�?}]}
+{"text": "订单号SO123456789到货了吗", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "我买的手机发货了�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "category", "start": 3, "end": 5, "value": "手机"}]}
+{"text": "查一下订�?23456789的状�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "我的包裹什么时候能�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "订单�?23456789有更新吗", "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 0, "end": 12, "value": "订单�?23456789"}]}
+{"text": "昨天下单的快递到哪了", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "帮我查下订单123456789", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "有没有物流信息啊订单�?23456789", "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 8, "end": 20, "value": "订单�?23456789"}]}
+{"text": "我订的电饭煲到哪�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "category", "start": 3, "end": 6, "value": "电饭�?}]}
+{"text": "订单123456789还能不能改地址", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "订单号SO123456789到哪里了", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "查一下订�?23456的状�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "订单号S0123456789状态如�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "昨天下的单有没有发出", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "帮我查下订单123456789的物�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "这个订单什么时候能到货", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "订单S0123456789还有多久�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "我买的衣服发货了�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "订单SO_887654状态如�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 2, "end": 11, "value": "SO_887654"}]}
+{"text": "我的订单123456789到哪里了", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "查一下订单号098765432的状�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 3, "end": 15, "value": "订单�?98765432"}]}
+{"text": "我买的手机什么时候能�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "category", "start": 3, "end": 5, "value": "手机"}]}
+{"text": "订单号SO_778899发货了吗", "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 3, "end": 12, "value": "SO_778899"}]}
+{"text": "我的包裹SO_123456789在哪�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 4, "end": 16, "value": "SO_123456789"}]}
+{"text": "订单�?23456789的物流信�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 0, "end": 12, "value": "订单�?23456789"}]}
+{"text": "想确认订单SO_654321的进�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 5, "end": 14, "value": "SO_654321"}]}
+{"text": "我的订单SO_987654321是否已发�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 4, "end": 16, "value": "SO_987654321"}]}
+{"text": "订单�?23456789的快递到了吗", "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 0, "end": 12, "value": "订单�?23456789"}]}
+{"text": "订单SO_887654状态怎么�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 2, "end": 11, "value": "SO_887654"}]}
+{"text": "查下订单123456789的物流信�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "我的订单号是SO_9876，能查吗", "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 6, "end": 13, "value": "SO_9876"}]}
+{"text": "订单1234567890发货了吗", "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "我昨天下的单SO_123456到哪�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 6, "end": 15, "value": "SO_123456"}]}
+{"text": "订单号SO_789012345的状�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 3, "end": 15, "value": "SO_789012345"}]}
+{"text": "订单12345678901234567890的进�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "想确认订单SO_654321是否已发�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 5, "end": 14, "value": "SO_654321"}]}
+{"text": "我的订单SO_555666状态如�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 4, "end": 13, "value": "SO_555666"}]}
+{"text": "订单12345678901234567890的物流情�?, "main_intent": "order_query", "sub_intent": "status_check", "slots": []}
+{"text": "我的订单号是1234567890，物流到哪了", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 2, "end": 16, "value": "订单号是1234567890"}]}
+{"text": "快递单�?877665544，怎么没更�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单�?900112233，物流信息在哪查", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?900112233"}]}
+{"text": "我的包裹到哪里了，单�?7889900", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "物流信息显示什么？订单�?6554433", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 9, "end": 20, "value": "订单�?6554433"}]}
+{"text": "快递单�?5443322，为什么还没到", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单�?4332211，物流状态是什�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 0, "end": 11, "value": "订单�?4332211"}]}
+{"text": "我的快递什么时候到，单�?3221100", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "物流跟踪信息在哪看，订单�?2110099", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 10, "end": 21, "value": "订单�?2110099"}]}
+{"text": "快递单�?1009988，物流怎么没动�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单�?0240918123456物流信息在哪", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 0, "end": 17, "value": "订单�?0240918123456"}]}
+{"text": "快递单号SF123456789查询一�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我的包裹到哪里了，单号是YTO987654", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "物流信息更新了吗，订单号ZT123456789", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "包裹什么时候能到，单号是JD87654321", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "有没有人知道我的快递到哪了，单号是SF123456", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "物流状态怎么没变化，订单号是YTO789012", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我买的手机物流信息在哪查，单号是JD987654", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "category", "start": 3, "end": 5, "value": "手机"}]}
+{"text": "快递单号SF123456789的物流情�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单号ZT123456789的快递到哪了", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我的订单号是SF123456789，能查吗", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "快递单号SF987654321，怎么没更�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我买的手机到哪了，单号SF11223344", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "category", "start": 3, "end": 5, "value": "手机"}]}
+{"text": "物流信息SF55667788，三天没动了", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单号SF098765432，快递在�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "SF123456789，物流状态怎么没变", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我的包裹SF987654321，多久能�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "快递单号SF11223344，还没到", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "SF55667788，物流信息怎么没更�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我的订单SF098765432，快递到哪了", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单�?234567890物流信息在哪", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?234567890"}]}
+{"text": "快递单�?877665544怎么没更�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我的订单7788990011到哪�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "物流单号9988776655为什么停�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单�?566778899的包裹在�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?566778899"}]}
+{"text": "快递单�?122334455怎么还没�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "我的订单3344556677物流状�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "物流单号6677889900多久能到", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "订单�?233445566的快递情�?, "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?233445566"}]}
+{"text": "快递单�?455667788怎么没动", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "这个能退�?订单�?23456", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 6, "end": 15, "value": "订单�?23456"}]}
+{"text": "退货流程复杂吗 订单�?89012", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 8, "end": 17, "value": "订单�?89012"}]}
+{"text": "买了一周能退�?订单�?45678", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 8, "end": 17, "value": "订单�?45678"}]}
+{"text": "不满意能退�?订单�?01234", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "reason", "start": 0, "end": 3, "value": "不满�?}, {"entity": "order_id", "start": 7, "end": 16, "value": "订单�?01234"}]}
+{"text": "这个产品能退货吗 订单�?67890", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 9, "end": 18, "value": "订单�?67890"}]}
+{"text": "退货需要什么手�?订单�?34567", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 9, "end": 18, "value": "订单�?34567"}]}
+{"text": "有没有退货服�?订单�?90123", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 8, "end": 17, "value": "订单�?90123"}]}
+{"text": "能退�?产品是小米手�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "brand", "start": 7, "end": 9, "value": "小米"}, {"entity": "category", "start": 9, "end": 11, "value": "手机"}]}
+{"text": "退货原因怎么�?订单�?56789", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 8, "end": 17, "value": "订单�?56789"}]}
+{"text": "这个东西能退�?订单�?12345", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 8, "end": 17, "value": "订单�?12345"}]}
+{"text": "能退�?1234567890", "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "这个商品可以退货吗", "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "订单�?234567890要退", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?234567890"}]}
+{"text": "买错了能退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "reason", "start": 0, "end": 3, "value": "买错�?}]}
+{"text": "退货流程复杂吗", "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "订单1234567890想退", "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "不满意能退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "reason", "start": 0, "end": 3, "value": "不满�?}]}
+{"text": "这个能退�?订单�?234567890", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 6, "end": 19, "value": "订单�?234567890"}]}
+{"text": "退货需要什么理�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "订单�?234567890申请退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?234567890"}]}
+{"text": "订单号是1234567890", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 0, "end": 14, "value": "订单号是1234567890"}]}
+{"text": "退货要多久能处�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "不想要了能退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "reason", "start": 0, "end": 4, "value": "不想要了"}]}
+{"text": "订单�?765432109", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?765432109"}]}
+{"text": "为什么不能退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "退货需要什么凭�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "商品有质量问题能退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "订单�?234567890能退货吗", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?234567890"}]}
+{"text": "买了两天能退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "这个商品能退�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": []}
+{"text": "订单�?888888888退货怎么操作", "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "order_id", "start": 0, "end": 13, "value": "订单�?888888888"}]}
+{"text": "想退这个手机怎么�?, "main_intent": "after_sales", "sub_intent": "return_request", "slots": [{"entity": "category", "start": 4, "end": 6, "value": "手机"}]}
+{"text": "手机屏幕碎了能修�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "手机"}, {"entity": "issue_type", "start": 2, "end": 5, "value": "屏幕�?}]}
+{"text": "空调不制冷怎么处理", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "空调"}, {"entity": "issue_type", "start": 2, "end": 5, "value": "不制�?}]}
+{"text": "洗衣机漏水怎么解决", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "洗衣�?}, {"entity": "issue_type", "start": 3, "end": 5, "value": "漏水"}]}
+{"text": "电脑开机没反应怎么�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "电脑"}]}
+{"text": "婴儿车轮子坏了能换吗", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "婴儿�?}, {"entity": "issue_type", "start": 5, "end": 7, "value": "坏了"}]}
+{"text": "电饭煲煮不熟怎么�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "电饭�?}, {"entity": "issue_type", "start": 3, "end": 6, "value": "煮不�?}]}
+{"text": "蓝牙耳机断连怎么处理", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "蓝牙耳机"}, {"entity": "issue_type", "start": 4, "end": 6, "value": "断连"}]}
+{"text": "冰箱不制冷能维修�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "冰箱"}, {"entity": "issue_type", "start": 2, "end": 5, "value": "不制�?}]}
+{"text": "相机镜头模糊能修�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "相机"}]}
+{"text": "电视黑屏怎么联系售后", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "电视"}, {"entity": "issue_type", "start": 2, "end": 4, "value": "黑屏"}]}
+{"text": "手机屏幕裂了能修�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "手机"}]}
+{"text": "电脑突然黑屏怎么�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "电脑"}, {"entity": "issue_type", "start": 4, "end": 6, "value": "黑屏"}]}
+{"text": "冰箱不制冷怎么维修", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "冰箱"}, {"entity": "issue_type", "start": 2, "end": 5, "value": "不制�?}]}
+{"text": "衣服洗缩水了能退�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "issue_type", "start": 3, "end": 5, "value": "缩水"}]}
+{"text": "耳机掉进水里能修�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "耳机"}]}
+{"text": "电视画面花能修吗", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "电视"}]}
+{"text": "蓝牙耳机断连怎么�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "蓝牙耳机"}, {"entity": "issue_type", "start": 4, "end": 6, "value": "断连"}]}
+{"text": "电视黑屏能维修吗", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "电视"}, {"entity": "issue_type", "start": 2, "end": 4, "value": "黑屏"}]}
+{"text": "相机镜头刮花了能修吗", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "相机"}, {"entity": "issue_type", "start": 4, "end": 6, "value": "刮花"}]}
+{"text": "冰箱不制冷怎么报修", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "冰箱"}, {"entity": "issue_type", "start": 2, "end": 5, "value": "不制�?}]}
+{"text": "洗衣机不能脱水怎么�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "洗衣�?}]}
+{"text": "电脑开机没反应能修�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "电脑"}]}
+{"text": "电饭煲煮不熟怎么解决", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "电饭�?}, {"entity": "issue_type", "start": 3, "end": 6, "value": "煮不�?}]}
+{"text": "冰箱不制冷怎么处理", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "冰箱"}, {"entity": "issue_type", "start": 2, "end": 5, "value": "不制�?}]}
+{"text": "耳机线断了能换吗", "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "耳机"}]}
+{"text": "扫地机器人不工作怎么�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": [{"entity": "category", "start": 0, "end": 5, "value": "扫地机器�?}]}
+{"text": "路由器无法连接怎么�?, "main_intent": "after_sales", "sub_intent": "repair_request", "slots": []}
+{"text": "这个商品现在买值不�?, "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "什么时候买最便宜", "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "�?1会降价吗", "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "这个价格是不是被商家先涨后降", "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "最近有优惠�?, "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "�?18再买会不会更便宜", "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "苹果手机啥时候降�?, "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "苹果"}, {"entity": "category", "start": 2, "end": 4, "value": "手机"}]}
+{"text": "空调什么时候有活动", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "空调"}]}
+{"text": "华为手机现在买划算吗", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "华为"}, {"entity": "category", "start": 2, "end": 4, "value": "手机"}]}
+{"text": "有没有适合跑步的鞋", "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "手机什么时候会降价", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "手机"}]}
+{"text": "空调现在买划算吗", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "空调"}]}
+{"text": "平板最近价格会跌吗", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "平板"}]}
+{"text": "冰箱有没有促销计划", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "冰箱"}]}
+{"text": "空调什么时候促销", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "空调"}]}
+{"text": "手机什么时候降�?, "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "手机"}]}
+{"text": "衣服啥时候打�?, "main_intent": "price_check", "sub_intent": "none", "slots": []}
+{"text": "电饭煲最近价格趋势如�?, "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "电饭�?}]}
+{"text": "空调近期会促销�?, "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "category", "start": 0, "end": 2, "value": "空调"}]}
+{"text": "华为手表啥时候有活动", "main_intent": "price_check", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "华为"}, {"entity": "category", "start": 2, "end": 4, "value": "手表"}]}
+{"text": "哪里有华为体验店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 3, "end": 5, "value": "华为"}]}
+{"text": "上海有没有苹果店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "上海"}, {"entity": "brand", "start": 5, "end": 7, "value": "苹果"}]}
+{"text": "耐克在杭州哪�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "耐克"}, {"entity": "location", "start": 3, "end": 5, "value": "杭州"}]}
+{"text": "这个品牌有实体店�?, "main_intent": "store_search", "sub_intent": "none", "slots": []}
+{"text": "北京有没有小米之�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "北京"}, {"entity": "brand", "start": 5, "end": 7, "value": "小米"}]}
+{"text": "有没有优衣库门店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 3, "end": 6, "value": "优衣�?}]}
+{"text": "广州有阿迪达斯店�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "广州"}, {"entity": "brand", "start": 3, "end": 7, "value": "阿迪达斯"}]}
+{"text": "深圳有没有索尼店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "深圳"}, {"entity": "brand", "start": 5, "end": 7, "value": "索尼"}]}
+{"text": "成都有没有宜家店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "成都"}]}
+{"text": "重庆有没有ZARA门店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "重庆"}, {"entity": "brand", "start": 5, "end": 9, "value": "ZARA"}]}
+{"text": "附近有哪家华为体验店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "附近"}, {"entity": "brand", "start": 5, "end": 7, "value": "华为"}]}
+{"text": "北京苹果直营店都在哪", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "北京"}, {"entity": "brand", "start": 2, "end": 4, "value": "苹果"}]}
+{"text": "有没有小米之家的地址", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 3, "end": 5, "value": "小米"}]}
+{"text": "上海耐克门店怎么�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "上海"}, {"entity": "brand", "start": 2, "end": 4, "value": "耐克"}]}
+{"text": "杭州有没有优衣库门店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "杭州"}, {"entity": "brand", "start": 5, "end": 8, "value": "优衣�?}]}
+{"text": "广州哪里有索尼专卖店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "广州"}, {"entity": "brand", "start": 5, "end": 7, "value": "索尼"}]}
+{"text": "成都有没有宜家家居店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "成都"}]}
+{"text": "重庆有没有优衣库门店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "重庆"}, {"entity": "brand", "start": 5, "end": 8, "value": "优衣�?}]}
+{"text": "深圳苹果店具体在�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "深圳"}, {"entity": "brand", "start": 2, "end": 4, "value": "苹果"}]}
+{"text": "有没有苹果实体店在杭�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 3, "end": 5, "value": "苹果"}, {"entity": "location", "start": 9, "end": 11, "value": "杭州"}]}
+{"text": "北京有没有华为体验店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "北京"}, {"entity": "brand", "start": 5, "end": 7, "value": "华为"}]}
+{"text": "广州哪里有优衣库门店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "广州"}, {"entity": "brand", "start": 5, "end": 8, "value": "优衣�?}]}
+{"text": "深圳小米之家在哪", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "深圳"}, {"entity": "brand", "start": 2, "end": 4, "value": "小米"}]}
+{"text": "重庆有没有ZARA专卖�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "重庆"}, {"entity": "brand", "start": 5, "end": 9, "value": "ZARA"}]}
+{"text": "南京有没有优衣库门店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "南京"}, {"entity": "brand", "start": 5, "end": 8, "value": "优衣�?}]}
+{"text": "杭州有没有苹果直营店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "杭州"}, {"entity": "brand", "start": 5, "end": 7, "value": "苹果"}]}
+{"text": "西安有没有优衣库门店", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "location", "start": 0, "end": 2, "value": "西安"}, {"entity": "brand", "start": 5, "end": 8, "value": "优衣�?}]}
+{"text": "华为专卖店在哪个�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "华为"}]}
+{"text": "苹果店在哪里可以找到", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "苹果"}]}
+{"text": "耐克的实体店怎么�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "耐克"}]}
+{"text": "有没有优衣库的门�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 3, "end": 6, "value": "优衣�?}]}
+{"text": "安踏的线下店在哪", "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "安踏"}]}
+{"text": "李宁的专卖店在哪�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "李宁"}]}
+{"text": "周大福的门店有哪�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 3, "value": "周大�?}]}
+{"text": "星巴克的实体店怎么�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 3, "value": "星巴�?}]}
+{"text": "优衣库的线下店位�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 3, "value": "优衣�?}]}
+{"text": "ZARA的门店怎么�?, "main_intent": "store_search", "sub_intent": "none", "slots": [{"entity": "brand", "start": 0, "end": 4, "value": "ZARA"}]}
+{"text": "今天天气真好", "main_intent": "unknown", "sub_intent": "none", "slots": []}
+{"text": "谢谢你的帮助", "main_intent": "unknown", "sub_intent": "none", "slots": []}
+{"text": "有没有空聊天", "main_intent": "unknown", "sub_intent": "none", "slots": []}
+{"text": "今天天气怎么�?, "main_intent": "unknown", "sub_intent": "none", "slots": []}
+{"text": "有什么推荐吗", "main_intent": "unknown", "sub_intent": "none", "slots": []}
+{"text": "喜欢什么音�?, "main_intent": "unknown", "sub_intent": "none", "slots": []}
+{"text": "有什么推荐的�?, "main_intent": "unknown", "sub_intent": "none", "slots": []}
+{"text": "你好", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "您好", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "早上�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "下午�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "晚上�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "哈喽", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "在吗", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "有人�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "hi", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "hello", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "hey", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "午安", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "晚安", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "你好�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "您好呀", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "hi你好", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "hello你好", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "在不�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "有人在线�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "嗨喽", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "哈罗", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "�?, "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "yo", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "hi there", "main_intent": "greeting", "sub_intent": "none", "slots": []}
+{"text": "帮我推荐一款性价比手�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 9, "end": 11, "value": "手机"}]}
+{"text": "推荐一款性价比高的笔记本", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 13, "value": "笔记�?}]}
+{"text": "有没有值得买的耳机推荐", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "耳机"}]}
+{"text": "帮我选一款好用的电视", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "电视"}]}
+{"text": "推荐一个性价比高的路由器", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 13, "value": "路由�?}]}
+{"text": "想买个实用的充电�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "充电�?}]}
+{"text": "推荐一款适合学生的平�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 12, "value": "平板"}]}
+{"text": "有没有口碑好的洗衣机推荐", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 11, "value": "洗衣�?}]}
+{"text": "帮我推荐一款办公用的鼠�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 12, "value": "鼠标"}]}
+{"text": "推荐一个耐用的行李箱", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 7, "end": 10, "value": "行李�?}]}
+{"text": "想买个高性价比的空调", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 9, "end": 11, "value": "空调"}]}
+{"text": "推荐一款拍照好的相�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "相机"}]}
+{"text": "有没有适合健身的手环推�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "手环"}]}
+{"text": "帮我选一款静音的风扇", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "风扇"}]}
+{"text": "推荐一个性价比高的键�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 12, "value": "键盘"}]}
+{"text": "想买个轻便的背包", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 8, "value": "背包"}]}
+{"text": "推荐一款续航长的手�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "手表"}]}
+{"text": "有没有好用的吹风机推�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "吹风�?}]}
+{"text": "帮我推荐一款护眼台�?, "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "台灯"}]}
+{"text": "推荐一个便携的音箱", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 7, "end": 9, "value": "音箱"}]}

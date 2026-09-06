@@ -1,0 +1,281 @@
+/* ============================================================
+   page.less — 管理页共享布局约定
+   试点：AgentManage / McpHub；第二批：Scheduler / DecisionLibrary
+   规则（源自 web-v2/.impeccable.md）：
+   - 只消费语义 token，零裸色值；浅/深主题由 :root.dark 自动接管
+   - 卡片行 = 白面板 + 8px 圆角 + 细边框；hover 浮现操作、不加装饰
+   - 单滚动：滚动统一交给 #app-router-view，页面根不再设 height/overflow
+   ============================================================ */
+
+/* ---- 页面容器（替代各页漂移的 max-width/padding） ---- */
+.page {
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 28px 32px 56px;
+  color: var(--text);
+}
+
+.page-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 2px 14px;
+  flex-wrap: wrap;
+}
+
+.page-search {
+  flex: 0 1 280px;
+  height: 32px;
+  padding: 0 12px;
+  font-family: var(--font-body);
+  font-size: 0.84rem;
+  color: var(--text);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s ease-out;
+  &:focus { border-color: var(--accent-500); }
+  &::placeholder { color: var(--text-faint); }
+}
+
+.page-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* ---- 分区块 ---- */
+.page-section { margin-bottom: 32px; }
+.page-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.page-section-title {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-strong);
+  margin: 0;
+}
+.page-section-desc {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-faint);
+}
+.page-section-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.74rem;
+  color: var(--text-faint);
+}
+
+/* ---- 统计胶囊条（PageHeader 的 #stats 插槽） ---- */
+.stat-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 0.76rem;
+  line-height: 1.2;
+  color: var(--text-muted);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  b {
+    font-weight: 600;
+    color: var(--text-strong);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ---- 卡片行列表（实体集合的默认形态，取代通栏表格） ---- */
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out;
+  &:hover {
+    border-color: var(--border-strong);
+    box-shadow: 0 1px 3px var(--shadow-2);
+  }
+  /* 禁用行：整行弱化，但保持可读 */
+  &.is-off { opacity: 0.6; }
+}
+.card-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.card-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-strong);
+  margin: 0;
+}
+.card-row-desc {
+  margin: 3px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.card-row-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+/* 操作按钮默认隐藏，hover/键盘聚焦时浮现（触屏设备常显） */
+.card-row-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+}
+.card-row:hover .card-row-actions,
+.card-row:focus-within .card-row-actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .card-row-actions { opacity: 1; }
+}
+
+/* 窄屏：元信息折行到卡片第二行 */
+@media (max-width: 900px) {
+  .card-row { flex-wrap: wrap; }
+  .card-row-meta {
+    order: 3;
+    width: 100%;
+    padding-left: 2px;
+    flex-wrap: wrap;
+  }
+}
+
+/* ---- 状态胶囊（圆点 + 语义色文字，底色用主题 sunken 保证双主题可读） ---- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--text-muted);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+  &.chip-ok { color: var(--pos); }
+  &.chip-fail { color: var(--neg); }
+  &.chip-warn { color: var(--warn); }
+  &.chip-info { color: var(--info); }
+  &.chip-idle { color: var(--text-faint); }
+}
+
+/* ---- 元信息标签（模型 / 传输 / 数量等小胶囊） ---- */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 图标按钮 ---- */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease-out, background 0.15s ease-out;
+  &:hover {
+    color: var(--accent-600);
+    background: var(--accent-50);
+  }
+  &:disabled { opacity: 0.4; cursor: not-allowed; }
+  &.is-danger:hover {
+    color: var(--neg);
+    background: var(--bg-sunken);
+  }
+}
+
+/* ---- 瓦片网格（市场/发现类卡片墙） ---- */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out;
+  &:hover {
+    border-color: var(--border-strong);
+    box-shadow: 0 1px 3px var(--shadow-2);
+  }
+}
+
+/* ---- 空态容器 ---- */
+.page-empty { padding: 40px 0 28px; }

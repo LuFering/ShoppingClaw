@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node /usr/local/lib/node_modules/@liuliang520500/sinataoke_cn/dist/cli.js "$@"

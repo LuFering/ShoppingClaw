@@ -1,0 +1,40 @@
+{"text": "帮我推荐一款性价比高的手机", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 11, "end": 13, "value": "手机"}]}
+{"text": "想买个降噪效果好的耳机", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "耳机"}]}
+{"text": "推荐一款适合学生的笔记本电脑", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 14, "value": "笔记本"}, {"entity": "category", "start": 14, "end": 16, "value": "电脑"}]}
+{"text": "有没有续航长的智能手表推荐", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 12, "value": "智能手表"}]}
+{"text": "帮我选一款拍照清晰的相机", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 12, "value": "相机"}]}
+{"text": "想买个轻便的充电宝", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "充电宝"}]}
+{"text": "推荐一款护眼台灯", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 8, "value": "台灯"}]}
+{"text": "有没有静音的风扇推荐", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 8, "value": "风扇"}]}
+{"text": "帮我推荐一款办公鼠标", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 8, "end": 10, "value": "鼠标"}]}
+{"text": "想买个耐用的行李箱", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "行李箱"}]}
+{"text": "推荐一款高性价比空调", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 9, "end": 11, "value": "空调"}]}
+{"text": "有没有好用的吹风机", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "吹风机"}]}
+{"text": "帮我选一款便携音箱", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 7, "end": 9, "value": "音箱"}]}
+{"text": "推荐一款适合健身的运动手环", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 10, "end": 14, "value": "运动手环"}]}
+{"text": "想买个高清的投影仪", "main_intent": "product_recommend", "sub_intent": "single_product", "slots": [{"entity": "category", "start": 6, "end": 9, "value": "投影仪"}]}
+{"text": "iPhone 15和三星S24哪个更好", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 9, "value": "iPhone 15"}, {"entity": "brand", "start": 10, "end": 12, "value": "三星"}]}
+{"text": "RTX 4070和4080显卡对比", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 8, "value": "RTX 4070"}]}
+{"text": "小米14和华为P70哪个拍照强", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "小米"}, {"entity": "brand", "start": 6, "end": 8, "value": "华为"}]}
+{"text": "戴森V15和追觅V16哪个吸力大", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "戴森"}, {"entity": "brand", "start": 6, "end": 8, "value": "追觅"}]}
+{"text": "索尼XM5和Bose QC45哪个降噪好", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "索尼"}, {"entity": "brand", "start": 8, "end": 12, "value": "Bose"}]}
+{"text": "MacBook Air和ThinkPad X1哪个更适合办公", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 11, "value": "MacBook Air"}, {"entity": "product_a", "start": 12, "end": 22, "value": "ThinkPad X1"}]}
+{"text": "格力云佳和美的酷金哪个更省电", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "格力"}, {"entity": "brand", "start": 5, "end": 7, "value": "美的"}]}
+{"text": "iPad Air和小米平板6哪个值得买", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 8, "value": "iPad Air"}, {"entity": "brand", "start": 9, "end": 11, "value": "小米"}]}
+{"text": "Switch和PS5哪个游戏体验好", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "product_a", "start": 0, "end": 6, "value": "Switch"}, {"entity": "product_a", "start": 7, "end": 10, "value": "PS5"}]}
+{"text": "海尔冰箱和西门子冰箱对比", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 2, "value": "海尔"}, {"entity": "category", "start": 2, "end": 4, "value": "冰箱"}, {"entity": "category", "start": 7, "end": 9, "value": "冰箱"}]}
+{"text": "Nike跑鞋和Adidas跑鞋哪个更舒适", "main_intent": "product_comparison", "sub_intent": "direct_compare", "slots": [{"entity": "brand", "start": 0, "end": 4, "value": "Nike"}, {"entity": "category", "start": 4, "end": 6, "value": "跑鞋"}, {"entity": "brand", "start": 7, "end": 13, "value": "Adidas"}, {"entity": "category", "start": 13, "end": 15, "value": "跑鞋"}]}
+{"text": "哪种耳机音质更好", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "耳机"}]}
+{"text": "笔记本和平板哪个更适合学习", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "笔记本"}, {"entity": "category", "start": 4, "end": 6, "value": "平板"}]}
+{"text": "洗地机和扫地机器人哪个实用", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "洗地机"}, {"entity": "category", "start": 4, "end": 9, "value": "扫地机器人"}]}
+{"text": "电动牙刷和普通牙刷有什么区别", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "电动牙刷"}]}
+{"text": "羽绒服和棉服哪个保暖", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 3, "value": "羽绒服"}, {"entity": "category", "start": 4, "end": 6, "value": "棉服"}]}
+{"text": "智能手表和传统手表哪个方便", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 4, "value": "智能手表"}, {"entity": "category", "start": 7, "end": 9, "value": "手表"}]}
+{"text": "蓝牙音箱和有源音箱哪个音质好", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 4, "value": "音箱"}, {"entity": "category", "start": 7, "end": 9, "value": "音箱"}]}
+{"text": "哪种保温杯保冷效果好", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 2, "end": 5, "value": "保温杯"}]}
+{"text": "折叠屏手机和直板机哪个耐用", "main_intent": "product_comparison", "sub_intent": "category_compare", "slots": [{"entity": "category", "start": 0, "end": 5, "value": "折叠屏手机"}]}
+{"text": "订单号SF123456789到哪了", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 3, "end": 14, "value": "SF123456789"}]}
+{"text": "查一下我的包裹物流", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": []}
+{"text": "快递单号YT987654321更新了吗", "main_intent": "order_query", "sub_intent": "logistics_track", "slots": [{"entity": "order_id", "start": 4, "end": 15, "value": "YT987654321"}]}
+{"text": "我的订单JD111222333发货没", "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 4, "end": 15, "value": "JD111222333"}]}
+{"text": "订单SO_444555状态如何", "main_intent": "order_query", "sub_intent": "status_check", "slots": [{"entity": "order_id", "start": 2, "end": 11, "value": "SO_444555"}]}

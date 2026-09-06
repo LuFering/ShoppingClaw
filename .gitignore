@@ -1,0 +1,41 @@
+# 环境变量和密钥
+.env
+.env.*
+*.env
+*.bak
+*.key
+*.secret
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 项目特定
+shoppingclaw.tar.gz
+dist/
+build/
+*.log
+
+# 依赖与缓存
+node_modules/
+.venv/
+
+# 模板文件例外：.env.* 被忽略，但 .env.template 需要入库
+!.env.template
+
+# 容器运行时数据（数据库文件，严禁入库）
+docker/volumes/

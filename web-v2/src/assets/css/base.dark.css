@@ -1,0 +1,172 @@
+/* 深色模式 */
+:root.dark {
+  --main-1000: #a3e7cd;
+  --main-900: #74d8b1;
+  --main-800: #4fcc9c;
+  --main-700: #38bd8b;
+  --main-600: #2fae7e;
+  --main-500: #26996f;
+  --main-400: #1c7353;
+  --main-300: #14573f;
+  --main-200: #103d2e;
+  --main-100: #0c2a20;
+  --main-50: #0a2018;
+  --main-40: #08160f;
+  --main-30: #061009;
+  --main-20: #040c07;
+  --main-10: #030905;
+  --main-5: #020604;
+  --main-1: #010302;
+  --main-0: #000000;
+
+  --gray-10000: #fafafa;
+  --gray-2000: #f8f9f8;
+  --gray-1000: #f6f7f5;
+  --gray-900: #eef0ed;
+  --gray-800: #e4e6e1;
+  --gray-700: #d2d5cf;
+  --gray-600: #b7bdbc;
+  --gray-500: #9298a0;
+  --gray-400: #6b727a;
+  --gray-300: #565d63;
+  --gray-200: #3c4246;
+  --gray-150: #2b3034;
+  --gray-100: #1c2024;
+  --gray-50: #15181b;
+  --gray-25: #0e1012;
+  --gray-10: #0a0c0e;
+  --gray-0: #080a0c;
+
+  /* Primary (action) — emerald（深色下提亮以保证对比度） */
+  --color-primary-50: #0c2a20; /* 主色调-最深 */
+  --color-primary-100: #103d2e; /* 主色调-深 */
+  --color-primary-500: #2fae7e; /* 主色调-标准 */
+  --color-primary-700: #38bd8b; /* 主色调-浅 */
+  --color-primary-900: #74d8b1; /* 主色调-最浅 */
+
+  /* 保留原有的 main 变量（深色） */
+  --main-color: #2fae7e;
+  --main-bright: #38bd8b;
+
+  --color-secondary-50: #15181b; /* 次要色-最深 */
+  --color-secondary-100: #1c2024; /* 次要色-深 */
+  --color-secondary-500: #8fa5b0; /* 次要色-标准 */
+  --color-secondary-700: #9fb5c0; /* 次要色-浅 */
+  --color-secondary-900: #b8c8d0; /* 次要色-最浅 */
+
+  --color-success-50: #0b2a1a; /* 成功色-最深 */
+  --color-success-100: #15421f; /* 成功色-深 */
+  --color-success-500: #34c08c; /* 成功色-标准 */
+  --color-success-700: #54d6a3; /* 成功色-浅 */
+  --color-success-900: #8ee6c2; /* 成功色-最浅 */
+
+  --color-error-50: #2a1413; /* 错误色-最深 */
+  --color-error-100: #5a201b; /* 错误色-深 */
+  --color-error-500: #e8735f; /* 错误色-标准 */
+  --color-error-700: #f29383; /* 错误色-浅 */
+  --color-error-900: #f8b8ac; /* 错误色-最浅 */
+
+  --color-warning-50: #2b2111; /* 警告色-最深 */
+  --color-warning-100: #5a4410; /* 警告色-深 */
+  --color-warning-500: #dca63a; /* 警告色-标准 */
+  --color-warning-700: #ecc06a; /* 警告色-浅 */
+  --color-warning-900: #f4d99b; /* 警告色-最浅 */
+
+  --color-info-50: #111b26; /* 信息色-最深 */
+  --color-info-100: #11243a; /* 信息色-深 */
+  --color-info-500: #5aa0db; /* 信息色-标准 */
+  --color-info-700: #74b2e4; /* 信息色-浅 */
+  --color-info-900: #a3cdee; /* 信息色-最浅 */
+
+  --color-accent-50: #0c2a20; /* 强调色-最深 */
+  --color-accent-100: #103d2e; /* 强调色-深 */
+  --color-accent-500: #2fae7e; /* 强调色-标准 */
+  --color-accent-700: #38bd8b; /* 强调色-浅 */
+  --color-accent-900: #74d8b1; /* 强调色-最浅 */
+
+  --chart-palette-1: var(--main-300);
+  --chart-palette-2: #3ea896;
+  --chart-palette-3: #d6ad37;
+  --chart-palette-4: #cf6666;
+  --chart-palette-5: #8672b4;
+  --chart-palette-6: #529ab8;
+  --chart-palette-7: #d48242;
+  --chart-palette-8: #82b354;
+  --chart-palette-9: #c46e9e;
+  --chart-palette-10: #7a7a7a;
+
+  /* ===== Semantic design tokens（深色）===== */
+  --bg-base: #0e1012; /* 近黑，非纯黑 */
+  --bg-surface: #16191c;
+  --bg-sunken: #0a0c0e;
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+
+  --border: #262a2d;
+  --border-strong: #34383c;
+
+  --text-strong: #f3f5f4;
+  --text: #d8dcda;
+  --text-muted: #9298a0;
+  --text-faint: #656b72;
+
+  --accent-50: #0c2a20;
+  --accent-100: #103d2e;
+  --accent-200: #14573f;
+  --accent-300: #1c7353;
+  --accent-400: #26996f;
+  --accent-500: #2fae7e; /* 主操作 + 已验证/证据 */
+  --accent-600: #38bd8b;
+  --accent-700: #4fcc9c;
+  --accent-800: #74d8b1;
+  --accent-900: #a3e7cd;
+
+  --pos: #34c08c;
+  --neg: #e8735f;
+  --warn: #dca63a;
+  --info: #5aa0db;
+
+  --font-display: 'Sora', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'IBM Plex Sans', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Sans', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --radius: 8px;
+  --radius-sm: 6px;
+
+  --bg-sider: #16191c;
+  --color-text: var(--text);
+
+  /* Ant Design 兼容变量 - 深色模式 */
+  --color-bg-container: #1a1e21;
+  --color-bg-elevated: #20242a;
+  --color-text-secondary: var(--text-muted);
+  --color-text-tertiary: var(--text-faint);
+
+  /* Shadow System - 深色模式阴影系统 */
+  --shadow-0: rgba(255, 255, 255, 0.02);
+  --shadow-1: rgba(255, 255, 255, 0.05);
+  --shadow-2: rgba(255, 255, 255, 0.08);
+  --shadow-3: rgba(255, 255, 255, 0.12);
+  --shadow-4: rgba(255, 255, 255, 0.16);
+  --shadow-5: rgba(255, 255, 255, 0.2);
+
+  --color-trans-light: rgba(0, 0, 0, 0.85);
+  --color-trans-dark: rgba(255, 255, 255, 0.85);
+}
+
+:root.dark .markmap {
+  --markmap-max-width: 9999px;
+  --markmap-a-color: var(--main-500);
+  --markmap-a-hover-color: var(--main-600);
+  --markmap-code-bg: var(--gray-50);
+  --markmap-code-color: var(--gray-700);
+  --markmap-highlight-bg: var(--color-warning-50);
+  --markmap-table-border: 1px solid currentColor;
+  --markmap-font: 300 16px / 20px sans-serif;
+  --markmap-circle-open-bg: var(--main-0);
+  --markmap-text-color: var(--gray-700);
+  --markmap-highlight-node-bg: var(--color-error-50);
+}
+
+:root.dark .md-editor {
+  --md-bk-color: transparent;
+}

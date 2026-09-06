@@ -1,0 +1,17 @@
+{
+  "python": "D:\\ShoppingClaw\\.venv\\Scripts\\python.exe",
+  "pip_install": "D:\\ShoppingClaw\\.venv\\Scripts\\pip.exe install -e .",
+  "dependencies": [
+    "./src/agents/master_agent/agent_demo.py:get_main_agent"
+  ],
+  "graphs": {
+    "main_agent":  "./src/agents/master_agent/agent_demo.py:get_main_agent"
+  },
+  "env": ".env",
+  "port": 2024,
+  "host": "127.0.0.1",
+  "debug": true,
+  "langsmith": {
+    "project": "ShoppingClaw"
+  }
+}

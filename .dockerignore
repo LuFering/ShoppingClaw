@@ -1,0 +1,81 @@
+# Git
+.git
+.gitignore
+.trae
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker/
+*.Dockerfile
+docker-compose*.yml
+
+# Documentation
+docs/
+*.md
+README.md
+
+# Tests
+test/
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+.DS_Store
+Thumbs.db
+
+# LangGraph
+.langgraph_api/
+.too/
+
+# Other
+path/
+scripts/
+saves/
+
+# MCP 包例外（api 镜像内需要）
+!docker/mcp
+!docker/mcp/**

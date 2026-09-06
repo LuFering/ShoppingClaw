@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>商品卡片渲染测试</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f5f5; padding: 40px; }
+h1 { text-align: center; margin-bottom: 30px; color: #333; }
+.container { max-width: 960px; margin: 0 auto; }
+.section { background: white; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.section h2 { font-size: 16px; color: #666; margin-bottom: 16px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+.sse-raw { background: #1e1e1e; color: #4ec9b0; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; padding: 16px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
+.status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+.status-ok { background: #d1fae5; color: #065f46; }
+.status-err { background: #fee2e2; color: #991b1b; }
+.status-warn { background: #fef3c7; color: #92400e; }
+
+/* ProductCardTool styles (from ProductCardTool.vue) */
+.cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.product-card { background: white; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; transition: all 0.2s; cursor: pointer; }
+.product-card:hover { border-color: #3b82f6; box-shadow: 0 4px 12px rgba(59,130,246,0.15); transform: translateY(-2px); }
+.card-image-wrapper { width: 100%; height: 200px; background: #f9fafb; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.card-image { width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s; }
+.product-card:hover .card-image { transform: scale(1.05); }
+.image-placeholder { color: #d1d5db; display: flex; align-items: center; justify-content: center; }
+.card-content { padding: 12px; }
+.card-title { font-size: 14px; font-weight: 600; color: #111827; margin: 0 0 8px 0; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; min-height: 40px; }
+.card-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.platform-tag { font-size: 11px; padding: 2px 6px; background: #f3f4f6; border-radius: 4px; color: #6b7280; }
+.rating { font-size: 11px; color: #6b7280; }
+.card-price { display: flex; align-items: baseline; gap: 2px; margin-bottom: 8px; }
+.price-symbol { font-size: 14px; font-weight: 600; color: #ef4444; }
+.price-value { font-size: 20px; font-weight: 700; color: #ef4444; }
+.card-shop { font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
+.buy-btn { width: 100%; padding: 10px; background: #3b82f6; color: white; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+.buy-btn:hover { background: #2563eb; }
+
+.step-list { counter-reset: step; }
+.step-item { display: flex; align-items: flex-start; gap: 12px; padding: 8px 0; border-bottom: 1px solid #f3f4f6; }
+.step-num { width: 28px; height: 28px; border-radius: 50%; background: #eff6ff; color: #3b82f6; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.step-body { flex: 1; font-size: 14px; color: #374151; line-height: 1.6; }
+.step-body code { font-size: 12px; background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }
+
+.no-cards { text-align: center; padding: 40px; color: #9ca3af; font-size: 16px; }
+.test-btn { padding: 10px 24px; background: #3b82f6; color: white; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; margin-bottom: 16px; }
+.test-btn:hover { background: #2563eb; }
+.test-btn:disabled { background: #9ca3af; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>🎯 商品卡片渲染链路测试</h1>
+
+    <!-- Step 1: SSE Raw Data -->
+    <div class="section">
+        <h2>1. SSE 原始事件数据 (模拟后端发送)</h2>
+        <div class="sse-raw" id="sseRaw">等待测试...</div>
+    </div>
+
+    <!-- Step 2: Parse Result -->
+    <div class="section">
+        <h2>2. 前端解析过程</h2>
+        <div class="step-list" id="stepList"></div>
+    </div>
+
+    <!-- Step 3: Product Cards -->
+    <div class="section">
+        <h2>3. 商品卡片渲染结果</h2>
+        <button class="test-btn" onclick="runTest()">▶ 开始测试</button>
+        <div id="cardContainer"><div class="no-cards">点击「开始测试」运行</div></div>
+    </div>
+</div>
+
+<script>
+function runTest() {
+    // ──────────────────────────────────────────
+    // Step 1: 模拟 render_product_card 工具返回
+    // ──────────────────────────────────────────
+    const mockProducts = [
+        { title: "荣耀X60 GT 12GB+512GB", price: 1999.00, platform: "jd", url: "https://item.jd.com/100012345.html", image_url: "", rating: 4.8, shop_name: "荣耀官方旗舰店" },
+        { title: "荣耀200 12+256GB 雅顾光影", price: 2199.00, platform: "jd", url: "https://item.jd.com/100012346.html", image_url: "", rating: 4.7, shop_name: "荣耀京东自营旗舰店" },
+        { title: "iQOO Neo10 12+256GB 疾影黑", price: 2299.00, platform: "jd", url: "https://item.jd.com/100012347.html", image_url: "", rating: 4.9, shop_name: "vivo京东自营官方旗舰店" },
+    ];
+
+    const productCards = [];
+    const steps = [];
+
+    // ──────────────────────────────────────────
+    // Step 2: 模拟完整 SSE 链路
+    // ──────────────────────────────────────────
+    function simulateSSEChain(product) {
+        // 2a. render_product_card 返回 JSON
+        const toolResult = JSON.stringify({
+            type: "product_card",
+            data: {
+                title: product.title,
+                price: product.price,
+                platform: product.platform,
+                url: product.url,
+                image_url: product.image_url || null,
+                rating: product.rating || null,
+                shop_name: product.shop_name,
+            }
+        });
+
+        // 2b. _serialize_tool_result -> 字符串原样返回
+        const resultContent = toolResult;
+
+        // 2c. 模拟 sse_monitor.py self._emit tool_complete
+        const toolCompleteEvent = {
+            type: "tool_complete",
+            tool_name: "render_product_card",
+            tool_call_id: "call_" + Math.random().toString(36).slice(2, 10),
+            result_preview: toolResult.substring(0, 500),
+            result_content: resultContent, // ← 关键!
+            duration_ms: Math.floor(Math.random() * 100) + 10,
+            meta: { icon: "🃏", category: "buildin" },
+            event_id: "tool_" + Math.random().toString(36).slice(2, 10),
+        };
+
+        // 2d. format_sse_event: 移除 type, event_id
+        const sseData = {};
+        for (const k of Object.keys(toolCompleteEvent)) {
+            if (k !== "event_id" && k !== "type") sseData[k] = toolCompleteEvent[k];
+        }
+
+        // 2e. json.dumps
+        const sseJson = JSON.stringify(sseData);
+
+        // 2f. SSE 完整输出
+        const sseOutput = `event: tool_complete\nid: ${toolCompleteEvent.event_id}\ndata: ${sseJson}\n\n`;
+
+        // 2g. 前端 EventSource 解析 data: 行
+        const frontendData = JSON.parse(sseJson);
+        // 等价于: const data = JSON.parse(trimmed.slice(5))
+
+        return { toolCompleteEvent, sseOutput, frontendData };
+    }
+
+    // ──────────────────────────────────────────
+    // Step 3: 模拟前端 handleSSEEvent
+    // ──────────────────────────────────────────
+    let sseAllOutput = "";
+    const allEvents = [];
+
+    mockProducts.forEach((product, index) => {
+        const { toolCompleteEvent, sseOutput, frontendData } = simulateSSEChain(product);
+        allEvents.push({ toolCompleteEvent, frontendData });
+        sseAllOutput += sseOutput;
+
+        // 模拟 AgentChatComponent.vue:833
+        // case 'tool_complete':
+        //   if (data.tool_name === 'render_product_card' && data.result_content) {
+        if (frontendData.tool_name === "render_product_card" && frontendData.result_content) {
+            // const result = JSON.parse(data.result_content)
+            const result = JSON.parse(frontendData.result_content);
+
+            let cardData = null;
+            if (result.type === "product_card" && result.data) {
+                cardData = result.data;
+            }
+
+            if (cardData) {
+                // msg.productCards.push(cardData)
+                productCards.push(cardData);
+                
+                steps.push({
+                    num: index + 1,
+                    status: "ok",
+                    text: `<b>${cardData.title}</b> — 解析成功<br>
+                        <code>result_content</code> 存在: ✅<br>
+                        <code>JSON.parse</code> type=<span style="color:#3b82f6">${result.type}</span><br>
+                        <code>cardData</code> 已写入 productCards`
+                });
+            } else {
+                steps.push({
+                    num: index + 1,
+                    status: "err",
+                    text: `${product.title} — cardData 为 null, result.type=${result.type}, has data=${!!result.data}`
+                });
+            }
+        } else {
+            steps.push({
+                num: index + 1,
+                status: "err",
+                text: `${product.title} — result_content 缺失! tool_name=${frontendData.tool_name}, result_content=${frontendData.result_content}`
+            });
+        }
+    });
+
+    // ──────────────────────────────────────────
+    // 显示 SSE 原始数据
+    // ──────────────────────────────────────────
+    document.getElementById("sseRaw").textContent = sseAllOutput;
+
+    // ──────────────────────────────────────────
+    // 显示解析步骤
+    // ──────────────────────────────────────────
+    document.getElementById("stepList").innerHTML = steps.map(s => `
+        <div class="step-item">
+            <div class="step-num">${s.num}</div>
+            <div class="step-body">
+                <span class="status-badge ${s.status === 'ok' ? 'status-ok' : 'status-err'}">${s.status === 'ok' ? '成功' : '失败'}</span>
+                <div style="margin-top:4px">${s.text}</div>
+            </div>
+        </div>
+    `).join("");
+
+    // ──────────────────────────────────────────
+    // 渲染商品卡片 (模拟 ProductCardTool.vue)
+    // ──────────────────────────────────────────
+    if (productCards.length === 0) {
+        document.getElementById("cardContainer").innerHTML = '<div class="no-cards">❌ 没有卡片数据</div>';
+    } else {
+        document.getElementById("cardContainer").innerHTML = `
+            <div style="margin-bottom:12px">
+                <span class="status-badge status-ok">✅ ${productCards.length} 张卡片</span>
+            </div>
+            <div class="cards-grid">
+                ${productCards.map(card => `
+                    <div class="product-card" onclick="window.open('${card.url}', '_blank')">
+                        <div class="card-image-wrapper">
+                            ${card.image_url
+                                ? `<img class="card-image" src="${card.image_url}" alt="${card.title}" />`
+                                : `<div class="image-placeholder">
+                                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5">
+                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                        <circle cx="8.5" cy="8.5" r="1.5"/>
+                                        <path d="M21 15l-5-5L5 21"/>
+                                    </svg>
+                                </div>`
+                            }
+                        </div>
+                        <div class="card-content">
+                            <h3 class="card-title">${card.title}</h3>
+                            <div class="card-meta">
+                                <span class="platform-tag">${card.platform}</span>
+                                ${card.rating ? `<span class="rating">⭐ ${card.rating}</span>` : ''}
+                            </div>
+                            <div class="card-price">
+                                <span class="price-symbol">¥</span>
+                                <span class="price-value">${Number(card.price).toFixed(2)}</span>
+                            </div>
+                            ${card.shop_name ? `<div class="card-shop">${card.shop_name}</div>` : ''}
+                        </div>
+                        <button class="buy-btn" onclick="event.stopPropagation(); window.open('${card.url}', '_blank')">查看详情</button>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+}
+
+// 自动运行
+runTest();
+</script>
+</body>
+</html>

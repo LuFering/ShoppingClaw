@@ -1,0 +1,265 @@
+@import './base.css';
+@import './base.dark.css';
+@import './sigma.css';
+@import './shorts.css';
+@import './page.less';
+@import './markdown-preview.less';
+
+:root {
+  --header-height: 45px;
+  --min-width: 450px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  position: relative;
+  font-weight: normal;
+}
+
+body {
+  display: flow-root;
+  min-height: 100vh;
+  color: var(--text);
+  background: var(--bg-base);
+  line-height: 1.6;
+  font-family: var(--font-body);
+  font-size: 15px;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* layout */
+
+.layout-container {
+  width: 100%;
+  padding: 0px 30px;
+
+  h2 {
+    margin: 20px 0 10px 0;
+  }
+}
+
+.lucide-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.lucide-icon-btn svg {
+  flex-shrink: 0;
+}
+
+/* === Typographic hierarchy: display face for headings, mono for data === */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Tabular figures for prices, specs and scores — reads like an instrument, not prose */
+.font-mono,
+.num,
+.data {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* ============================================================
+   COLOR SYSTEM — recolored to a restrained emerald
+   (replaces the Ant-default teal #13c2c2 / #3996ae).
+   Emerald == "verified / evidence-backed" (有据).
+   ============================================================ */
+:root {
+  --main-1000: #073528;
+  --main-900: #0b4d39;
+  --main-800: #0f6349;
+  --main-700: #137a5b;
+  --main-600: #178a67;
+  --main-500: #33a07f;
+  --main-400: #60b89c;
+  --main-300: #97d2bd;
+  --main-200: #c6e6d9;
+  --main-100: #e9f4ef;
+  --main-50: #eef6f2;
+  --main-40: #f3f8f5;
+  --main-30: #f8fbf9;
+  --main-20: #f6f9f7;
+  --main-10: #fafcfb;
+  --main-5: #fcfefd;
+  --main-1: #fefefe;
+  --main-0: #ffffff;
+
+  --gray-10000: #000000; /* 保持纯黑 */
+  --gray-2000: #0c0d0d; /* 更精致的暗灰，用于极深背景 */
+  --gray-1000: #15181b; /* 深灰黑，适用于主文本 */
+  --gray-900: #2b3034;
+  --gray-800: #3c4246; /* 标准深灰，适合背景 */
+  --gray-700: #565d63;
+  --gray-600: #6b727a; /* 调和中灰，适合次要文本 */
+  --gray-500: #9298a0; /* 更柔和的中灰色 */
+  --gray-400: #b7bdbc;
+  --gray-300: #d2d5cf; /* 修正了原300/200重复 */
+  --gray-200: #e4e6e1; /* 稍微加深一点，便于分层 */
+  --gray-150: #eef0ed;
+  --gray-100: #f1f3f0;
+  --gray-50: #f6f7f5;
+  --gray-25: #f8f9f8;
+  --gray-10: #fbfcfb;
+  --gray-0: #ffffff;
+
+  /* Primary (action) — emerald */
+  --color-primary-50: #e9f4ef; /* 主色调-最浅 */
+  --color-primary-100: #c6e6d9; /* 主色调-浅 */
+  --color-primary-500: #178a67; /* 主色调-标准 */
+  --color-primary-700: #0f6349; /* 主色调-深 */
+  --color-primary-900: #073528; /* 主色调-最深 */
+
+  /* 保留原有的 main 变量（品牌色，已转 emerald） */
+  --main-color: #137a5b;
+  --main-bright: #178a67;
+
+  --color-secondary-50: #f5f7f5; /* 次要色-最浅 */
+  --color-secondary-100: #eef0ed; /* 次要色-浅 */
+  --color-secondary-500: #4e616d; /* 次要色-标准 */
+  --color-secondary-700: #3a4a56; /* 次要色-深 */
+  --color-secondary-900: #2c3843; /* 次要色-最深 */
+
+  --color-success-50: #e9f7ef; /* 成功色-最浅 */
+  --color-success-100: #aee9c6; /* 成功色-浅 */
+  --color-success-500: #1f9d5b; /* 成功色-标准 */
+  --color-success-700: #157a45; /* 成功色-深 */
+  --color-success-900: #0b4a28; /* 成功色-最深 */
+
+  --color-error-50: #fdecea; /* 错误色-最浅 */
+  --color-error-100: #f9c9c1; /* 错误色-浅 */
+  --color-error-500: #d6543f; /* 错误色-标准（暖红，非纯红） */
+  --color-error-700: #b23a28; /* 错误色-深 */
+  --color-error-900: #6e2114; /* 错误色-最深 */
+
+  --color-warning-50: #fdf6e3; /* 警告色-最浅 */
+  --color-warning-100: #f8e3b0; /* 警告色-浅 */
+  --color-warning-500: #c98a1b; /* 警告色-标准 */
+  --color-warning-700: #a06d10; /* 警告色-深 */
+  --color-warning-900: #6e4a09; /* 警告色-最深 */
+
+  --color-info-50: #e7f1f9; /* 信息色-最浅 */
+  --color-info-100: #bcdcf2; /* 信息色-浅 */
+  --color-info-500: #3b82c4; /* 信息色-标准（克制石板蓝） */
+  --color-info-700: #2c669e; /* 信息色-深 */
+  --color-info-900: #1c4570; /* 信息色-最深 */
+
+  /* Accent — emerald（原 Ant 默认青 #13c2c2 已弃用） */
+  --color-accent-50: #e9f4ef; /* 强调色-最浅 */
+  --color-accent-100: #c6e6d9; /* 强调色-浅 */
+  --color-accent-500: #178a67; /* 强调色-标准 */
+  --color-accent-700: #0f6349; /* 强调色-深 */
+  --color-accent-900: #073528; /* 强调色-最深 */
+
+  /* Chart Palette - 图表调色板（首位改用品牌 emerald） */
+  --chart-palette-1: var(--main-500);
+  --chart-palette-2: #5ad8a6;
+  --chart-palette-3: #f6bd16;
+  --chart-palette-4: #f27c7c;
+  --chart-palette-5: #9581cc;
+  --chart-palette-6: #6dc8ec;
+  --chart-palette-7: #ff9d4d;
+  --chart-palette-8: #92d050;
+  --chart-palette-9: #e885ba;
+  --chart-palette-10: #8c8c8c;
+
+  /* ===== Semantic design tokens（主题无关，由 :root / :root.dark 驱动）===== */
+  --bg-base: #f6f7f5; /* 应用画布：暖中性纸面，非纯白 */
+  --bg-surface: #ffffff; /* 卡片 / 面板 */
+  --bg-sunken: #eef0ed; /* 内嵌 / 代码 / 输入 */
+  --bg-overlay: rgba(20, 24, 27, 0.55);
+
+  --border: #e4e6e1; /* 发丝线 */
+  --border-strong: #d2d5cf;
+
+  --text-strong: #15181b;
+  --text: #2b3034;
+  --text-muted: #6b727a;
+  --text-faint: #9aa0a6;
+
+  --accent-50: #e9f4ef;
+  --accent-100: #c6e6d9;
+  --accent-200: #97d2bd;
+  --accent-300: #60b89c;
+  --accent-400: #33a07f;
+  --accent-500: #178a67; /* 主操作 + 已验证/证据 */
+  --accent-600: #137a5b;
+  --accent-700: #0f6349;
+  --accent-800: #0b4d39;
+  --accent-900: #073528;
+
+  --pos: #1f9d5b; /* 上涨 / 已验证（绿） */
+  --neg: #d6543f; /* 风险 / 下跌（暖红） */
+  --warn: #c98a1b; /* 警示琥珀 */
+  --info: #3b82c4; /* 克制石板蓝 */
+
+  --font-display: 'Sora', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'IBM Plex Sans', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Sans', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --radius: 8px;
+  --radius-sm: 6px;
+
+  --bg-sider: var(--bg-surface);
+  --color-text: var(--text);
+
+  /* Shadow System - 阴影系统 */
+  --shadow-0: rgba(0, 0, 0, 0.02);
+  --shadow-1: rgba(0, 0, 0, 0.05);
+  --shadow-2: rgba(0, 0, 0, 0.08);
+  --shadow-3: rgba(0, 0, 0, 0.12);
+  --shadow-4: rgba(0, 0, 0, 0.16);
+  --shadow-5: rgba(0, 0, 0, 0.2);
+
+  --min-width: 400px;
+
+  /* Ant Design 兼容变量 */
+  --color-bg-container: var(--bg-surface);
+  --color-bg-elevated: var(--bg-surface);
+  --color-text-secondary: var(--text-muted);
+  --color-text-tertiary: var(--text-faint);
+  --color-trans-light: rgba(255, 255, 255, 0.85);
+  --color-trans-dark: rgba(0, 0, 0, 0.85);
+}
+
+:root {
+  --scrollbar-width: 4px;
+}
+
+/* 全局滚动条样式 */
+::-webkit-scrollbar {
+  width: var(--scrollbar-width);
+  height: var(--scrollbar-width);
+}
+
+::-webkit-scrollbar-track {
+  background: var(--gray-100);
+  border-radius: calc(var(--scrollbar-width) / 2);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--gray-200);
+  border-radius: calc(var(--scrollbar-width) / 2);
+  transition: background 0.2s ease;
+  cursor: pointer;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-100);
+}
+
+/* Firefox 滚动条样式 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--gray-200) transparent;
+}

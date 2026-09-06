@@ -1,0 +1,51 @@
+{
+  "name": "shoppingclaw-web",
+  "version": "0.5.3.web",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "server": "vite serve --host",
+    "server:prod": "vite serve --host --port 8080",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --fix --cache",
+    "format": "prettier --write --experimental-cli src/"
+  },
+  "dependencies": {
+    "@ant-design/icons-vue": "^7.0.1",
+    "@antv/g6": "^5.0.51",
+    "@sigma/edge-curve": "^3.1.0",
+    "@sigma/node-border": "^3.0.0",
+    "@vueuse/core": "^13.9.0",
+    "ant-design-vue": "^4.2.6",
+    "d3": "^7.9.0",
+    "dayjs": "^1.11.19",
+    "echarts": "^6.0.0",
+    "graphology": "^0.26.0",
+    "graphology-generators": "^0.11.2",
+    "highlight.js": "^11.11.1",
+    "less": "^4.5.1",
+    "lucide-vue-next": "^0.542.0",
+    "marked": "^16.4.2",
+    "marked-highlight": "^2.2.3",
+    "markmap-lib": "^0.18.12",
+    "markmap-view": "^0.18.12",
+    "md-editor-v3": "^5.8.5",
+    "pinia": "^3.0.4",
+    "pinia-plugin-persistedstate": "^4.7.1",
+    "sigma": "^3.0.2",
+    "vue": "^3.5.29",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.3",
+    "@vitejs/plugin-vue": "^6.0.4",
+    "@vue/eslint-config-prettier": "^10.2.0",
+    "eslint": "^9.39.3",
+    "eslint-plugin-vue": "^10.8.0",
+    "globals": "^17.4.0",
+    "prettier": "^3.8.1",
+    "vite": "^7.3.1"
+  },
+  "packageManager": "pnpm@10.11.0"
+}
