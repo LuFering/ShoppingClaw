@@ -52,6 +52,4 @@ COPY docker/mcp/sinataoke_cn/ /usr/local/lib/node_modules/@liuliang520500/sinata
 COPY docker/mcp/sinataoke_cn.shim /usr/local/bin/sinataoke_cn
 RUN chmod +x /usr/local/bin/sinataoke_cn
 COPY server/ /app/server/
-COPY agents/ /app/agents/
-COPY deepagents/ /app/deepagents/
 COPY models/ /app/models/

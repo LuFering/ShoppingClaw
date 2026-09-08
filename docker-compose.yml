@@ -10,8 +10,6 @@ services:
       # 开发模式:挂载源代码实现热重载
       - ./server:/app/server
       - ./src:/app/src
-      - ./agents:/app/agents
-      - ./deepagents:/app/deepagents
       - ./.env:/app/.env
       # 本地模型文件(训练后的权重、配置等)
       - ./models:/app/models
@@ -59,7 +57,7 @@ services:
     image: postgres:16
     container_name: shoppingclaw-postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}

@@ -39,3 +39,11 @@ node_modules/
 
 # 容器运行时数据（数据库文件，严禁入库）
 docker/volumes/
+
+# 构建元数据（pip install -e 产物）
+*.egg-info/
+
+# 运行时数据出库：saves/ 由 docker compose 挂载、容器持续写入，
+# 不再跟踪 users.json / chroma.sqlite3 等运行时文件（仅保留目录占位）
+saves/*
+!saves/.gitkeep
