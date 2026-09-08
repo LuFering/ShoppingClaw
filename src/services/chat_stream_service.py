@@ -3,6 +3,7 @@ import json
 import logging
 import traceback
 import uuid
+from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, AIMessageChunk, AIMessage, ToolMessage
 from src.config import config as conf
@@ -165,6 +166,11 @@ async def _resolve_agent_config(
     return config_item, agent_config_id
 
 
+def _now_iso() -> str:
+    """统一的消息时间戳（UTC ISO-8601，可被 JSON/前端直接消费）"""
+    return datetime.now(timezone.utc).isoformat()
+
+
 async def save_partial_message(
         conv_repo,
         thread_id,
@@ -187,13 +193,18 @@ async def save_partial_message(
         logging.warning("Database not available, skipping message save")
         return
 
+    # 无任何已累积内容时（如 agent 获取失败/从未开始流式），不伪造空 AI 消息
+    if full_msg is None:
+        logging.debug("No accumulated content, skipping partial message save")
+        return
+
     try:
         # 将 LangChain Message 转换为字典格式
         message_dict = {
             "role": "ai",
             "content": full_msg.content if hasattr(full_msg, 'content') else str(full_msg),
             "type": "ai",
-            "timestamp": asyncio.get_event_loop().time(),
+            "timestamp": _now_iso(),
         }
         
         if error_message:
@@ -283,6 +294,8 @@ async def stream_agent_chat(
 
     try:  # 获取 Agent 实例
         agent = agent_manager.get_agent(agent_name)
+        if agent is None:
+            raise ValueError(f"agent '{agent_name}' 不存在或未就绪")
     except Exception as e:
         logging.error(f"Error getting agent {agent_name}: {e}, {traceback.format_exc()}")
         yield make_chunk(
@@ -420,23 +433,35 @@ async def stream_agent_chat(
                         "type": "human",
                         "message_type": message_type,
                         "image_content": image_content,
+                        "timestamp": _now_iso(),
                         "raw_message": human_message.model_dump() if hasattr(human_message, 'model_dump') else str(human_message),
                     },
                 )
             except Exception as e:
                 logging.error(f"Error saving user message to db: {e}")
 
-        # 始终存入统一存储桥接 (供 History API 读取)
-        await _store_bridge.add_message(thread_id, {
-            "role": "user",
-            "content": query,
-            "type": "human",
-            "message_type": message_type,
-            "timestamp": asyncio.get_event_loop().time(),
-        })
+        # 同步镜像到统一存储桥接（Redis/内存仅为加速/影子层，失败不影响主链路）
+        try:
+            await _store_bridge.add_message(thread_id, {
+                "role": "user",
+                "content": query,
+                "type": "human",
+                "message_type": message_type,
+                "timestamp": _now_iso(),
+            })
+        except Exception as e:
+            logging.warning(f"用户消息镜像到桥接存储失败（忽略）: {e}")
 
         # ═══ 自动标题生成：首条用户消息时自动生成对话标题 ═══
-        user_msgs = await _store_bridge.get_messages(thread_id)
+        # 以 PostgreSQL（持久真相）统计；桥接存储不可靠（进程重启/影子模式）
+        user_msgs = []
+        if conv_repo:
+            try:
+                user_msgs = await conv_repo.get_messages(thread_id)
+            except Exception:
+                user_msgs = []
+        if not user_msgs:
+            user_msgs = await _store_bridge.get_messages(thread_id)
         user_msg_count = sum(1 for m in user_msgs if m.get("role") == "user")
         title_updated = False
         if user_msg_count == 1:
@@ -598,7 +623,7 @@ async def stream_agent_chat(
                                     elif _card_data.get("cards"):
                                         _cards = _card_data["cards"]
                                 if _cards:
-                                    _now = asyncio.get_event_loop().time()
+                                    _now = _now_iso()
                                     # 先保存卡片之前已累积的文本，确保历史消息的正确顺序
                                     if accumulated_content:
                                         _prev_text = "".join(accumulated_content)
@@ -609,7 +634,10 @@ async def stream_agent_chat(
                                                 "content": _prev_text,
                                                 "timestamp": _now,
                                             }
-                                            await _store_bridge.add_message(thread_id, _txt_msg)
+                                            try:
+                                                await _store_bridge.add_message(thread_id, _txt_msg)
+                                            except Exception as _e1:
+                                                logging.warning(f"卡片前文本镜像到桥接存储失败（忽略）: {_e1}")
                                             if conv_repo:
                                                 try:
                                                     await conv_repo.add_message(thread_id, _txt_msg)
@@ -625,11 +653,14 @@ async def stream_agent_chat(
                                         "productCards": _cards,
                                         "timestamp": _now,
                                     }
-                                    await _store_bridge.add_message(thread_id, _card_msg)
+                                    try:
+                                        await _store_bridge.add_message(thread_id, _card_msg)
+                                    except Exception as _e3b:
+                                        logging.warning(f"商品卡片镜像到桥接存储失败（忽略）: {_e3b}")
                                     if conv_repo:
                                         try:
                                             await conv_repo.add_message(thread_id, _card_msg)
-                                        except Exception as _e3:
+                                        except Exception as _e4:
                                             pass
                             except Exception as _e:
                                 logging.warning(f"保存商品卡片到内存失败: {_e}")
@@ -752,29 +783,26 @@ async def stream_agent_chat(
             )
             active_tool_calls.pop(tool_call_id, None)
 
-        # 保存 AI 响应到内存存储 (供 History API 读取)
+        # 保存 AI 响应：PostgreSQL 主存储优先，桥接存储镜像兜底
         if accumulated_content:
             ai_content = "".join(accumulated_content)
-            _now = asyncio.get_event_loop().time()
-            await _store_bridge.add_message(thread_id, {
+            _ai_msg = {
                 "role": "assistant",
                 "content": ai_content,
                 "type": "ai",
-                "timestamp": _now,
-            })
-            # 同步保存剩余文本到 PostgreSQL（卡片前的文本已在流式过程中增量保存）
+                "timestamp": _now_iso(),
+            }
+            # 1) PostgreSQL（主存储，完整文本）
             if conv_repo:
                 try:
-                    await conv_repo.add_message(
-                        thread_id=thread_id,
-                        message={
-                            "role": "assistant",
-                            "content": ai_content,
-                            "type": "ai",
-                        },
-                    )
+                    await conv_repo.add_message(thread_id, _ai_msg)
                 except Exception as e:
                     logging.error(f"Error saving AI message to PostgreSQL: {e}")
+            # 2) 镜像到桥接存储（Redis/内存，供 History API 快速读取；失败不影响主链路）
+            try:
+                await _store_bridge.add_message(thread_id, _ai_msg)
+            except Exception as e:
+                logging.warning(f"AI 消息镜像到桥接存储失败（忽略）: {e}")
 
         # 保存思考过程到存储（供 History API 加载时恢复）
         if _thinking_chunks or _completed_tool_calls:
@@ -787,14 +815,19 @@ async def stream_agent_chat(
                     "planSteps": _todos_to_plan_steps(agent_state.get("todos") if isinstance(agent_state, dict) else None) or [],
                     "toolCalls": _completed_tool_calls,
                 },
-                "timestamp": asyncio.get_event_loop().time(),
+                "timestamp": _now_iso(),
             }
-            await _store_bridge.add_message(thread_id, _thinking_msg)
+            # PostgreSQL 主存储优先
             if conv_repo:
                 try:
                     await conv_repo.add_message(thread_id, _thinking_msg)
                 except Exception as _e:
                     logging.warning(f"保存思考过程到 PostgreSQL 失败: {_e}")
+            # 镜像到桥接存储（失败不影响主链路）
+            try:
+                await _store_bridge.add_message(thread_id, _thinking_msg)
+            except Exception as _e:
+                logging.warning(f"保存思考过程到桥接存储失败（忽略）: {_e}")
 
         # 完成信号
         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
@@ -828,15 +861,18 @@ async def stream_agent_chat(
         # ═══ 清理会话 ═══
         session_manager.deactivate_session(thread_id)
 
-        # 保存已累积的内容到统一存储桥接
+        # 保存已累积的内容到统一存储桥接（失败不阻断后续 PG 兜底）
         if accumulated_content:
-            await _store_bridge.add_message(thread_id, {
-                "role": "assistant",
-                "content": "".join(accumulated_content),
-                "type": "ai",
-                "partial": True,
-                "timestamp": asyncio.get_event_loop().time(),
-            })
+            try:
+                await _store_bridge.add_message(thread_id, {
+                    "role": "assistant",
+                    "content": "".join(accumulated_content),
+                    "type": "ai",
+                    "partial": True,
+                    "timestamp": _now_iso(),
+                })
+            except Exception as _e:
+                logging.warning(f"中断内容镜像到桥接存储失败（忽略）: {_e}")
 
         async def save_cleanup():
             nonlocal full_msg
@@ -865,15 +901,18 @@ async def stream_agent_chat(
     except Exception as e:
         logging.error(f"Error streaming messages: {e}, {traceback.format_exc()}")
 
-        # 保存已累积的内容到统一存储桥接
+        # 保存已累积的内容到统一存储桥接（失败不阻断后续 PG 兜底）
         if accumulated_content:
-            await _store_bridge.add_message(thread_id, {
-                "role": "assistant",
-                "content": "".join(accumulated_content),
-                "type": "ai",
-                "partial": True,
-                "timestamp": asyncio.get_event_loop().time(),
-            })
+            try:
+                await _store_bridge.add_message(thread_id, {
+                    "role": "assistant",
+                    "content": "".join(accumulated_content),
+                    "type": "ai",
+                    "partial": True,
+                    "timestamp": _now_iso(),
+                })
+            except Exception as _e:
+                logging.warning(f"错误内容镜像到桥接存储失败（忽略）: {_e}")
 
         error_msg = f"Error streaming messages: {e}"
         error_type = "unexpected_error"

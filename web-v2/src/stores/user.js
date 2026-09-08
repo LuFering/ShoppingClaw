@@ -66,7 +66,14 @@ export const useUserStore = defineStore('user', () => {
 
       if (!response.ok) {
         const error = await response.json()
-        throw new Error(error.detail || '初始化管理员失败')
+        // detail 可能是对象数组（如 422 校验错误），提取可读消息避免显示 [object Object]
+        let detail = error.detail
+        if (Array.isArray(detail)) {
+          detail = detail.map((e) => e.msg).join('; ')
+        } else if (detail && typeof detail === 'object') {
+          detail = detail.msg || JSON.stringify(detail)
+        }
+        throw new Error(detail || '初始化管理员失败')
       }
 
       const data = await response.json()

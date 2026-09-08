@@ -50,43 +50,18 @@ def redis_cache(
 
             cache = get_redis_cache()
             try:
-                if not cache._connected:
-                    # Redis 不可用，直接执行
-                    return func(*args, **kwargs)
-
-                # 同步调用 async 方法获取缓存
-                loop = None
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-
-                if loop and loop.is_running():
-                    # 运行在事件循环中，创建新 loop 执行同步调用
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(
-                            lambda: asyncio.run(_get_cache_async(cache, cache_key))
-                        )
-                        cached = future.result(timeout=2)
-                else:
-                    cached = asyncio.run(_get_cache_async(cache, cache_key))
-
+                # 同步路径使用独立短连接（RedisCache.sync_get/sync_set），
+                # 绝不访问绑定 serve 事件循环的共享连接池，
+                # 避免 "Lock bound to a different event loop" 跨循环错误。
+                cached = cache.sync_get(cache_key)
                 if cached is not None:
                     logger.info(f"[Cache] HIT  {cache_key}")
                     return cached
 
                 result = func(*args, **kwargs)
 
-                # 异步保存缓存
-                if loop and loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        executor.submit(
-                            lambda: asyncio.run(_set_cache_async(cache, cache_key, result, ttl))
-                        )
-                else:
-                    asyncio.run(_set_cache_async(cache, cache_key, result, ttl))
+                # 异步保存缓存（独立连接，失败不影响业务）
+                cache.sync_set(cache_key, result, ttl)
 
                 logger.info(f"[Cache] MISS {cache_key} → cached (ttl={ttl}s)")
                 return result

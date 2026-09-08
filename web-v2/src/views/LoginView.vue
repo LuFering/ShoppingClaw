@@ -476,9 +476,8 @@ const handleInitialize = async () => {
     }
 
     await userStore.initialize({
-      user_id: adminForm.user_id,
-      password: adminForm.password,
-      phone_number: adminForm.phone_number || null // 空字符串转为null
+      username: adminForm.user_id, // 后端 InitializeRequest 字段名为 username
+      password: adminForm.password
     })
 
     message.success('管理员账户创建成功')

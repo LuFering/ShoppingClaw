@@ -51,6 +51,15 @@ async def lifespan(app: FastAPI):
 
     logger.info("[OK] API ready (models loading in background)")
 
+    # Phase 1.3: 预热 Redis 连接（在 serve 事件循环内创建连接池，
+    # 避免后续同步路径/其它循环先建连导致 "Lock bound to a different event loop"）
+    from src.services.redis_cache import get_redis_cache
+    try:
+        await get_redis_cache().connect()
+        logger.info("[OK] Redis connected (pre-warmed)")
+    except Exception as e:
+        logger.warning(f"[WARN] Redis pre-warm failed (cache/stores will degrade): {e}")
+
     # Phase 1.5: 初始化知识库（LlamaIndex + ChromaDB + DashScope Embedding）
     # 失败不阻塞启动，检索工具会走"暂未找到"兜底文案
     try:

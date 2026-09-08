@@ -4,11 +4,12 @@ import traceback
 import uuid
 from datetime import datetime
 
+from src.services.home import suggestion_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from server.utils.auth_middleware import get_required_user
+from server.utils.auth_middleware import get_current_user, get_required_user
 from server.middleware.rate_limiter import RateLimiter, get_rate_limiter
 from server.utils.user_store import User
 from src import config as conf
@@ -206,6 +207,12 @@ async def create_thread(
             logging.warning(f"PostgreSQL 创建线程失败 (thread_id={new_thread['id']}): {e}")
         finally:
             await _db.close()
+    # 3. 新对话意味着推荐料变了，失效首页推荐缓存（静默容错）
+    try:
+        from src.services.home.suggestion_service import invalidate_cache
+        await invalidate_cache(user_id)
+    except Exception as e:
+        logging.debug(f"失效首页推荐缓存失败（忽略）: {e}")
     return new_thread
 
 
@@ -662,3 +669,21 @@ async def rate_limit_status(
         "window_seconds": 60,
         "remaining": remaining,
     }
+
+# ── 主页气泡推荐语 ───────────────────────────────────
+@chat.get("/home/suggestions")
+async def get_home_suggestions(
+    current_user: User | None = Depends(get_current_user),
+):
+    """首页欢迎区推荐提问（契约见 web-v2/docs/api-contracts.md 与 home_api.js）
+
+    可选鉴权：登录用户给个性化推荐，未登录给通用推荐。
+    服务内部自带缓存与降级，本函数永不抛异常。
+    """
+
+    #数据源：最近提问，购物档案，嵌入检索
+    prompts = await suggestion_service.get_suggestions(current_user.id if current_user else None)
+    return {
+        "success": True, 
+        "data": {"prompts": prompts}
+        }

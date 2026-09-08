@@ -81,6 +81,68 @@ class RedisCache:
             await self._redis.close()
             self._connected = False
             logging.info("[RedisCache] Disconnected")
+
+    # ========== 同步访问（线程安全，独立连接） ==========
+
+    def _run_standalone(self, op):
+        """在独立线程中运行协程操作，使用独立的短连接（不共享主连接池）。
+
+        主连接池（asyncio.Lock）绑定 serve 事件循环，其它线程/循环直接访问
+        会抛 "bound to a different event loop"。因此同步代码一律走此方法：
+        新线程 + 新事件循环 + 新连接，用完即关，互不干扰。
+        """
+        import concurrent.futures
+
+        def _worker():
+            async def _go():
+                client = redis.from_url(
+                    self.redis_url,
+                    encoding="utf-8",
+                    decode_responses=True,
+                )
+                try:
+                    return await op(client)
+                finally:
+                    await client.aclose()
+
+            return asyncio.run(_go())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_worker).result(timeout=5)
+
+    def sync_get(self, key: str):
+        """同步获取缓存值（独立连接，可在线程/事件循环中安全调用）"""
+        async def _op(client):
+            value = await client.get(key)
+            if value is None:
+                return None
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
+        try:
+            return self._run_standalone(_op)
+        except Exception as e:
+            logging.warning(f"[RedisCache] sync GET failed for key {key}: {e}")
+            return None
+
+    def sync_set(self, key: str, value: Any, ttl: int | None = None):
+        """同步设置缓存值（独立连接，可在线程/事件循环中安全调用）"""
+        async def _op(client):
+            if isinstance(value, (dict, list)):
+                value_str = json.dumps(value, ensure_ascii=False)
+            else:
+                value_str = str(value)
+            if ttl:
+                await client.setex(key, ttl, value_str)
+            else:
+                await client.set(key, value_str)
+
+        try:
+            self._run_standalone(_op)
+        except Exception as e:
+            logging.warning(f"[RedisCache] sync SET failed for key {key}: {e}")
     
     # ========== 基础缓存操作 ==========
     

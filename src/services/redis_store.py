@@ -206,53 +206,41 @@ class MessageStoreBridge:
         threads = await store.list_threads(user_id)   # 优先 Redis
     """
 
-    async def _get_store(self):
-        """获取当前可用的存储实例"""
+    async def _call(self, name: str, *args, **kwargs):
+        """Redis 优先执行；任何命令级异常降级到 memory_store，绝不向调用方抛出
+
+        Redis 仅是加速/影子层，PostgreSQL 才是消息主存储。Redis 故障（宕机、
+        跨事件循环等）不得阻断线程/消息的创建与保存流程。
+        """
+        from src.services.memory_store import memory_store
         try:
             await redis_store._ensure_connected()
-            return redis_store
-        except Exception:
-            from src.services.memory_store import memory_store
-            return memory_store
+        except Exception as e:
+            logging.warning(f"[Store] Redis 不可用（{e}），{name} 降级 memory_store")
+            return getattr(memory_store, name)(*args, **kwargs)
+        try:
+            return await getattr(redis_store, name)(*args, **kwargs)
+        except Exception as e:
+            logging.warning(f"[Store] Redis {name} 失败（{e}），降级 memory_store")
+            return getattr(memory_store, name)(*args, **kwargs)
 
     async def create_thread(self, *args, **kwargs):
-        store = await self._get_store()
-        if isinstance(store, RedisStore):
-            return await store.create_thread(*args, **kwargs)
-        return store.create_thread(*args, **kwargs)
+        return await self._call("create_thread", *args, **kwargs)
 
     async def list_threads(self, *args, **kwargs):
-        store = await self._get_store()
-        if isinstance(store, RedisStore):
-            return await store.list_threads(*args, **kwargs)
-        return store.list_threads(*args, **kwargs)
+        return await self._call("list_threads", *args, **kwargs)
 
     async def get_thread(self, *args, **kwargs):
-        store = await self._get_store()
-        if isinstance(store, RedisStore):
-            return await store.get_thread(*args, **kwargs)
-        return store.get_thread(*args, **kwargs)
+        return await self._call("get_thread", *args, **kwargs)
 
     async def delete_thread(self, *args, **kwargs):
-        store = await self._get_store()
-        if isinstance(store, RedisStore):
-            return await store.delete_thread(*args, **kwargs)
-        return store.delete_thread(*args, **kwargs)
+        return await self._call("delete_thread", *args, **kwargs)
 
     async def update_thread(self, *args, **kwargs):
-        store = await self._get_store()
-        if isinstance(store, RedisStore):
-            return await store.update_thread(*args, **kwargs)
-        return store.update_thread(*args, **kwargs)
+        return await self._call("update_thread", *args, **kwargs)
 
     async def add_message(self, *args, **kwargs):
-        store = await self._get_store()
-        if isinstance(store, RedisStore):
-            return await store.add_message(*args, **kwargs)
-        return store.add_message(*args, **kwargs)
+        return await self._call("add_message", *args, **kwargs)
 
     async def get_messages(self, *args, **kwargs):
-        store = await self._get_store()
-        if isinstance(store, RedisStore):
-            return await store.get_messages(*args, **kwargs)
-        return store.get_messages(*args, **kwargs)
+        return await self._call("get_messages", *args, **kwargs)
