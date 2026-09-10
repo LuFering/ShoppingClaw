@@ -4,8 +4,8 @@
       <slot name="top"></slot>
     </div>
 
-    <div class="expand-options" v-if="hasOptionsLeft">
-      <a-popover
+    <div class="expand-options" v-if="hasOptionsLeft || hasActionsLeft">
+      <a-popover v-if="hasOptionsLeft"
         v-model:open="optionsExpanded"
         placement="bottomLeft"
         trigger="click"
@@ -456,23 +456,9 @@ const handleMentionNavigation = (e) => {
   }
 }
 
-const hasOptionsLeft = computed(() => {
-  const slot = slots['options-left']
-  if (!slot) {
-    return false
-  }
-  const renderedNodes = slot()
-  return Boolean(renderedNodes && renderedNodes.length)
-})
+const hasOptionsLeft = computed(() => Boolean(slots['options-left']))
 
-const hasActionsLeft = computed(() => {
-  const slot = slots['actions-left']
-  if (!slot) {
-    return false
-  }
-  const renderedNodes = slot()
-  return Boolean(renderedNodes && renderedNodes.length)
-})
+const hasActionsLeft = computed(() => Boolean(slots['actions-left']))
 
 // 图标映射
 const iconComponents = {

@@ -24,6 +24,8 @@
           <FolderCode :size="18" />
           <span>状态</span>
         </div>
+        <!-- 对话模型选择器：转发 AgentChatComponent 的 #actions-left-extra 插槽 -->
+        <slot name="actions-left-extra"></slot>
       </div>
     </template>
   </MessageInputComponent>
