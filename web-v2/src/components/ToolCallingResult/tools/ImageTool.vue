@@ -1,6 +1,11 @@
 <template>
   <BaseToolCall :tool-call="toolCall">
-    <template #result="{ resultContent }">
+    <template #header>
+      <div class="sep-header">
+        <span class="note">生成图片</span>
+      </div>
+    </template>
+    <template #result="{}">
       <div v-if="imageUrl" class="image-result">
         <img :src="imageUrl" />
       </div>
@@ -26,7 +31,7 @@ const parseData = (content) => {
   if (typeof content === 'string') {
     try {
       return JSON.parse(content)
-    } catch (error) {
+    } catch {
       return content
     }
   }
@@ -39,7 +44,7 @@ const parsedContent = computed(() => {
 
 const imageUrl = computed(() => {
   const content = parsedContent.value
-  // text_to_img_qwen_image 返回 URL 字符串
+  // 图片类工具返回 URL 字符串时直接渲染图片
   if (content && typeof content === 'string' && content.startsWith('http')) {
     return content
   }

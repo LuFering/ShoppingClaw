@@ -20,6 +20,27 @@
   --main-1: #fefefe;
   --main-0: #ffffff;
 
+  /* 辅助色：暖金色系（对标 Yuxi，工具调用与强调元素使用），基准 --second-500 */
+  --second-1000: #2e2108;
+  --second-900: #4a350d;
+  --second-800: #6b4d14;
+  --second-700: #8a641d;
+  --second-600: #a97e2b;
+  --second-500: #c9983c;
+  --second-400: #d4ac5f;
+  --second-300: #dfc183;
+  --second-200: #ead5a8;
+  --second-100: #f4e8cc;
+  --second-50: #faf3e2;
+  --second-40: #f6efe0;
+  --second-30: #fbf8f0;
+  --second-20: #faf7ee;
+  --second-10: #fcfbf6;
+  --second-5: #fefdfa;
+  --second-1: #fefefe;
+  --second-0: #ffffff;
+  --second-color: var(--second-600);
+
   --gray-10000: #000000; /* 保持纯黑 */
   --gray-2000: #0c0d0d; /* 更精致的暗灰，用于极深背景 */
   --gray-1000: #151616; /* 深灰黑，适用于主文本 */

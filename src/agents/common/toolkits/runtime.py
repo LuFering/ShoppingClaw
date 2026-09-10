@@ -335,23 +335,54 @@ class LifecycleHandler(RuntimeHandler):
         """注册事件消费者（SSE / Trace / Audit）。"""
         self._sinks.append(sink)
 
+    @staticmethod
+    def _dump(value: Any, limit: int) -> str:
+        """把工具返回值安全地转成可展示文本（超长截断）。"""
+        if value is None:
+            return ""
+        try:
+            if isinstance(value, str):
+                text = value
+            else:
+                text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+        if len(text) > limit:
+            return text[:limit] + f"…（已截断，共 {len(text)} 字符）"
+        return text
+
     async def handle(self, ctx: ToolContext, next_handler: Callable) -> ToolResult:
+        # 同一次调用共用 ID：前端靠它把 tool_start 与 tool_complete 配对。
+        # 只作局部变量，不写回 ctx.meta，避免污染链路上的其它消费者。
+        tool_call_id = f"call_{ctx.tool_name}_{hashlib.md5(f'{ctx.tool_name}{time.time()}{id(ctx)}'.encode()).hexdigest()[:12]}"
+        args_preview = {k: str(v)[:200] for k, v in ctx.args.items()}
+
         self._emit("tool_start", {
+            "tool_call_id": tool_call_id,
+            "id": tool_call_id,
             "tool_name": ctx.tool_name,
-            "args": {k: str(v)[:200] for k, v in ctx.args.items()},
+            "function": ctx.tool_name,
+            "args": args_preview,
+            "arguments": args_preview,
             "timestamp": time.time(),
         })
 
         result = await next_handler(ctx)
 
         event_type = "tool_complete" if result.is_success else "tool_error"
+        result_content = self._dump(result.data, 4000) if result.is_success else ""
         self._emit(event_type, {
+            "tool_call_id": tool_call_id,
+            "id": tool_call_id,
             "tool_name": ctx.tool_name,
+            "function": ctx.tool_name,
             "status": result.status.value,
             "duration_ms": result.metadata.get("duration_ms"),
             "attempt": result.metadata.get("attempt"),
             "error": result.error,
             "cached": result.metadata.get("cached", False),
+            "result_content": result_content,
+            "result_preview": result_content[:600],
             "timestamp": time.time(),
         })
 

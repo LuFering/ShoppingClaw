@@ -79,7 +79,7 @@
                     v-for="cloud in currentTextClouds.slice(0, 3)" 
                     :key="cloud.id"
                     class="cloud-pill text-cloud"
-                    @click="userInput = cloud.text; messageInputRef?.focusInput()"
+                    @click="userInput = cloud.text; messageInputRef?.focus()"
                   >
                     <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
                     <div class="action-indicator">
@@ -93,7 +93,7 @@
                     v-for="cloud in currentTextClouds.slice(3, 6)" 
                     :key="cloud.id + '-r'"
                     class="cloud-pill text-cloud"
-                    @click="userInput = cloud.text; messageInputRef?.focusInput()"
+                    @click="userInput = cloud.text; messageInputRef?.focus()"
                   >
                     <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
                     <div class="action-indicator">
@@ -139,12 +139,18 @@
                   :is-processing="isProcessing && view.conv.status === 'streaming' && ii === view.lastMsgItem"
                   @retry="retryMessage(item.message)"
                 />
-                <ProcessGroup
-                  v-else
-                  :steps="item.steps"
-                  :plan-steps="item.planSteps"
+                <ToolCallsGroupComponent
+                  v-else-if="item.type === 'tool-group'"
                   :tool-calls="item.toolCalls"
-                  :live="item.live && isProcessing"
+                  :entries="item.entries"
+                  :is-active="isToolGroupActive(view, ii)"
+                />
+                <ConversationProcessGroupComponent
+                  v-else
+                  :items="item.items"
+                  :message-count="item.messageCount"
+                  :tool-call-count="item.toolCallCount"
+                  :duration-ms="item.durationMs"
                 />
               </template>
             </div>
@@ -250,8 +256,10 @@ import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import ChatSidebarComponent from '@/components/ChatSidebarComponent.vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import ProcessGroup from '@/components/ProcessGroup.vue'
+import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
+import ConversationProcessGroupComponent from '@/components/ConversationProcessGroupComponent.vue'
 import StatePanel from '@/components/StatePanel.vue'
-import { buildDisplayItems } from '@/utils/messageGrouping'
+import { getConversationDisplayItems } from '@/utils/messageGrouping'
 import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Brain, TrendingDown, Tag, Package, Heart, Wrench, ShieldAlert, Star, Activity } from 'lucide-vue-next'
 import { handleChatError } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
@@ -276,6 +284,9 @@ const userStore = useUserStore()
 const { agents, selectedAgentId, defaultAgentId } = storeToRefs(agentStore)
 
 const userInput = ref('')
+// 输入区组件引用：模板 ref="messageInputRef" 需要对应声明，
+// 否则模板求值时抛出 ReferenceError 导致整个组件渲染中断
+const messageInputRef = ref(null)
 
 // 对话模型选择：localStorage 持久化，随请求 config.model 发送（空 = 服务端默认模型）
 const CHAT_MODEL_STORAGE_KEY = 'shoppingclaw_chat_model'
@@ -494,6 +505,46 @@ const createOnGoingConvState = () => ({
   currentAssistantKey: null,
 })
 
+// ═══ Yuxi 式分段：正文段与"工具/推理组"交替 ═══
+// 对标 Yuxi getConversationDisplayItems 的 ensureToolGroup / flushToolGroup：
+// 连续的推理与工具调用归为一个 group；一旦出现正文，先 flush 该 group，再输出正文。
+// 于是消息序列天然形成 [正文段, 工具组, 正文段, ...]，渲染层按数组顺序即为交错效果。
+const ensureToolGroup = (ts) => {
+  const msgs = ts.onGoingConv.messages
+  const last = msgs[msgs.length - 1]
+  if (last && last.type === 'thinking') return last
+  const group = {
+    type: 'thinking',
+    id: `grp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    thinkingProcess: { steps: [], toolCalls: [], planSteps: [] },
+    live: true,
+  }
+  msgs.push(group)
+  return group
+}
+
+// 工具调用写入当前组（同 id 的工具原地更新状态，而非重复追加）
+const upsertToolCallIntoGroup = (group, item) => {
+  const list = group.thinkingProcess.toolCalls
+  const idx = list.findIndex((t) => t.toolCallId === item.toolCallId || t.id === item.toolCallId)
+  if (idx >= 0) {
+    list.splice(idx, 1, { ...list[idx], ...item, args: Object.keys(item.args || {}).length ? item.args : list[idx].args })
+  } else {
+    list.push(item)
+  }
+}
+
+// 把 thinkingState 里的推理步骤同步进当前组（按 index 增量，避免重复）
+const syncStepsIntoGroup = (group, fromIndex) => {
+  const steps = thinkingState.steps || []
+  for (let i = fromIndex; i < steps.length; i += 1) {
+    const s = steps[i]
+    if (s && s.type === 'thinking' && s.content) {
+      group.thinkingProcess.steps.push({ ...s })
+    }
+  }
+}
+
 const getThreadState = (threadId, autoCreate = true) => {
   if (!threadId) return null
   if (!chatState.threadStates[threadId] && autoCreate) {
@@ -540,12 +591,23 @@ const conversationViews = computed(() => {
     const append = isStream
       ? { steps: thinkingState.steps, planSteps: thinkingState.planSteps, toolCalls: thinkingState.toolCalls, live: isProcessing.value }
       : null
-    const items = buildDisplayItems(conv.messages, append)
+    const items = getConversationDisplayItems(conv, {
+      processAppend: append || undefined
+    })
     let lastMsgItem = -1
     items.forEach((it, i) => { if (it.type === 'message') lastMsgItem = i })
     return { conv: { ...conv, key: (isStream ? 'live-' : 'hist-') + currentChatId.value }, items, lastMsgItem }
   })
 })
+
+// Yuxi 行为：只有「正在流式的那轮会话的最后一个展示项」才是活跃工具组，
+// 正文开始输出后自然失去活跃态，工具组随之自动收起。
+const isToolGroupActive = (view, itemIndex) =>
+  Boolean(
+    isProcessing.value &&
+    view.conv.status === 'streaming' &&
+    (itemIndex === view.items.length - 1 || view.items[itemIndex]?.live)
+  )
 
 // 状态栏数据：产物（商品卡）与子智能体派发
 const productIndex = computed(() => {
@@ -842,9 +904,26 @@ const applyPlanSteps = (steps = []) => {
   thinkingState.planSteps.splice(0, thinkingState.planSteps.length, ...normalized)
 }
 
-const upsertToolCall = (toolCall = {}) => {
+// 后端可能不带 tool_call_id：按「工具名 + 最近一个未完结调用」兜底配对，
+// 否则 tool_complete 永远匹配不到 tool_start，工具会一直停在"进行中"
+const resolveToolCallId = (toolCall) => {
+  const raw = toolCall.tool_call_id || toolCall.id
+  if (raw) return String(raw)
+  const name = toolCall.function || toolCall.name || (toolCall.tool_meta || {}).name || 'unknown'
+  const status = normalizeProcessStatus(toolCall.status)
+  if (status === 'completed' || status === 'failed') {
+    const list = thinkingState.toolCalls
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const t = list[i]
+      if (t.name === name && t.status !== 'completed' && t.status !== 'failed') return t.toolCallId
+    }
+  }
+  return `call_${name}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+}
+
+const upsertToolCall = (toolCall = {}, ts = null) => {
   const meta = toolCall.tool_meta || {}
-  const toolCallId = String(toolCall.tool_call_id || toolCall.id || Date.now())
+  const toolCallId = resolveToolCallId(toolCall)
   const existingIndex = thinkingState.toolCalls.findIndex((item) => item.toolCallId === toolCallId || item.id === toolCallId)
   const item = {
     id: toolCallId,
@@ -867,6 +946,11 @@ const upsertToolCall = (toolCall = {}) => {
   } else {
     thinkingState.toolCalls.push(item)
   }
+  // 同步进当前分段组（Yuxi 式 tool-group），使工具内联于消息流
+  if (ts) {
+    upsertToolCallIntoGroup(ensureToolGroup(ts), thinkingState.toolCalls.find((t) => t.toolCallId === toolCallId) || item)
+  }
+  return item
 }
 
 // ═══ SSE 事件处理函数（新协议）═══
@@ -880,6 +964,12 @@ const handleSSEEvent = (eventType, data, context) => {
         let idx = aiMsgIndex
         let content = streamingContent
         content += data.content
+        // Yuxi 式 flush：正文开始输出时，若上一段是工具组则封口，正文另起新段
+        const lastSeg = ts.onGoingConv.messages[ts.onGoingConv.messages.length - 1]
+        if (lastSeg && lastSeg.type === 'thinking') {
+          lastSeg.live = false
+          idx = -1
+        }
         if (idx < 0) {
           idx = ts.onGoingConv.messages.length
           ts.onGoingConv.messages.push({
@@ -896,12 +986,15 @@ const handleSSEEvent = (eventType, data, context) => {
       break
       
     case 'thinking':
-      // 思考过程
+      // 思考过程：进全局池（状态面板）的同时，同步进当前分段组（内联渲染）
       if (data.content) {
+        const before = thinkingState.steps.length
         addThinkingStep({
           type: 'thinking',
           content: data.content,
         })
+        const group = ensureToolGroup(ts)
+        syncStepsIntoGroup(group, before)
       }
       break
       
@@ -921,7 +1014,7 @@ const handleSSEEvent = (eventType, data, context) => {
         name: data.step_name || 'unknown',
         status: 'running',
         args: data.context || {},
-      })
+      }, ts)
       break
       
     case 'step_complete':
@@ -932,7 +1025,7 @@ const handleSSEEvent = (eventType, data, context) => {
         name: data.step_name,
         status: 'completed',
         duration_ms: data.duration_ms,
-      })
+      }, ts)
       break
       
     case 'tool_start':
@@ -945,7 +1038,7 @@ const handleSSEEvent = (eventType, data, context) => {
         args: data.arguments || {},
         icon: data.meta?.icon,
         category: data.meta?.category,
-      })
+      }, ts)
       break
       
     case 'tool_complete':
@@ -958,7 +1051,7 @@ const handleSSEEvent = (eventType, data, context) => {
         duration_ms: data.duration_ms,
         result_preview: data.result_preview,
         output: data.result_content ?? data.output ?? data.result_preview,
-      })
+      }, ts)
       
       // 检查是否是商品卡片工具，如果是则添加到消息中
       if (data.tool_name === 'render_product_card' && data.result_content) {
@@ -1051,6 +1144,7 @@ const handleSendOrStop = async () => {
   }
   if (!userInput.value.trim()) return
   if (!currentAgent.value) {
+    // 不再静默吞掉：明确提示，避免用户看到"无响应"却不知原因
     message.error('智能体尚未就绪，请刷新页面或重新选择智能体')
     return
   }
@@ -1226,21 +1320,32 @@ const flushOngoingConv = (threadId, ts, streamingContent) => {
   if (!threadMessages.value[threadId]) threadMessages.value[threadId] = []
   const target = threadMessages.value[threadId]
 
-  // 本轮思考过程落库为独立 thinking 消息，并插入到首条 AI 答复之前，
-  // 保证“思考过程组”始终位于用户问题与答案之间（修复其出现在正文框下方的 bug）
-  const tp = buildThinkingProcessMsg()
+  // Yuxi 式：消息流已经是 [正文段, 工具组, 正文段, ...] 的真实发生顺序，
+  // 直接按序落库即可，无需再把思考过程强制插到首条 AI 之前。
   const onGoing = ts.onGoingConv.messages
-  const firstAiIdx = onGoing.findIndex((m) => m.type === 'ai')
 
   if (onGoing.length) {
-    const insertAt = firstAiIdx >= 0 ? firstAiIdx : onGoing.length
-    if (tp) onGoing.splice(insertAt, 0, tp)
     for (const msg of onGoing) {
       // 跳过既无内容也无商品卡的空占位消息（异常终止场景），避免空白气泡
       if (msg.isPlaceholder && !msg.content && !(msg.productCards && msg.productCards.length)) continue
+      // 分段组：落库时封口（live=false），并剔除空组
+      if (msg.type === 'thinking') {
+        const tp = msg.thinkingProcess || {}
+        const hasData =
+          (tp.steps || []).length || (tp.toolCalls || []).length || (tp.planSteps || []).length
+        if (!hasData) continue
+        target.push({
+          type: 'thinking',
+          thinkingProcess: { ...tp, live: false },
+          id: Date.now() + Math.random(),
+        })
+        continue
+      }
       target.push({ ...msg, id: Date.now() + Math.random() })
     }
   } else if (streamingContent) {
+    // 兜底：无分段（后端未发过程事件）时，至少保留思考池与正文
+    const tp = buildThinkingProcessMsg()
     if (tp) target.push(tp)
     target.push({
       type: 'ai',

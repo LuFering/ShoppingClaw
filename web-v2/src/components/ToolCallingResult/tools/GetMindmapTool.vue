@@ -18,6 +18,7 @@
 <script setup>
 import { computed } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
+import { parseToolCallArgs } from '../toolRegistry'
 
 const props = defineProps({
   toolCall: {
@@ -26,20 +27,9 @@ const props = defineProps({
   }
 })
 
-const args = computed(() => {
-  const value = props.toolCall.args || props.toolCall.function?.arguments
-  if (!value) return {}
-  if (typeof value === 'object') return value
-  try {
-    return JSON.parse(value)
-  } catch {
-    return {}
-  }
-})
+const args = computed(() => parseToolCallArgs(props.toolCall))
 
-const toolName = computed(() => props.toolCall.name || props.toolCall.function?.name || '思维导图')
-
-const operationLabel = computed(() => toolName.value)
+const operationLabel = computed(() => '获取思维导图')
 
 const kbName = computed(() => args.value.kb_name || '')
 

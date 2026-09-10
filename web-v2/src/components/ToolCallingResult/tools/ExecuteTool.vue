@@ -2,9 +2,11 @@
   <BaseToolCall :tool-call="toolCall">
     <template #header>
       <div class="sep-header">
-        <span class="note">匹配文件路径</span>
-        <span class="separator" v-if="pattern">|</span>
-        <span class="description">{{ pattern }}</span>
+        <span class="note">执行命令</span>
+        <span class="separator" v-if="command">|</span>
+        <span class="description" v-if="command">
+          <span class="code">{{ command }}</span>
+        </span>
       </div>
     </template>
   </BaseToolCall>
@@ -24,7 +26,9 @@ const props = defineProps({
 
 const parsedArgs = computed(() => parseToolCallArgs(props.toolCall))
 
-const pattern = computed(() => parsedArgs.value.pattern || '')
+const command = computed(() => {
+  return parsedArgs.value.command || ''
+})
 </script>
 
 <style lang="less" scoped></style>

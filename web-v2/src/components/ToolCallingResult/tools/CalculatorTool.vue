@@ -1,5 +1,10 @@
 <template>
   <BaseToolCall :tool-call="toolCall">
+    <template #header>
+      <div class="sep-header">
+        <span class="note">计算器</span>
+      </div>
+    </template>
     <template #result="{ resultContent }">
       <div class="calculator-result">
         <!-- <div class="calc-header">
@@ -18,9 +23,8 @@
 
 <script setup>
 import BaseToolCall from '../BaseToolCall.vue'
-import { NumberOutlined } from '@ant-design/icons-vue'
 
-const props = defineProps({
+defineProps({
   toolCall: {
     type: Object,
     required: true
@@ -31,7 +35,7 @@ const parseData = (content) => {
   if (typeof content === 'string') {
     try {
       return JSON.parse(content)
-    } catch (error) {
+    } catch {
       return content
     }
   }

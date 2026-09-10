@@ -1,13 +1,11 @@
-// 工具调用结果组件导出
+// 工具调用结果组件导出（对标 Yuxi，合并 SC 电商业务工具）
 export { default as BaseToolCall } from './BaseToolCall.vue'
 export { default as ToolCallRenderer } from './ToolCallRenderer.vue'
 
-// 专用工具组件导出
+// Yuxi 通用工具组件
 export { default as WebSearchTool } from './tools/WebSearchTool.vue'
 export { default as ListKbsTool } from './tools/ListKbsTool.vue'
 export { default as GetMindmapTool } from './tools/GetMindmapTool.vue'
-export { default as QueryKbTool } from './tools/QueryKbTool.vue'
-export { default as KnowledgeGraphTool } from './tools/KnowledgeGraphTool.vue'
 export { default as CalculatorTool } from './tools/CalculatorTool.vue'
 export { default as TodoListTool } from './tools/TodoListTool.vue'
 export { default as ImageTool } from './tools/ImageTool.vue'
@@ -16,7 +14,17 @@ export { default as ReadFileTool } from './tools/ReadFileTool.vue'
 export { default as ListDirectoryTool } from './tools/ListDirectoryTool.vue'
 export { default as SearchFileContentTool } from './tools/SearchFileContentTool.vue'
 export { default as GlobTool } from './tools/GlobTool.vue'
+export { default as GrepTool } from './tools/GrepTool.vue'
+export { default as ExecuteTool } from './tools/ExecuteTool.vue'
+export { default as RememberMemoryTool } from './tools/RememberMemoryTool.vue'
+export { default as OcrParseFileTool } from './tools/OcrParseFileTool.vue'
 export { default as EditFileTool } from './tools/EditFileTool.vue'
 export { default as MysqlQueryTool } from './tools/MysqlQueryTool.vue'
 export { default as MysqlDescribeTableTool } from './tools/MysqlDescribeTableTool.vue'
 export { default as MysqlListTablesTool } from './tools/MysqlListTablesTool.vue'
+export { default as AskUserQuestionTool } from './tools/AskUserQuestionTool.vue'
+export { default as TaskTool } from './tools/TaskTool.vue'
+
+// SC 电商业务工具组件
+export { default as ProductCardTool } from './tools/ProductCardTool.vue'
+export { default as ChartTool } from './tools/ChartTool.vue'

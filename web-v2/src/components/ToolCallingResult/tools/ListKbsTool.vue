@@ -3,15 +3,16 @@
     <template #header>
       <div class="sep-header">
         <span class="note">{{ operationLabel }}</span>
+        <span class="separator">|</span>
+        <span class="description">{{ headerSummary }}</span>
       </div>
     </template>
-    <template #result="{ resultContent }">
+    <template #result="{}">
       <div class="list-kbs-result">
-        <div class="kb-count">共 {{ kbList.length }} 个知识库</div>
         <div class="kb-list">
           <div v-for="kb in kbList" :key="kb.name" class="kb-item">
-            <div class="kb-name">{{ kb.name }}</div>
-            <div class="kb-description">{{ kb.description || '无描述' }}</div>
+            <span class="kb-name">{{ kb.name }}：</span>
+            <span class="kb-description">{{ kb.description || '无描述' }}</span>
           </div>
         </div>
       </div>
@@ -22,6 +23,7 @@
 <script setup>
 import { computed } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
+import { getToolCallStatus } from '../toolRegistry'
 
 const props = defineProps({
   toolCall: {
@@ -30,9 +32,7 @@ const props = defineProps({
   }
 })
 
-const toolName = computed(() => props.toolCall.name || props.toolCall.function?.name || '知识库')
-
-const operationLabel = computed(() => `${toolName.value} 列表`)
+const operationLabel = computed(() => '查看知识库列表')
 
 const parseData = (content) => {
   if (typeof content === 'string') {
@@ -50,41 +50,41 @@ const kbList = computed(() => {
   const data = parseData(resultContent)
   return Array.isArray(data) ? data : []
 })
+
+const headerSummary = computed(() => {
+  if (getToolCallStatus(props.toolCall) === 'error') return '执行失败'
+  const names = kbList.value.map((kb) => kb?.name).filter(Boolean)
+  if (!names.length) return '暂无知识库'
+
+  const previewNames = names.slice(0, 3).join('，')
+  const remainingCount = names.length - 3
+  return remainingCount > 0
+    ? `${names.length}个知识库：${previewNames} 等${remainingCount}个`
+    : `${names.length}个知识库：${previewNames}`
+})
 </script>
 
 <style scoped lang="less">
 .list-kbs-result {
-  background: var(--gray-0);
-  border-radius: 8px;
-  padding: 12px 16px;
-
-  .kb-count {
-    font-size: 12px;
-    color: var(--gray-700);
-    margin-bottom: 12px;
-  }
+  padding: 4px;
 
   .kb-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }
 
   .kb-item {
-    padding: 10px 12px;
-    background: var(--gray-10);
-    border-radius: 6px;
-    border: 1px solid var(--gray-100);
+    font-size: 12px;
+    line-height: 1.6;
+    word-break: break-word;
 
     .kb-name {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--gray-700);
-      margin-bottom: 4px;
+      font-weight: 600;
+      color: var(--gray-800);
     }
 
     .kb-description {
-      font-size: 12px;
       color: var(--gray-600);
     }
   }

@@ -1,23 +1,31 @@
 <template>
-  <div class="tool-call-display" :class="{ 'is-collapsed': !isExpanded }">
+  <div
+    class="tool-call-display"
+    :class="{ 'is-collapsed': !isExpanded, 'is-timeline': isTimeline }"
+  >
     <!-- Header Slot -->
-    <div class="tool-header" @click="toggleExpand">
-      <!-- Slot for completely overriding header (not recommended based on new requirement but kept for backward compat if needed, or remove if strict) -->
-      <!-- Actually, the requirement says "tool call 的 header 也要有 slot", but "ICON 保留".
-           So we should probably not use a single "header" slot that replaces everything.
-           Instead, we structure it: Icon + Content + ExpandIcon.
-      -->
-
+    <div
+      class="tool-header"
+      role="button"
+      tabindex="0"
+      :aria-expanded="isExpanded"
+      @click="toggleExpand"
+      @keydown.enter.self="toggleExpand"
+      @keydown.space.self.prevent="toggleExpand"
+    >
       <!-- Fixed Status Icon -->
-      <span v-if="toolCall.status === 'success' || toolCall.tool_call_result">
-        <component :is="toolIcon" size="16" class="tool-loader tool-success" />
-      </span>
-      <span v-else-if="toolCall.status === 'error'">
-        <XCircle size="16" class="tool-loader tool-error" />
-      </span>
-      <span v-else>
-        <Loader size="16" class="tool-loader rotate tool-loading" />
-      </span>
+      <slot name="icon" :status="effectiveStatus">
+        <span v-if="effectiveStatus === 'completed'">
+          <component v-if="toolIcon" :is="toolIcon" size="15" class="tool-loader tool-success" />
+          <CheckCircle v-else size="15" class="tool-loader tool-success" />
+        </span>
+        <span v-else-if="effectiveStatus === 'error'">
+          <XCircle size="15" class="tool-loader tool-error" />
+        </span>
+        <span v-else>
+          <Loader size="15" class="tool-loader rotate tool-loading" />
+        </span>
+      </slot>
 
       <!-- Content Area with Slots -->
       <div class="tool-header-content">
@@ -30,7 +38,7 @@
         <template v-else>
           <slot
             name="header-success"
-            v-if="toolCall.status === 'success' || toolCall.tool_call_result"
+            v-if="effectiveStatus === 'completed'"
             :tool-name="toolName"
             :result-content="resultContent"
           >
@@ -39,7 +47,7 @@
 
           <slot
             name="header-error"
-            v-else-if="toolCall.status === 'error'"
+            v-else-if="effectiveStatus === 'error'"
             :tool-name="toolName"
             :error-message="toolCall.error_message"
           >
@@ -61,66 +69,67 @@
     </div>
 
     <!-- Content Area -->
-    <div class="tool-content" v-show="isExpanded">
-      <!-- Params Slot -->
-      <div class="tool-params" v-if="hasParams && !hideParams">
-        <slot name="params" :tool-call="toolCall" :args="formattedArgs">
-          <div class="tool-params-content">
-            <strong>参数: </strong>
-            <span>{{ formattedArgs }}</span>
-          </div>
-        </slot>
-      </div>
+    <CollapseTransition>
+      <div v-if="isExpanded" class="tool-content">
+        <!-- Params Slot -->
+        <div class="tool-params" v-if="hasParams && !hideParams">
+          <slot name="params" :tool-call="toolCall" :args="formattedArgs">
+            <div class="tool-params-content">
+              <strong>参数: </strong>
+              <span>{{ formattedArgs }}</span>
+            </div>
+          </slot>
+        </div>
 
-      <!-- Result Slot -->
-      <div class="tool-result" v-if="hasResult">
-        <slot name="result" :tool-call="toolCall" :result-content="resultContent">
-          <div class="tool-result-content" :data-tool-call-id="toolCall.id">
-            <!-- Default rendering -->
-            <div class="tool-result-renderer">
-              <div class="default-result">
-                <div class="default-content">
-                  <pre>{{ formatResultData(parsedResultData) }}</pre>
+        <!-- Result Slot -->
+        <div
+          class="tool-result"
+          style="opacity: 0.8"
+          v-if="hasResult || forceShowResult || hasToolError"
+        >
+          <div v-if="hasToolError" class="tool-error-result">
+            <pre>{{
+              formatResultData(
+                hasResult ? parsedResultData : toolCall.error_message || '工具执行失败'
+              )
+            }}</pre>
+          </div>
+          <slot v-else name="result" :tool-call="toolCall" :result-content="resultContent">
+            <div class="tool-result-content" :data-tool-call-id="toolCall.id">
+              <!-- Default rendering -->
+              <div class="tool-result-renderer">
+                <div class="default-result">
+                  <div class="default-content">
+                    <pre>{{ formatResultData(parsedResultData) }}</pre>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        </slot>
+          </slot>
+        </div>
       </div>
-    </div>
+    </CollapseTransition>
   </div>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
-import {
-  Loader,
-  CircleCheckBig,
-  ChevronsUpDown,
-  ChevronsDownUp,
-  FileText,
-  FileEdit,
-  FilePen,
-  FolderSearch,
-  Folder,
-  Database,
-  BookOpen,
-  Globe,
-  BarChart3,
-  Image,
-  Calculator,
-  CheckSquare,
-  Wrench,
-  XCircle,
-  HelpCircle
-} from 'lucide-vue-next'
+import { Loader, ChevronsUpDown, ChevronsDownUp, XCircle, CheckCircle } from 'lucide-vue-next'
 import { useAgentStore } from '@/stores/agent'
 import { storeToRefs } from 'pinia'
+import CollapseTransition from '@/components/common/CollapseTransition.vue'
+import {
+  getToolCallId,
+  getToolIcon,
+  getToolName,
+  findToolInList,
+  getToolCallStatus
+} from './toolRegistry'
 
 const props = defineProps({
   toolCall: {
     type: Object,
-    required: true
+    default: () => ({})
   },
   defaultExpanded: {
     type: Boolean,
@@ -129,52 +138,59 @@ const props = defineProps({
   hideParams: {
     type: Boolean,
     default: false
+  },
+  appearance: {
+    type: String,
+    default: 'card'
+  },
+  // 特殊工具可覆盖运行态；调用或结果中的明确错误始终优先。
+  status: {
+    type: String,
+    default: ''
+  },
+  // 即使没有 tool_call_result 也展示结果区（配合外部提供的结果内容）
+  forceShowResult: {
+    type: Boolean,
+    default: false
   }
 })
 
 const agentStore = useAgentStore()
-const { availableTools } = storeToRefs(agentStore)
+const { availableTools, toolMetadata } = storeToRefs(agentStore)
 
 const isExpanded = ref(props.defaultExpanded)
+const isTimeline = computed(() => props.appearance === 'timeline')
 
 const toggleExpand = () => {
   isExpanded.value = !isExpanded.value
 }
 
-// Tool Name Logic
-const toolName = computed(() => {
-  const toolId = props.toolCall.name || props.toolCall.function?.name
-  const toolsList = availableTools.value ? Object.values(availableTools.value) : []
-  const tool = toolsList.find((t) => t.id === toolId)
-  return tool ? tool.name : toolId
+const toolStatus = computed(() => getToolCallStatus(props.toolCall))
+const hasToolError = computed(() => toolStatus.value === 'error')
+const effectiveStatus = computed(() => {
+  if (hasToolError.value || props.status === 'failed') return 'error'
+  return props.status || toolStatus.value
 })
 
-// Tool Icon Mapping
-const toolIcon = computed(() => {
-  const name = toolName.value.toLowerCase()
-  // 文件操作
-  if (name.includes('read_file') || name.includes('file')) return FileText
-  if (name.includes('write_file')) return FileEdit
-  if (name.includes('edit_file') || name.includes('replace')) return FilePen
-  if (name.includes('glob') || name.includes('search_file')) return FolderSearch
-  if (name.includes('list_directory') || name.includes('ls')) return Folder
-  // 数据库
-  if (name.includes('mysql')) return Database
-  // 知识库/搜索
-  if (name.includes('kb') || name.includes('knowledge')) return BookOpen
-  if (name.includes('web_search') || name.includes('tavily')) return Globe
-  // 图表/图像
-  if (name.includes('chart')) return BarChart3
-  if (name.includes('image') || name.includes('img')) return Image
-  // 计算
-  if (name.includes('calc') || name.includes('math')) return Calculator
-  // 任务
-  if (name.includes('task') || name.includes('todo')) return CheckSquare
-  // 向用户提问
-  if (name.includes('ask_user_question') || name.includes('question')) return HelpCircle
-  // 默认
-  return Wrench
+// Tool Name Logic
+// 展示优先级：完整工具元数据中的 display name > 前端兜底名称映射 > 工具 id
+const toolId = computed(() => getToolCallId(props.toolCall))
+
+const toolName = computed(() => {
+  const tool = findToolInList(toolId.value, toolMetadataList.value)
+  return tool ? tool.name : getToolName(toolId.value)
 })
+
+const toolMetadataList = computed(() =>
+  toolMetadata.value.length
+    ? toolMetadata.value
+    : availableTools.value
+      ? Object.values(availableTools.value)
+      : []
+)
+
+// Tool Icon Mapping
+const toolIcon = computed(() => getToolIcon(toolId.value))
 
 // Args Logic
 const formattedArgs = computed(() => {
@@ -188,7 +204,7 @@ const formattedArgs = computed(() => {
     } else if (typeof args === 'object' && args !== null) {
       return JSON.stringify(args, null, 2)
     }
-  } catch (e) {
+  } catch {
     // ignore
   }
   return args
@@ -201,11 +217,11 @@ const hasParams = computed(() => {
 
 // Result Logic
 const resultContent = computed(() => {
-  return props.toolCall.tool_call_result?.content
+  return props.toolCall.tool_call_result?.content ?? props.toolCall.result
 })
 
 const hasResult = computed(() => {
-  return !!resultContent.value
+  return resultContent.value != null && resultContent.value !== ''
 })
 
 // Default Result Rendering Logic
@@ -214,7 +230,7 @@ const parsedResultData = computed(() => {
   if (typeof content === 'string') {
     try {
       return JSON.parse(content)
-    } catch (error) {
+    } catch {
       return content
     }
   }
@@ -227,45 +243,46 @@ const formatResultData = (data) => {
   }
   return String(data)
 }
-
-// Auto expand if loading
-// Note: In the original code, expansion was managed by parent.
-// Here we might want to default to expanded if it's loading?
-// Original: :class="{ 'is-collapsed': !expandedToolCalls.has(toolCall.id) }"
-// And expandedToolCalls defaults to empty set.
-// User didn't specify default behavior, but usually we want to see what's happening.
-// Let's keep it simple for now, defaulting to closed unless specified.
 </script>
 
 <style lang="less" scoped>
 .tool-call-display {
-  outline: 1px solid var(--gray-150);
+  border: 1px solid var(--gray-100);
   border-radius: 8px;
   overflow: hidden;
   transition: all 0.2s ease;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 
   &:last-child {
     margin-bottom: 0;
   }
 
   .tool-header {
-    padding: 8px 12px;
-    font-size: 14px;
+    padding: 6px 10px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--gray-800);
-    border-bottom: 1px solid var(--gray-100);
+    border-bottom: 1px solid var(--gray-50);
     display: flex;
     align-items: center;
     gap: 8px;
     cursor: pointer;
     user-select: none;
     position: relative;
-    transition: color 0.2s ease;
+    transition: background-color 0.2s ease;
 
-    .anticon {
-      color: var(--main-color);
-      font-size: 16px;
+    &:focus-visible {
+      outline: 2px solid var(--main-300);
+      outline-offset: 2px;
+    }
+
+    &:hover {
+      background-color: var(--gray-25);
+    }
+
+    & > span {
+      display: flex;
+      align-items: center;
     }
 
     .tool-name {
@@ -273,15 +290,9 @@ const formatResultData = (data) => {
       color: var(--main-700);
     }
 
-    span {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-
     .tool-loader {
-      margin-top: 2px;
-      color: var(--main-700);
+      margin-top: 0;
+      color: var(--main-600);
     }
 
     .tool-loader.rotate {
@@ -289,7 +300,7 @@ const formatResultData = (data) => {
     }
 
     .tool-loader.tool-success {
-      color: var(--main-color);
+      color: var(--color-success-500);
     }
 
     .tool-loader.tool-error {
@@ -302,7 +313,7 @@ const formatResultData = (data) => {
 
     .tool-expand-icon {
       margin-left: auto;
-      color: var(--gray-400);
+      color: var(--gray-300);
       display: flex;
       align-items: center;
     }
@@ -314,83 +325,73 @@ const formatResultData = (data) => {
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
+      color: var(--gray-600);
 
       :deep(.sep-header) {
         display: flex;
         align-items: center;
         gap: 8px;
-        font-size: 14px;
+        font-size: 13px;
         width: 100%;
         overflow: hidden;
+
+        .note {
+          font-weight: 500;
+          color: var(--gray-600);
+          flex-shrink: 0;
+        }
+
+        .separator {
+          color: var(--gray-300);
+          flex-shrink: 0;
+        }
+
+        .description {
+          color: var(--gray-600);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          min-width: 0;
+        }
       }
 
       :deep(.keywords) {
         color: var(--main-700);
         font-weight: 600;
-        font-size: 14px;
-      }
-
-      :deep(.note) {
-        font-weight: 600;
-        color: var(--main-700);
-        white-space: nowrap;
-        flex-shrink: 0;
-      }
-
-      :deep(span.code) {
-        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-      }
-
-      :deep(.separator) {
-        color: var(--gray-300);
-        flex-shrink: 0;
-      }
-
-      :deep(.description) {
-        color: var(--gray-700);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        min-width: 0;
       }
 
       :deep(.tag) {
-        font-size: 12px;
-        color: var(--gray-800);
-        background-color: var(--gray-50);
+        font-size: 11px;
+        color: var(--gray-500);
+        // background-color: var(--gray-50);
         padding: 0px 4px;
         border-radius: 4px;
         margin-left: 8px;
-
-        &.tag-yes {
-          color: var(--main-500);
-        }
+        white-space: nowrap;
 
         &.success {
           color: var(--color-success-500);
-          background-color: var(--color-success-50);
+          // background-color: var(--color-success-50);
         }
         &.error {
           color: var(--color-error-500);
-          background-color: var(--color-error-50);
+          // background-color: var(--color-error-50);
         }
       }
     }
   }
 
   .tool-content {
-    transition: all 0.3s ease;
-
     .tool-params {
       padding: 8px 12px;
       background-color: var(--gray-25);
-      border-bottom: 1px solid var(--gray-150);
+      border-bottom: 1px solid var(--gray-50);
 
       .tool-params-content {
         margin: 0;
         font-size: 12px;
         overflow-x: auto;
-        color: var(--gray-700);
+        color: var(--gray-600);
         line-height: 1.5;
 
         pre {
@@ -399,21 +400,70 @@ const formatResultData = (data) => {
         }
       }
     }
-
-    .tool-result {
-      padding: 0;
-      background-color: transparent;
-
-      .tool-result-content {
-        padding: 0;
-        background-color: transparent;
-      }
-    }
   }
 
   &.is-collapsed {
     .tool-header {
       border-bottom: none;
+    }
+  }
+
+  &.is-timeline {
+    border: none;
+    border-radius: 0;
+    overflow: visible;
+    margin-bottom: 0;
+    padding-left: 0;
+    position: relative;
+
+    .tool-header {
+      padding: 4px 0;
+      background-color: transparent;
+      border-bottom: none;
+      color: var(--gray-500);
+      gap: 10px;
+
+      &:hover {
+        background-color: transparent;
+        color: var(--gray-700);
+      }
+
+      .tool-name {
+        color: var(--gray-600);
+      }
+
+      .tool-loader {
+        color: var(--gray-600);
+
+        &.tool-error {
+          color: var(--color-error-500);
+        }
+      }
+
+      .tool-expand-icon {
+        opacity: 0.5;
+      }
+
+      .tool-header-content {
+        font-size: 13px;
+        color: var(--gray-500);
+      }
+    }
+
+    .tool-content {
+      margin: 4px 0 8px 8px;
+      padding-left: 8px;
+      border-left: 1px solid var(--gray-100);
+
+      &:hover {
+        border-left-color: var(--gray-400);
+      }
+
+      .tool-params {
+        padding: 4px 0 8px;
+        background-color: transparent;
+        border-bottom: none;
+      }
     }
   }
 }
@@ -427,6 +477,16 @@ const formatResultData = (data) => {
   }
 }
 
+.tool-error-result pre {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--color-error-700);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Default Renderer Styles */
 .tool-result-renderer {
   width: 100%;
@@ -438,7 +498,7 @@ const formatResultData = (data) => {
 
     .default-content {
       background: var(--gray-0);
-      padding: 12px;
+      padding: 8px 0px;
 
       pre {
         margin: 0;
@@ -449,7 +509,7 @@ const formatResultData = (data) => {
         word-break: break-word;
         max-height: 300px;
         overflow-y: auto;
-        background: var(--gray-50);
+        background: var(--gray-25);
         padding: 10px;
         border-radius: 4px;
       }

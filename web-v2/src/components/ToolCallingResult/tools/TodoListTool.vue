@@ -2,7 +2,7 @@
   <BaseToolCall :tool-call="toolCall" hide-params>
     <template #header>
       <div class="sep-header">
-        <span class="note">todo</span>
+        <span class="note">任务清单</span>
         <span class="separator" v-if="query">|</span>
         <span class="description">{{ query }}</span>
       </div>
@@ -10,7 +10,12 @@
     <template #result="{ resultContent }">
       <div class="todo-list-result">
         <div class="todo-list">
-          <div v-for="(todo, index) in todoListData(resultContent)" :key="index" class="todo-item">
+          <div
+            v-for="(todo, index) in todoListData(resultContent)"
+            :key="index"
+            class="todo-item"
+            :class="{ completed: todo.status === 'completed' }"
+          >
             <div class="todo-status">
               <CheckCircleOutlined v-if="todo.status === 'completed'" class="icon completed" />
               <SyncOutlined
@@ -22,7 +27,9 @@
               <CloseCircleOutlined v-else-if="todo.status === 'cancelled'" class="icon cancelled" />
               <QuestionCircleOutlined v-else class="icon unknown" />
             </div>
-            <span class="todo-text">{{ todo.content }}</span>
+            <span class="todo-text" :title="formatTodoNameTitle(todo.content)">
+              {{ formatTodoName(todo.content) }}
+            </span>
           </div>
         </div>
         <div v-if="todoListData(resultContent).length === 0" class="no-results">
@@ -43,6 +50,7 @@ import {
   CloseCircleOutlined,
   QuestionCircleOutlined
 } from '@ant-design/icons-vue'
+import { parseToolCallArgs } from '../toolRegistry'
 
 const props = defineProps({
   toolCall: {
@@ -50,6 +58,16 @@ const props = defineProps({
     required: true
   }
 })
+
+const TODO_NAME_MAX_LENGTH = 20
+
+const formatTodoName = (content) => {
+  return Array.from(String(content || ''))
+    .slice(0, TODO_NAME_MAX_LENGTH)
+    .join('')
+}
+
+const formatTodoNameTitle = (content) => String(content || '')
 
 const query = computed(() => {
   // 1. Try to get status from result content (Priority)
@@ -59,29 +77,20 @@ const query = computed(() => {
     if (list && list.length > 0) {
       // 1. In Progress
       const inProgress = list.find((item) => item.status === 'in_progress')
-      if (inProgress) return `进行中: ${inProgress.content}`
+      if (inProgress) return `进行中: ${formatTodoName(inProgress.content)}`
 
       // 2. Pending
       const pending = list.find((item) => item.status === 'pending')
-      if (pending) return `待处理: ${pending.content}`
+      if (pending) return `待处理: ${formatTodoName(pending.content)}`
 
       // 3. Last item fallback
       const last = list[list.length - 1]
-      return `更新: ${last.content}`
+      return `更新: ${formatTodoName(last.content)}`
     }
   }
 
   // 2. Fallback to args
-  const args = props.toolCall.args || props.toolCall.function?.arguments
-  if (!args) return ''
-  let parsedArgs = args
-  if (typeof args === 'string') {
-    try {
-      parsedArgs = JSON.parse(args)
-    } catch (e) {
-      return ''
-    }
-  }
+  const parsedArgs = parseToolCallArgs(props.toolCall)
   if (typeof parsedArgs === 'object') {
     return parsedArgs.content || parsedArgs.action || parsedArgs.todo || ''
   }
@@ -92,7 +101,7 @@ const parseData = (content) => {
   if (typeof content === 'string') {
     try {
       return JSON.parse(content)
-    } catch (error) {
+    } catch {
       return content
     }
   }
@@ -141,8 +150,7 @@ const todoListData = (content) => {
 <style lang="less" scoped>
 .todo-list-result {
   background: var(--gray-0);
-  border-radius: 8px;
-  padding: 12px;
+  padding: 0px;
 
   .todo-list {
     display: flex;
@@ -154,7 +162,7 @@ const todoListData = (content) => {
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    padding: 4px 8px;
+    padding: 4px 0px;
     // background: var(--gray-10);
     border-radius: 6px;
     // border: 1px solid var(--gray-150);

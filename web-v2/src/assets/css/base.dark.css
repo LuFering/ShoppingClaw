@@ -19,6 +19,27 @@
   --main-1: #010302;
   --main-0: #000000;
 
+  /* 辅助色：暖金色系，深色模式反转刻度 */
+  --second-1000: #faf3e2;
+  --second-900: #f4e8cc;
+  --second-800: #ead5a8;
+  --second-700: #dfc183;
+  --second-600: #d4ac5f;
+  --second-500: #d9ab52;
+  --second-400: #c9983c;
+  --second-300: #a97e2b;
+  --second-200: #8a641d;
+  --second-100: #6b4d14;
+  --second-50: #4a350d;
+  --second-40: #2e2108;
+  --second-30: #251a06;
+  --second-20: #1e1505;
+  --second-10: #150e03;
+  --second-5: #0e0902;
+  --second-1: #070401;
+  --second-0: #000000;
+  --second-color: var(--second-500);
+
   --gray-10000: #fafafa;
   --gray-2000: #f8f9f8;
   --gray-1000: #f6f7f5;

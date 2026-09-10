@@ -1,14 +1,14 @@
 <template>
-  <BaseToolCall :tool-call="toolCall" :default-expanded="true" :hide-params="true">
-    <template #header-success>
-      <span class="sep-header">
-        <span class="keywords">列出数据库表</span>
-      </span>
+  <BaseToolCall :tool-call="toolCall" :hide-params="true">
+    <template #header>
+      <div class="sep-header">
+        <span class="note">列出数据库表</span>
+      </div>
     </template>
 
     <template #result="{ resultContent }">
       <div class="mysql-result">
-        <pre class="result-text">{{ formatResult(resultContent) }}</pre>
+        <pre class="result-text">{{ formatMysqlResult(resultContent) }}</pre>
       </div>
     </template>
   </BaseToolCall>
@@ -16,38 +16,20 @@
 
 <script setup>
 import BaseToolCall from '../BaseToolCall.vue'
+import { formatMysqlResult } from './mysqlResultFormatter.js'
 
-const props = defineProps({
+defineProps({
   toolCall: {
     type: Object,
     required: true
   }
 })
-
-const formatResult = (content) => {
-  if (!content) return ''
-
-  if (typeof content === 'string') {
-    try {
-      const parsed = JSON.parse(content)
-      return JSON.stringify(parsed, null, 2)
-    } catch {
-      return content
-    }
-  }
-
-  if (typeof content === 'object') {
-    return JSON.stringify(content, null, 2)
-  }
-
-  return String(content)
-}
 </script>
 
 <style lang="less" scoped>
 .mysql-result {
   border-radius: 8px;
-  padding: 12px;
+  padding: 4px;
 
   .result-text {
     margin: 0;

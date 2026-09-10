@@ -1,12 +1,11 @@
 <template>
-  <BaseToolCall :tool-call="toolCall" :default-expanded="true">
-    <template #header-success>
-      <span class="sep-header">
-        <span class="keywords">执行SQL查询：</span>
-        <span class="description">{{
-          truncateSql(extractSql(toolCall.args || toolCall.function?.arguments))
-        }}</span>
-      </span>
+  <BaseToolCall :tool-call="toolCall">
+    <template #header>
+      <div class="sep-header">
+        <span class="note">执行SQL查询</span>
+        <span class="separator" v-if="sqlText">|</span>
+        <span class="description code" v-if="sqlText">{{ truncateSql(sqlText) }}</span>
+      </div>
     </template>
 
     <template #params="{ args }">
@@ -17,14 +16,16 @@
 
     <template #result="{ resultContent }">
       <div class="mysql-result">
-        <pre class="result-text">{{ formatResult(resultContent) }}</pre>
+        <pre class="result-text">{{ formatMysqlResult(resultContent) }}</pre>
       </div>
     </template>
   </BaseToolCall>
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
+import { formatMysqlResult } from './mysqlResultFormatter.js'
 
 const props = defineProps({
   toolCall: {
@@ -33,26 +34,9 @@ const props = defineProps({
   }
 })
 
-const formatResult = (content) => {
-  if (!content) return ''
-
-  // 如果是字符串，尝试解析为 JSON 后再转为格式化字符串
-  if (typeof content === 'string') {
-    try {
-      const parsed = JSON.parse(content)
-      return JSON.stringify(parsed, null, 2)
-    } catch {
-      return content
-    }
-  }
-
-  // 如果是对象，直接格式化
-  if (typeof content === 'object') {
-    return JSON.stringify(content, null, 2)
-  }
-
-  return String(content)
-}
+const sqlText = computed(() =>
+  extractSql(props.toolCall.args || props.toolCall.function?.arguments)
+)
 
 const extractSql = (args) => {
   if (!args) return ''
@@ -90,7 +74,7 @@ const truncateSql = (sql, maxLength = 50) => {
     color: var(--gray-800);
     white-space: pre-wrap;
     word-break: break-word;
-    padding: 6px;
+    padding: 4px;
     border-radius: 4px;
     font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
     max-height: 200px;
@@ -99,9 +83,8 @@ const truncateSql = (sql, maxLength = 50) => {
 }
 
 .mysql-result {
-  // background: var(--gray-0);
   border-radius: 8px;
-  padding: 12px;
+  padding: 4px;
 
   .result-text {
     margin: 0;

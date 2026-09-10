@@ -1,75 +1,198 @@
-// 消息流分组：把一轮会话的消息数组 + （可选的）过程数据，合成消息流展示项。
-// 展示项两类：
-//   { type: 'message', message }        —— 普通消息（用户/AI/商品卡）
-//   { type: 'process', steps, planSteps, toolCalls, live } —— 该轮"思考与工具"过程组
-// 约定：后端 history 中 type==='thinking' 且带 thinkingProcess 的消息，就是那一轮过程组的载体。
+// 消息流展示项分组（对标 Yuxi utils/messageGrouping.js）
 //
-// 顺序归一化：后端落库时先存 AI、后存 thinking，历史顺序常为 [human, ai, thinking]。
-// 思考过程组应位于"用户提问"与"AI 回答"之间，故把每条 thinking 归位到其对应 AI 之前，
-// 保证多轮 / 切换对话重新拉取历史后，思考模块始终在正文框上方。
-function normalizeThinkingOrder(messages) {
-  const out = []
-  let lastAiIndex = -1
-  for (const m of messages || []) {
-    if (m && m.type === 'thinking' && m.thinkingProcess) {
-      // 已在其 AI 之前（正确顺序）则原样保留；否则插入到最近一条 AI 之前
-      if (lastAiIndex >= 0) {
-        out.splice(lastAiIndex, 0, m)
-        lastAiIndex += 1 // 保持指向该 AI，供后续 thinking 继续插到其前
-      } else {
-        out.push(m)
-      }
-      continue
-    }
-    if (m && m.type === 'ai') {
-      out.push(m)
-      lastAiIndex = out.length - 1
-      continue
-    }
-    out.push(m)
+// 展示项协议：
+//   { type: 'message',     key, message, sourceIndex }
+//   { type: 'tool-group',  key, toolCalls, entries, live? }   // live 为 SC 扩展：流式进行中
+//   { type: 'process-group', key, items, messageCount, toolCallCount, durationMs }
+//
+// 与 Yuxi 的差异（SC 适配）：
+//   1. SC 的思考过程不是 ai 消息的 reasoning_content 字段，而是独立的
+//      { type:'thinking', thinkingProcess:{ steps, toolCalls, planSteps } } 段，
+//      这里统一转换成 Yuxi 的 tool-group。
+//   2. SC 的工具对象字段为 { toolCallId, name, args, output, status, duration }，
+//      经 toYuxiToolCall 转成 Yuxi 契约 { id, name, args, status, tool_call_result }。
+import MessageProcessor from '@/utils/messageProcessor'
+import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
+import { collapseConversationProcess } from '@/utils/conversationProcessGrouping'
+
+/** SC 流式工具对象 → Yuxi 工具调用契约。 */
+export const toYuxiToolCall = (toolCall) => {
+  if (!toolCall) return null
+  const status = toolCall.status === 'failed' ? 'error' : toolCall.status || 'running'
+  const rawOutput = toolCall.output ?? toolCall.result
+  const hasOutput = rawOutput != null && rawOutput !== ''
+  return {
+    id: toolCall.toolCallId || toolCall.id || toolCall.name,
+    name: toolCall.name || toolCall.function || 'unknown',
+    args: toolCall.args || {},
+    status,
+    duration_ms: toolCall.duration ?? toolCall.duration_ms ?? null,
+    ...(hasOutput
+      ? {
+          tool_call_result: {
+            content: typeof rawOutput === 'string' ? rawOutput : JSON.stringify(rawOutput)
+          }
+        }
+      : {}),
+    ...(status === 'error' && rawOutput ? { error_message: String(rawOutput) } : {}),
+    ...(toolCall.display_label ? { display_label: toolCall.display_label } : {})
   }
-  return out
 }
 
-export function buildDisplayItems(messages, processAppend = null) {
+/** SC 过程段（thinking）→ Yuxi tool-group。 */
+const buildProcessToolGroup = (thinkingProcess, seed, live) => {
+  const tp = thinkingProcess || {}
+  const steps = tp.steps || []
+  const toolCalls = (tp.toolCalls || []).map(toYuxiToolCall).filter(Boolean)
+
+  const entries = []
+  // 推理文本：合并连续的 thinking 步骤，避免逐条刷屏
+  const reasoningText = steps
+    .filter((s) => s && s.type === 'thinking' && s.content)
+    .map((s) => String(s.content).trim())
+    .filter(Boolean)
+    .join('\n')
+  if (reasoningText) {
+    entries.push({ type: 'reasoning', key: `reasoning-${seed}`, content: reasoningText })
+  }
+  toolCalls.forEach((toolCall, index) => {
+    entries.push({ type: 'tool', key: `tool-${seed}-${toolCall.id || index}`, toolCall })
+  })
+
+  if (!entries.length) return null
+  return {
+    type: 'tool-group',
+    key: `tool-group-${seed}`,
+    toolCalls,
+    entries,
+    live
+  }
+}
+
+const defaultEnrichToolCalls = (message) => enrichTaskToolCalls(message?.tool_calls)
+
+const hasVisibleAssistantBody = (message, content) =>
+  Boolean(
+    content ||
+      message.error_type ||
+      message.extra_metadata?.error_type ||
+      message.isStoppedByUser ||
+      message.productCards?.length
+  )
+
+/**
+ * 将一轮会话切成「正文 / 工具组 / 正文 …」交替的展示序列。
+ * @param {Object} conv - { messages: Message[] }
+ * @param {Object} options
+ * @param {Function} options.enrichToolCalls - 工具富化（默认走 Yuxi 的 enrichTaskToolCalls）
+ * @param {Object}  options.processAppend - SC 流式中尚未分段的全局过程池 { steps, toolCalls, planSteps, live }
+ */
+export const getConversationDisplayItems = (
+  conv,
+  {
+    enrichToolCalls = defaultEnrichToolCalls,
+    collapseIntermediate = false,
+    runTiming = null,
+    processAppend = null
+  } = {}
+) => {
+  if (!Array.isArray(conv?.messages) || conv.messages.length === 0) return []
+
   const items = []
-  const msgs = normalizeThinkingOrder(messages || [])
-  let lastHumanItem = -1
+  let pendingToolGroup = null
 
-  for (const m of msgs) {
-    if (m && m.type === 'thinking' && m.thinkingProcess) {
-      const tp = m.thinkingProcess || {}
+  const flushToolGroup = () => {
+    if (pendingToolGroup && pendingToolGroup.entries.length > 0) {
+      items.push(pendingToolGroup)
+    }
+    pendingToolGroup = null
+  }
+
+  conv.messages.forEach((message, index) => {
+    const seed = message.id || index
+
+    // ── SC 过程段：思考 + 工具调用 ──
+    if (message.type === 'thinking') {
+      flushToolGroup()
+      const group = buildProcessToolGroup(message.thinkingProcess, seed, !!message.thinkingProcess?.live)
+      if (group) items.push(group)
+      return
+    }
+
+    // ── 非 AI 消息（用户 / 系统）──
+    if (message.type !== 'ai') {
+      flushToolGroup()
       items.push({
-        type: 'process',
-        steps: tp.steps || [],
-        planSteps: tp.planSteps || [],
-        toolCalls: tp.toolCalls || [],
-        live: false
+        type: 'message',
+        key: `message-${seed}`,
+        message,
+        sourceIndex: index
       })
-      continue
+      return
     }
-    if (m && m.type === 'human') lastHumanItem = items.length
-    items.push({ type: 'message', message: m })
+
+    // ── AI 消息 ──
+    const { content, reasoningContent } = MessageProcessor.parseAssistantMessageBody(message)
+    const toolCalls = enrichToolCalls(message) || []
+
+    const ensureToolGroup = (segment) => {
+      if (!pendingToolGroup) {
+        pendingToolGroup = {
+          type: 'tool-group',
+          key: `tool-group-${seed}-${segment}`,
+          toolCalls: [],
+          entries: []
+        }
+      }
+      return pendingToolGroup
+    }
+
+    if (reasoningContent) {
+      ensureToolGroup('reasoning').entries.push({
+        type: 'reasoning',
+        key: `reasoning-${seed}`,
+        content: reasoningContent
+      })
+    }
+
+    // 正文：先收起进行中的工具组，保证「工具 → 正文」顺序与真实发生次序一致
+    if (hasVisibleAssistantBody(message, content)) {
+      flushToolGroup()
+      items.push({
+        type: 'message',
+        key: `message-${seed}`,
+        message: reasoningContent ? { ...message, reasoning_content: '' } : message,
+        sourceIndex: index
+      })
+    }
+
+    if (toolCalls.length > 0) {
+      const group = ensureToolGroup('tools')
+      group.toolCalls.push(...toolCalls)
+      group.entries.push(
+        ...toolCalls.map((toolCall, toolIndex) => ({
+          type: 'tool',
+          key: `tool-${seed}-${toolCall.id || toolIndex}`,
+          toolCall
+        }))
+      )
+    }
+  })
+
+  flushToolGroup()
+
+  // ── SC 兼容：尚未分段的流式过程池，作为末尾 live 工具组 ──
+  if (processAppend?.live) {
+    const group = buildProcessToolGroup(processAppend, `append-${items.length}`, true)
+    if (group) items.push(group)
   }
 
-  // 附加过程数据（进行中的 live 组 / 刚完成轮次的快照）：
-  // 插到最后一条用户消息之后（过程发生在提问与回答之间）
-  const hasProcess =
-    processAppend &&
-    ((processAppend.steps || []).length ||
-      (processAppend.toolCalls || []).length ||
-      (processAppend.planSteps || []).length)
-  if (hasProcess) {
-    const item = {
-      type: 'process',
-      steps: processAppend.steps || [],
-      planSteps: processAppend.planSteps || [],
-      toolCalls: processAppend.toolCalls || [],
-      live: !!processAppend.live
-    }
-    if (lastHumanItem >= 0) items.splice(lastHumanItem + 1, 0, item)
-    else items.unshift(item)
-  }
-
-  return items
+  return collapseConversationProcess(items, collapseIntermediate, runTiming)
 }
+
+/** 兼容旧调用名。 */
+export const buildDisplayItems = (messages, processAppend = null) =>
+  getConversationDisplayItems(
+    { messages },
+    { processAppend: processAppend || undefined }
+  )
