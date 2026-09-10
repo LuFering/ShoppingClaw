@@ -334,6 +334,11 @@ async def stream_agent_chat(
         "agent_config_id": agent_config_id,
         "agent_config": agent_config,
     }
+    # 前端/调用方可通过 config.model（"provider/model"）按请求切换模型，
+    # 由 DynamicModelMiddleware 在运行时解析；未传则用默认模型。
+    requested_model = config.get("model")
+    if requested_model and isinstance(requested_model, str):
+        input_context["model"] = requested_model
 
     full_msg = None
     accumulated_content: list[str] = []

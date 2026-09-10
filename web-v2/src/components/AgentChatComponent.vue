@@ -189,6 +189,11 @@
               @send="handleSendOrStop"
             >
               <template #actions-left-extra>
+                <ModelSelectorComponent
+                  :model-spec="selectedModel"
+                  :disabled="isProcessing"
+                  @select-model="handleSelectModel"
+                />
                 <slot name="input-actions-left"></slot>
               </template>
             </AgentInputArea>
@@ -232,6 +237,7 @@ import { ref, reactive, onMounted, watch, nextTick, computed, onUnmounted } from
 import AgentInputArea from '@/components/AgentInputArea.vue'
 import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import ChatSidebarComponent from '@/components/ChatSidebarComponent.vue'
+import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import ProcessGroup from '@/components/ProcessGroup.vue'
 import StatePanel from '@/components/StatePanel.vue'
 import { buildDisplayItems } from '@/utils/messageGrouping'
@@ -258,6 +264,18 @@ const userStore = useUserStore()
 const { agents, selectedAgentId, defaultAgentId } = storeToRefs(agentStore)
 
 const userInput = ref('')
+
+// 对话模型选择：localStorage 持久化，随请求 config.model 发送（空 = 服务端默认模型）
+const CHAT_MODEL_STORAGE_KEY = 'shoppingclaw_chat_model'
+const selectedModel = ref(localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || '')
+const handleSelectModel = (spec) => {
+  selectedModel.value = spec || ''
+  if (selectedModel.value) {
+    localStorage.setItem(CHAT_MODEL_STORAGE_KEY, selectedModel.value)
+  } else {
+    localStorage.removeItem(CHAT_MODEL_STORAGE_KEY)
+  }
+}
 
 // 欢迎区文本云：默认种子（契约 GET /api/chat/home/suggestions，失败降级并标演示）
 const scenePrompts = [
@@ -1010,6 +1028,7 @@ const handleSendOrStop = async () => {
       query,
       config: {
         thread_id: threadId,
+        ...(selectedModel.value ? { model: selectedModel.value } : {})
       },
       meta: {}
     }, { signal: ac.signal })

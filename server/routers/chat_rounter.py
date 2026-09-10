@@ -670,6 +670,27 @@ async def rate_limit_status(
         "remaining": remaining,
     }
 
+# ── 可选模型目录 ─────────────────────────────────────────
+@chat.get("/models")
+async def get_chat_models():
+    """当前服务端支持的模型目录（按提供商分组，供前端模型选择器使用）
+
+    每个模型输出为完整 spec（"provider/model"），可直接作为对话请求
+    config.model 的值；环境变量名仅供展示用途，不回传任何密钥。
+    """
+    providers = []
+    for pid, info in conf.config.model_name.items():
+        providers.append(
+            {
+                "id": pid,
+                "name": info.name,
+                "default": f"{pid}/{info.default}" if info.default else None,
+                "models": [f"{pid}/{m}" for m in info.models],
+            }
+        )
+    return {"providers": providers}
+
+
 # ── 主页气泡推荐语 ───────────────────────────────────
 @chat.get("/home/suggestions")
 async def get_home_suggestions(

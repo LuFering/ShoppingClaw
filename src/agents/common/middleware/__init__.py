@@ -5,6 +5,7 @@ __all__ = [
     "CompiledSubAgent",
     "ContentGuardMiddleware",
     "DiagnosticMiddleware",
+    "DynamicModelMiddleware",
     "FilesystemMiddleware",
     "MemoryMiddleware",
     "SkillsMiddleware",
@@ -20,6 +21,7 @@ __all__ = [
 
 from src.agents.common.middleware.content_guard import ContentGuardMiddleware
 from src.agents.common.middleware.diagnostic import DiagnosticMiddleware
+from src.agents.common.middleware.dynamic_model import DynamicModelMiddleware
 from src.agents.common.middleware.filesystem import FilesystemMiddleware
 from src.agents.common.middleware.memory import MemoryMiddleware
 from src.agents.common.middleware.offload import ToolResultOffloadMiddleware

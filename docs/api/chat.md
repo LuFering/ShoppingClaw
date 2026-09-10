@@ -15,11 +15,15 @@ Body（application/json）：
 ```json
 {
   "query": "推荐 200 元以内的无线耳机",
-  "config": { "thread_id": "可选-续接对话时传上次的 id", "model": "可选模型名" },
+  "config": { "thread_id": "可选-续接对话时传上次的 id", "model": "deepseek/deepseek-chat" },
   "meta": {},
   "image_content": null
 }
 ```
+
+`config.model`（可选）：本次对话使用的模型，格式 `provider/model`（可选值见
+`GET /api/chat/models`）。由 `DynamicModelMiddleware` 在运行时解析，加载失败
+自动回退服务端默认模型（记 warning，不报错）；未传则用默认模型。
 
 响应：`text/event-stream`（HTTP 200 保持连接，直到 `done` 或 `error` 事件）。
 
@@ -109,7 +113,14 @@ PATCH `/api/chat/sessions/{thread_id}/title`（body `{title: "..."}`）。
 | GET | `/api/chat/default_agent` | → `{default_agent_id}`（config 无则取第一个） |
 | GET | `/api/chat/agent` | → `{agents:[{id, name, ...}]}` |
 | GET | `/api/chat/agent/{agent_id}` | 单 agent 详情（能力/模型信息） |
+| GET | `/api/chat/models` | 可选模型目录（见下） |
 | POST | `/api/chat/agent/{agent_id}/stop` | 中断当前正在生成的 SSE 会话 |
+
+`GET /api/chat/models` — 认证：无需密钥信息，返回静态目录
+`{"providers": [{"id": "deepseek", "name": "DeepSeek", "default":
+"deepseek/deepseek-chat", "models": ["deepseek/deepseek-chat", ...]}]}`。
+每个模型 spec 可直接作为对话请求 `config.model` 的值；目录来源
+`src/config/static/models.py` 的 `DEFAULT_CHAT_MODEL_PROVIDERS`。
 
 ## 7. 运行状态
 

@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.agents.common.base import BaseAgent
 from src.agents.common.backends import StateBackend
+from src.agents.common.middleware.dynamic_model import DynamicModelMiddleware
 from src.agents.common.middleware.filesystem import FilesystemMiddleware
 # from src.agents.common.middleware.intent_detector import IntentDetectorMiddleware  # 暂时禁用
 from src.agents.common.middleware.patch_tool_calls import PatchToolCallsMiddleware
@@ -252,6 +253,8 @@ class MasterAgent(BaseAgent):
             context_schema=MasterContext,  # ← 传入 Context Schema 类
             tools=tools,
             middleware=[
+                # ═══ 第零层：按请求动态切换模型（依赖运行时 context.model）═══
+                DynamicModelMiddleware(),
                 # ═══ 第一层：监控与安全 ═══
                 sse_monitor,                         # 1. 工具调用监控（最外层，捕获所有调用）
                 ContentGuardMiddleware(strict_mode=False),  # 2. 内容安全审查
