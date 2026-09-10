@@ -505,6 +505,28 @@ async def stream_agent_chat(
         # 思考过程持久化：累积整个流式过程中的思考数据
         _thinking_chunks: list[str] = []  # 推理文本片段
         _completed_tool_calls: list[dict] = []  # 工具调用完成记录
+
+        def _collect_thinking_event(evt: dict) -> None:
+            """把自定义 thinking_process 事件同步进持久化缓冲（修复过程组历史丢失）。"""
+            etype = evt.get("event")
+            if etype == "thinking":
+                c = evt.get("content")
+                if c:
+                    _thinking_chunks.append(str(c))
+            elif etype == "tool_call":
+                tc = evt.get("tool_call") or {}
+                tcid = str(tc.get("tool_call_id") or "")
+                if tcid and any(x.get("id") == tcid for x in _completed_tool_calls):
+                    return
+                _completed_tool_calls.append({
+                    "id": tcid or str(uuid.uuid4()),
+                    "name": tc.get("function") or tc.get("name") or "unknown",
+                    "args": tc.get("args") or {},
+                    "status": tc.get("status") or "completed",
+                    "duration_ms": tc.get("duration_ms"),
+                    "icon": tc.get("icon"),
+                    "category": tc.get("category"),
+                })
         # 流式执行 Agent 推理
         async for chunk in agent.stream_messages(messages, input_context=input_context):
             # ═══ 处理 SSE 监控中间件事件 ═══
@@ -672,6 +694,8 @@ async def stream_agent_chat(
 
                 # ═══ 处理中间件通过 custom 模式写入的自定义 SSE 事件 ═══
                 if isinstance(msg, dict) and msg.get("status") == "thinking_process" and msg.get("event"):
+                    # 持久化收集：该通道才是 SC 推理内容/工具调用的真实来源
+                    _collect_thinking_event(msg)
                     # 直接转换为标准 SSE 格式，绕过默认的 make_chunk 逻辑
                     legacy_chunk = {
                         "status": "thinking_process",
@@ -689,6 +713,7 @@ async def stream_agent_chat(
                 if isinstance(msg, dict) and (metadata or {}).get("stream_mode") == "custom":
                     # 尝试识别并转换
                     if msg.get("status") == "thinking_process" and msg.get("event"):
+                        _collect_thinking_event(msg)
 
                         legacy_chunk = {
                             "status": "thinking_process",

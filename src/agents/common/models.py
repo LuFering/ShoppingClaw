@@ -13,6 +13,8 @@ load_dotenv()
 
 
 # 模型实例缓存，避免同一模型被重复加载
+# 会返回 reasoning_content 的 OpenAI 兼容 provider（均启用 reasoning 感知封装）
+REASONING_AWARE_PROVIDERS = ("deepseek", "aliyun", "SenseNova", "openai")
 _model_cache: dict[str, BaseChatModel] = {}
 
 def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
@@ -37,16 +39,16 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
     base_url=get_docker_safe_url(model_info.base_url)
     logging.debug(f"api_key:{api_key[:10]}... (hidden)")
 
-    if provider in ["openai","deepseek"]:
+    if provider in ["openai","deepseek","aliyun","SenseNova"]:
         model_spec=f"{provider}:{model}"
         logging.debug(f"[offical]Loading model {model_spec} with kwargs {kwargs}")
         
-        # 针对 DeepSeek 模型的特殊处理
-        if provider == "deepseek":
+        # 针对会返回 reasoning_content 的 provider 的处理（不止 DeepSeek）
+        if provider in REASONING_AWARE_PROVIDERS:
             from langchain_openai import ChatOpenAI
             from langchain_core.messages import AIMessage
             
-            class DeepSeekCleanedModel(ChatOpenAI):
+            class ReasoningAwareChatOpenAI(ChatOpenAI):
                 """自动处理 reasoning_content 的 DeepSeek 模型包装类"""
 
                 def _get_request_payload(self, input_, *, stop=None, **kwargs):
@@ -144,14 +146,17 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
                             logging.warning(f"[DeepSeek] streaming error: {type(e).__name__}: {e}")
                             raise
 
-            model_instance = DeepSeekCleanedModel(
-                model=model,
-                api_key=api_key,
-                base_url=base_url,
-                stream_usage=True,
-                max_tokens=8192,
-                extra_body={"enable_thinking": True}
-            )
+            # enable_thinking 是 DeepSeek 专有字段；其他 provider 传了会 400
+            _ctor_kwargs = {
+                "model": model,
+                "api_key": api_key,
+                "base_url": base_url,
+                "stream_usage": True,
+                "max_tokens": 8192,
+            }
+            if provider == "deepseek":
+                _ctor_kwargs["extra_body"] = {"enable_thinking": True}
+            model_instance = ReasoningAwareChatOpenAI(**_ctor_kwargs)
             _model_cache[cache_key] = model_instance
             return model_instance
 
