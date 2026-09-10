@@ -173,6 +173,16 @@
               />
             </div>
 
+            <!-- 运行状态内联条：流式进行中显示当前动作 + 耗时，结束自动收起 -->
+            <Transition name="rs-fade">
+              <div v-if="runningStatus" class="running-status" role="status" aria-live="polite">
+                <LoaderCircle class="rs-spin" :size="14" />
+                <span class="rs-phase" :class="'phase-' + runningStatus.phase">{{ runningStatus.phaseLabel }}</span>
+                <span class="rs-text">{{ runningStatus.text }}</span>
+                <span class="rs-time mono">{{ elapsedText }}</span>
+              </div>
+            </Transition>
+
             <AgentInputArea
               ref="messageInputRef"
               v-model="userInput"
@@ -180,7 +190,8 @@
               :disabled="!currentAgent"
               :send-button-disabled="(!userInput || !currentAgent) && !isProcessing"
               :placeholder="conversations.length ? '继续追问，比如：和另一款比，哪个更值？' : '例：预算 5000 给爸妈买台洗地机，要静音好打理'"
-              :supports-file-upload="false"
+              :supports-file-upload="true"
+              @update:attachments="onAttachmentsChange"
               :agent-id="currentAgentId"
               :thread-id="currentChatId"
               :ensure-thread="ensureActiveThread"
@@ -251,6 +262,7 @@ import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { agentApi, threadApi } from '@/apis'
 import { homeApi } from '@/apis/home_api'
+import { message } from 'ant-design-vue'
 
 
 const props = defineProps({
@@ -555,6 +567,51 @@ const subagentCalls = computed(() =>
 const isLoadingMessages = computed(() => chatUIStore.isLoadingMessages)
 const isStreaming = computed(() => currentThreadState.value?.isStreaming || false)
 const isProcessing = computed(() => isStreaming.value)
+
+// 运行状态内联条：流式进行中的当前动作与耗时
+const runningStatus = computed(() => {
+  if (!isProcessing.value) return null
+  const running = (thinkingState.toolCalls || []).find((t) => t.status === 'running' || t.status === 'calling')
+  if (running) {
+    const name = (running.name || running.function || '工具').replace(/_/g, ' ')
+    return { phase: 'tool', phaseLabel: '调用工具', text: name }
+  }
+  const lastThink = [...(thinkingState.steps || [])].reverse().find((s) => s.type === 'thinking' && s.content)
+  if (lastThink) {
+    const c = (lastThink.content || '').trim().replace(/\s+/g, ' ')
+    return { phase: 'think', phaseLabel: '思考', text: c.length > 48 ? c.slice(0, 48) + '…' : c }
+  }
+  return { phase: 'idle', phaseLabel: '思考', text: '正在规划下一步…' }
+})
+
+const elapsed = ref(0)
+let elapsedTimer = null
+watch(
+  isProcessing,
+  (v) => {
+    if (v) {
+      elapsed.value = 0
+      if (elapsedTimer) clearInterval(elapsedTimer)
+      elapsedTimer = setInterval(() => { elapsed.value++ }, 1000)
+    } else if (elapsedTimer) {
+      clearInterval(elapsedTimer)
+      elapsedTimer = null
+    }
+  },
+  { immediate: true }
+)
+
+const elapsedText = computed(() => {
+  const s = elapsed.value
+  const m = Math.floor(s / 60)
+  return m ? `${m}:${String(s % 60).padStart(2, '0')}` : `${s}s`
+})
+
+onUnmounted(() => { if (elapsedTimer) clearInterval(elapsedTimer) })
+
+// 待发送附件（拖拽/选择上传的本地预览），发送后清空
+const pendingAttachments = ref([])
+const onAttachmentsChange = (atts) => { pendingAttachments.value = atts || [] }
 
 const scrollController = new ScrollController('.chat-main')
 
@@ -992,7 +1049,11 @@ const handleSendOrStop = async () => {
     if (st?.abort) st.abort()
     return
   }
-  if (!userInput.value.trim() || !currentAgent.value) return
+  if (!userInput.value.trim()) return
+  if (!currentAgent.value) {
+    message.error('智能体尚未就绪，请刷新页面或重新选择智能体')
+    return
+  }
 
   const threadId = await ensureActiveThread()
   if (!threadId) return
@@ -1002,6 +1063,12 @@ const handleSendOrStop = async () => {
 
   // 添加用户消息
   const userMsg = { type: 'human', content: query, id: Date.now() }
+  // 附件：后端暂未提供聊天附件上传接口，此处先随消息记录引用（名称/类型），UI 预览已完整可用
+  if (pendingAttachments.value.length) {
+    userMsg.attachments = pendingAttachments.value.map((a) => ({ name: a.name, size: a.size, type: a.type }))
+  }
+  pendingAttachments.value = []
+  messageInputRef.value?.clearAttachments()
   if (!threadMessages.value[threadId]) {
     threadMessages.value[threadId] = []
   }
@@ -1018,7 +1085,13 @@ const handleSendOrStop = async () => {
   // 支持"停止"时真正中断 fetch
   const ac = new AbortController()
   ts.abort = () => ac.abort()
-  
+  // 防止后端长时间无响应导致界面永久"思考中"：超时主动中断
+  let abortedByTimeout = false
+  const timeoutTimer = setTimeout(() => {
+    abortedByTimeout = true
+    ac.abort()
+  }, 120000)
+
   // 清空之前的思考步骤
   clearThinkingSteps()
   
@@ -1100,6 +1173,9 @@ const handleSendOrStop = async () => {
       if (last && last.type === 'ai') last.isStoppedByUser = true
       // 把已生成的部分落库（含"已停止"提示）
       flushOngoingConv(threadId, ts, streamingContent)
+      if (abortedByTimeout) {
+        handleChatError(new Error('请求超时：后端长时间无响应'), 'send')
+      }
     } else {
       console.error('Stream error:', error)
       handleChatError(error, 'send')
@@ -1114,6 +1190,7 @@ const handleSendOrStop = async () => {
       })
     }
   } finally {
+    clearTimeout(timeoutTimer)
     ts.isStreaming = false
     delete ts.abort
     // 保存当前线程的思考过程快照
@@ -1421,6 +1498,53 @@ defineExpose({
   text-align: center;
   padding-top: 8px;
   .note { font-size: 12px; color: var(--gray-400); }
+}
+
+/* 运行状态内联条 */
+.running-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--main-50);
+  border: 1px solid var(--main-100);
+  font-size: 13px;
+  color: var(--main-700);
+  box-shadow: 0 1px 4px var(--shadow-1);
+
+  .rs-spin { flex-shrink: 0; color: var(--main-600); animation: rs-rotate 1s linear infinite; }
+  .rs-phase {
+    flex-shrink: 0;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--main-100);
+    color: var(--main-700);
+    &.phase-tool { background: var(--color-info-50); color: var(--color-info-700); }
+  }
+  .rs-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--gray-700);
+  }
+  .rs-time { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--gray-500); }
+}
+
+@keyframes rs-rotate { to { transform: rotate(360deg); } }
+
+.rs-fade-enter-active, .rs-fade-leave-active { transition: opacity 0.25s ease, transform 0.25s ease; }
+.rs-fade-enter-from, .rs-fade-leave-to { opacity: 0; transform: translateY(4px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .running-status .rs-spin { animation: none; }
+  .rs-fade-enter-active, .rs-fade-leave-active { transition: none; }
 }
 
 .chat-loading {

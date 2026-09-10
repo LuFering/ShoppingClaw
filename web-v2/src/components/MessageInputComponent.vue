@@ -1,10 +1,26 @@
 <template>
-  <div class="input-box" :class="customClasses" @click="focusInput">
+  <div class="input-box" :class="[customClasses, { 'drag-over': dragOver }]" @click="focusInput" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
     <div class="top-slot">
+      <div v-if="attachments.length" class="attachment-chips">
+        <div
+          v-for="att in attachments"
+          :key="att.id"
+          class="attachment-chip"
+          :class="{ 'is-image': att.isImage }"
+        >
+          <img v-if="att.isImage" :src="att.preview" class="chip-thumb" alt="" />
+          <FileTextOutlined v-else class="chip-ico" />
+          <span class="chip-name">{{ att.name }}</span>
+          <span class="chip-size">{{ att.sizeLabel }}</span>
+          <button class="chip-remove" type="button" @click="removeAttachment(att.id)" aria-label="移除附件">
+            <CloseOutlined class="chip-remove-ico" />
+          </button>
+        </div>
+      </div>
       <slot name="top"></slot>
     </div>
 
-    <div class="expand-options" v-if="hasOptionsLeft || hasActionsLeft">
+    <div class="expand-options" v-if="hasOptionsLeft || hasActionsLeft || supportsFileUpload">
       <a-popover v-if="hasOptionsLeft"
         v-model:open="optionsExpanded"
         placement="bottomLeft"
@@ -23,7 +39,25 @@
         </a-button>
       </a-popover>
       <slot name="actions-left"></slot>
+      <button
+        v-if="supportsFileUpload"
+        class="attach-btn"
+        type="button"
+        @click="fileInputRef?.click()"
+        title="添加附件（也可将文件拖拽到此处）"
+      >
+        <PaperClipOutlined />
+      </button>
     </div>
+
+    <input
+      ref="fileInputRef"
+      type="file"
+      multiple
+      :accept="fileAccept"
+      class="hidden-file-input"
+      @change="onFilePicked"
+    />
 
     <textarea
       ref="inputRef"
@@ -131,7 +165,10 @@ import {
   ArrowUpOutlined,
   LoadingOutlined,
   PauseOutlined,
-  PlusOutlined
+  PlusOutlined,
+  PaperClipOutlined,
+  FileTextOutlined,
+  CloseOutlined
 } from '@ant-design/icons-vue'
 
 // 点击外部关闭下拉框
@@ -183,10 +220,18 @@ const props = defineProps({
   mention: {
     type: Object,
     default: () => null
+  },
+  supportsFileUpload: {
+    type: Boolean,
+    default: false
+  },
+  fileAccept: {
+    type: String,
+    default: ''
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'send', 'keydown'])
+const emit = defineEmits(['update:modelValue', 'send', 'keydown', 'update:attachments'])
 const slots = useSlots()
 
 // @ 提及功能是否启用
@@ -537,6 +582,70 @@ const handleSendOrStop = () => {
   emit('send')
 }
 
+// 拖拽上传 + 附件预览
+const fileInputRef = ref(null)
+const attachments = ref([])
+const dragOver = ref(false)
+let attSeq = 0
+
+const formatSize = (bytes) => {
+  if (bytes == null) return ''
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+const addFiles = (fileList) => {
+  const files = Array.from(fileList || [])
+  for (const f of files) {
+    const isImage = /^image\//.test(f.type || '')
+    attachments.value.push({
+      id: ++attSeq,
+      name: f.name,
+      size: f.size,
+      sizeLabel: formatSize(f.size),
+      type: f.type,
+      isImage,
+      file: f,
+      preview: isImage ? URL.createObjectURL(f) : ''
+    })
+  }
+  if (files.length) emit('update:attachments', attachments.value)
+}
+
+const onFilePicked = (e) => {
+  addFiles(e.target.files)
+  e.target.value = ''
+}
+
+const onDrop = (e) => {
+  dragOver.value = false
+  addFiles(e.dataTransfer && e.dataTransfer.files)
+}
+
+const onDragOver = () => { dragOver.value = true }
+
+const onDragLeave = (e) => {
+  if (!e.currentTarget.contains(e.relatedTarget)) dragOver.value = false
+}
+
+const removeAttachment = (id) => {
+  const idx = attachments.value.findIndex((a) => a.id === id)
+  if (idx >= 0) {
+    const removed = attachments.value[idx]
+    if (removed.preview) URL.revokeObjectURL(removed.preview)
+    attachments.value.splice(idx, 1)
+    emit('update:attachments', attachments.value)
+  }
+}
+
+// 供父组件在发送后清空附件
+const clearAttachments = () => {
+  attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview))
+  attachments.value = []
+  emit('update:attachments', attachments.value)
+}
+
 // @ 提及功能状态
 const mentionPopupVisible = ref(false)
 const mentionQuery = ref('')
@@ -588,6 +697,7 @@ onBeforeUnmount(() => {
     clearTimeout(debounceTimer.value)
   }
   document.removeEventListener('click', closeMentionPopup)
+  attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview))
 })
 
 // 公开方法供父组件调用
@@ -595,7 +705,8 @@ defineExpose({
   focus: () => inputRef.value?.focus(),
   closeOptions: () => {
     optionsExpanded.value = false
-  }
+  },
+  clearAttachments: () => clearAttachments()
 })
 </script>
 
@@ -646,11 +757,17 @@ defineExpose({
     grid-column: 1 / -1;
   }
 
-  // &:focus-within {
-  //   border-color: var(--main-500);
-  //   background: var(--gray-0);
-  //   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-  // }
+  &:focus-within {
+    border-color: var(--main-500);
+    background: var(--gray-0);
+    box-shadow: 0 4px 14px var(--shadow-2);
+  }
+
+  &.drag-over {
+    border-color: var(--main-color);
+    background: var(--main-10);
+    box-shadow: 0 0 0 3px var(--main-50);
+  }
 }
 
 .expand-options {
@@ -763,10 +880,10 @@ defineExpose({
   height: 32px;
   width: 32px;
   cursor: pointer;
-  background-color: var(--main-500);
+  background: linear-gradient(135deg, var(--main-500), var(--main-color));
   border-radius: 50%;
   border: none;
-  transition: all 0.2s ease;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
   box-shadow: 0 2px 6px var(--shadow-2);
   color: var(--gray-0);
   padding: 0;
@@ -775,15 +892,16 @@ defineExpose({
   justify-content: center;
   font-size: 14px;
 
-  &:hover {
-    background-color: var(--main-color);
-    box-shadow: 0 4px 8px var(--shadow-3);
+  &:hover:not(:disabled) {
+    background: linear-gradient(135deg, var(--main-400), var(--main-600));
+    box-shadow: 0 4px 10px var(--shadow-3);
+    transform: translateY(-1px);
     color: var(--gray-0);
   }
 
-  &:active {
+  &:active:not(:disabled) {
     box-shadow: 0 2px 4px var(--shadow-2);
-    // 移除点击动画效果
+    transform: translateY(0);
   }
 
   &:disabled {
@@ -792,6 +910,87 @@ defineExpose({
     transform: none;
     box-shadow: none;
   }
+}
+
+/* 附件按钮 */
+.attach-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--gray-600);
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover {
+    color: var(--main-color);
+    background: var(--main-10);
+  }
+  .anticon { font-size: 16px; }
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+/* 附件预览 chips */
+.attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 0 2px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 5px 6px 5px 8px;
+  border-radius: 8px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  font-size: 12px;
+  color: var(--gray-700);
+
+  .chip-thumb {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+  .chip-ico { color: var(--main-600); flex-shrink: 0; }
+  .chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chip-size { color: var(--gray-400); flex-shrink: 0; }
+  .chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: transparent;
+    color: var(--gray-400);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+    &:hover { color: var(--color-error-500); background: var(--color-error-50); }
+    .anticon { font-size: 10px; }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .send-button.ant-btn-icon-only { transition: none; &:hover { transform: none; } }
 }
 
 @media (max-width: 520px) {

@@ -33,7 +33,7 @@ export const useAgentStore = defineStore('agent', () => {
       await fetchDefaultAgent()
       if (!selectedAgent.value) {
         if (defaultAgent.value) {
-          selectedAgentId.value = defaultAgentId.value
+          selectedAgentId.value = defaultAgent.value.id
         } else if (agents.value.length > 0) {
           selectedAgentId.value = agents.value[0].id
         }

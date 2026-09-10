@@ -1,16 +1,19 @@
 <template>
-  <MessageInputComponent
-    ref="inputRef"
-    :key="inputKey"
-    :model-value="modelValue"
-    @update:modelValue="updateValue"
-    :is-loading="isLoading"
-    :disabled="disabled"
-    :send-button-disabled="sendButtonDisabled"
-    :placeholder="placeholder"
-    @send="handleSend"
-    @keydown="handleKeyDown"
-  >
+    <MessageInputComponent
+      ref="inputRef"
+      :key="inputKey"
+      :model-value="modelValue"
+      @update:modelValue="updateValue"
+      :is-loading="isLoading"
+      :disabled="disabled"
+      :send-button-disabled="sendButtonDisabled"
+      :placeholder="placeholder"
+      :supports-file-upload="supportsFileUpload"
+      :file-accept="fileAccept"
+      @send="handleSend"
+      @keydown="handleKeyDown"
+      @update:attachments="handleAttachments"
+    >
     <template #actions-left>
       <div class="input-actions-left">
         <!-- State Toggle Button -->
@@ -44,14 +47,17 @@ const props = defineProps({
   placeholder: { type: String, default: '输入问题...' },
   agentId: { type: String, default: '' },
   hasStateContent: { type: Boolean, default: false },
-  isPanelOpen: { type: Boolean, default: false }
+  isPanelOpen: { type: Boolean, default: false },
+  supportsFileUpload: { type: Boolean, default: false },
+  fileAccept: { type: String, default: '' }
 })
 
 const emit = defineEmits([
   'update:modelValue',
   'send',
   'keydown',
-  'toggle-panel'
+  'toggle-panel',
+  'update:attachments'
 ])
 
 const inputRef = ref(null)
@@ -77,6 +83,10 @@ const handleSend = () => {
   emit('send')
 }
 
+const handleAttachments = (atts) => {
+  emit('update:attachments', atts)
+}
+
 const handleKeyDown = (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -88,7 +98,8 @@ const handleKeyDown = (e) => {
 
 defineExpose({
   focus: () => inputRef.value?.focus(),
-  closeOptions: () => inputRef.value?.closeOptions()
+  closeOptions: () => inputRef.value?.closeOptions(),
+  clearAttachments: () => inputRef.value?.clearAttachments()
 })
 </script>
 
