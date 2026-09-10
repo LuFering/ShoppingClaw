@@ -520,15 +520,14 @@ const conversations = computed(() => {
 // 注意：后端 history 里每轮 thinking 已是独立消息（buildDisplayItems 会生成过程组），
 // 此时若再 append 内存快照会重复——只有消息流里没有 thinking 消息（本轮刚流式落库）才 append。
 const conversationViews = computed(() => {
-  const snapshot = savedThinkingStates.value[currentChatId.value] || null
   return conversations.value.map((conv) => {
     const isStream = conv.status === 'streaming'
     const hasThinkingMsgs = (conv.messages || []).some((m) => m && m.type === 'thinking' && m.thinkingProcess)
+    // 已完成轮次不再依赖快照 append：思考过程已在 flush 时落库为 thinking 消息，
+    // 由 buildDisplayItems 内联渲染，避免历史 / 多轮下思考模块被错放到正文框下方
     const append = isStream
       ? { steps: thinkingState.steps, planSteps: thinkingState.planSteps, toolCalls: thinkingState.toolCalls, live: isProcessing.value }
-      : hasThinkingMsgs
-        ? null
-        : snapshot
+      : null
     const items = buildDisplayItems(conv.messages, append)
     let lastMsgItem = -1
     items.forEach((it, i) => { if (it.type === 'message') lastMsgItem = i })
@@ -1013,6 +1012,9 @@ const handleSendOrStop = async () => {
   ts.isStreaming = true
   ts.onGoingConv = createOnGoingConvState()
 
+  // 立即放入占位 AI 消息：让对话区在请求返回前就出现“思考中…”，提供“对话已开始”的即时反馈
+  ts.onGoingConv.messages.push({ type: 'ai', content: '', id: Date.now(), isPlaceholder: true })
+
   // 支持"停止"时真正中断 fetch
   const ac = new AbortController()
   ts.abort = () => ac.abort()
@@ -1021,7 +1023,7 @@ const handleSendOrStop = async () => {
   clearThinkingSteps()
   
   let streamingContent = ''
-  let aiMsgIndex = -1  // 当前正在流式输出的 AI 消息在 messages 数组中的索引
+  let aiMsgIndex = ts.onGoingConv.messages.length - 1  // 占位 AI 消息索引，首个 chunk 到达时替换其内容
 
   try {
     const response = await agentApi.sendAgentMessage(currentAgentId.value, {
@@ -1046,7 +1048,7 @@ const handleSendOrStop = async () => {
     // 创建可变的 context 对象，用于在 handleSSEEvent 和外部之间共享状态
     const streamContext = {
       ts,
-      aiMsgIndex: -1,
+      aiMsgIndex: aiMsgIndex,
       streamingContent: '',
       threadId,
     }
@@ -1101,14 +1103,8 @@ const handleSendOrStop = async () => {
     } else {
       console.error('Stream error:', error)
       handleChatError(error, 'send')
-      // 保存已累积的部分内容
-      if (streamingContent) {
-        threadMessages.value[threadId].push({
-          type: 'ai',
-          content: streamingContent,
-          id: Date.now(),
-        })
-      }
+      // 先把已流式产出的消息（含占位 / 思考过程）落库，再追加错误提示，避免重复与错位
+      flushOngoingConv(threadId, ts, streamingContent)
       threadMessages.value[threadId].push({
         type: 'ai',
         content: '',
@@ -1130,17 +1126,46 @@ const handleSendOrStop = async () => {
 // （验证完成，已删除；如需要可回滚 git 查看）
 
 // 把本轮流式产生的消息落回线程历史（正常结束 / 用户停止共用）
+// 把当前思考状态打包为一条 thinking 消息（用于历史落库，由 buildDisplayItems 内联渲染过程组）
+const buildThinkingProcessMsg = () => {
+  const steps = thinkingState.steps || []
+  const planSteps = thinkingState.planSteps || []
+  const toolCalls = thinkingState.toolCalls || []
+  if (!(steps.length || planSteps.length || toolCalls.length)) return null
+  return {
+    type: 'thinking',
+    thinkingProcess: {
+      steps: [...steps],
+      planSteps: [...planSteps],
+      toolCalls: [...toolCalls],
+      live: false,
+    },
+    id: Date.now() + Math.random(),
+  }
+}
+
+// 把本轮流式产生的消息落回线程历史（正常结束 / 用户停止共用）
 const flushOngoingConv = (threadId, ts, streamingContent) => {
   if (!threadMessages.value[threadId]) threadMessages.value[threadId] = []
-  if (ts.onGoingConv.messages.length) {
-    for (const msg of ts.onGoingConv.messages) {
-      threadMessages.value[threadId].push({
-        ...msg,
-        id: Date.now() + Math.random(),
-      })
+  const target = threadMessages.value[threadId]
+
+  // 本轮思考过程落库为独立 thinking 消息，并插入到首条 AI 答复之前，
+  // 保证“思考过程组”始终位于用户问题与答案之间（修复其出现在正文框下方的 bug）
+  const tp = buildThinkingProcessMsg()
+  const onGoing = ts.onGoingConv.messages
+  const firstAiIdx = onGoing.findIndex((m) => m.type === 'ai')
+
+  if (onGoing.length) {
+    const insertAt = firstAiIdx >= 0 ? firstAiIdx : onGoing.length
+    if (tp) onGoing.splice(insertAt, 0, tp)
+    for (const msg of onGoing) {
+      // 跳过既无内容也无商品卡的空占位消息（异常终止场景），避免空白气泡
+      if (msg.isPlaceholder && !msg.content && !(msg.productCards && msg.productCards.length)) continue
+      target.push({ ...msg, id: Date.now() + Math.random() })
     }
   } else if (streamingContent) {
-    threadMessages.value[threadId].push({
+    if (tp) target.push(tp)
+    target.push({
       type: 'ai',
       content: streamingContent,
       id: Date.now(),
