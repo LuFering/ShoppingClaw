@@ -48,5 +48,13 @@ DEFAULT_CHAT_MODEL_PROVIDERS:dict[str,ChatModelProvider]={
             env="DASHSCOPE_API_KEY",
             models=["tongyi-xiaomi-analysis-flash", "qwen3-max-2026-01-23"],
         ),
+    "SenseNova":ChatModelProvider(
+            name="SenseNova",
+            url="https://www.sensenova.cn/",
+            base_url="https://token.sensenova.cn/v1/chat/completions",
+            default="sensenova-6.8-flash-lite",
+            env="SENSENOVA_API_KEY",
+            models=["sensenova-6.8-flash-lite","deepseek-v4-flash"]
+    )
 }
 
