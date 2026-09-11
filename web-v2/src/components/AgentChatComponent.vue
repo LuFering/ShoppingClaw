@@ -55,84 +55,85 @@
       </div>
 
       <div class="chat-content-container" :class="{ 'has-state-panel': statePanelDocked }">
+        <!-- ═══ 欢迎态层（无会话时显示；归属主页欢迎界面，非对话内容）═══
+             作为容器直接子元素 + absolute 全屏居中，不受侧栏推挤影响 -->
+        <template v-if="!conversations.length">
+          <!-- 品牌区域 -->
+          <div class="welcome-brand">
+            <img
+              src="@/assets/parrot-logo.png"
+              alt="ShoppingClaw Logo"
+              class="brand-logo"
+            />
+            <div class="brand-text">
+              <h2 class="brand-name">ShoppingClaw</h2>
+              <p class="brand-slogan">有虾购，想购就 go</p>
+            </div>
+          </div>
+
+          <!-- 云朵层：上层文本引导 + 下层状态卡片排 -->
+          <div class="fixed-clouds-layer">
+            <div class="text-clouds-wrapper">
+              <div class="text-clouds-column left-column">
+                <div
+                  v-for="cloud in currentTextClouds.slice(0, 3)"
+                  :key="cloud.id"
+                  class="cloud-pill text-cloud"
+                  @click="userInput = cloud.text; messageInputRef?.focus()"
+                >
+                  <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
+                  <div class="action-indicator">
+                    <ChevronRight class="arrow-icon" :size="16" />
+                    <span class="buy-text">一键 go</span>
+                  </div>
+                </div>
+              </div>
+              <div class="text-clouds-column right-column">
+                <div
+                  v-for="cloud in currentTextClouds.slice(3, 6)"
+                  :key="cloud.id + '-r'"
+                  class="cloud-pill text-cloud"
+                  @click="userInput = cloud.text; messageInputRef?.focus()"
+                >
+                  <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
+                  <div class="action-indicator">
+                    <ChevronRight class="arrow-icon" :size="16" />
+                    <span class="buy-text">一键 go</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <TransitionGroup
+              tag="div"
+              name="status"
+              class="icon-clouds-row status-row"
+            >
+              <div
+                v-for="st in visibleStatuses"
+                :key="st.id"
+                class="cloud-pill status-card"
+                :style="{ '--stc': statusTypeMeta[st.type].color }"
+              >
+                <span class="status-ico">
+                  <component :is="statusTypeMeta[st.type].icon" :size="15" />
+                </span>
+                <div class="status-body">
+                  <div class="status-head">
+                    <span class="status-type">{{ statusTypeMeta[st.type].label }}</span>
+                    <span class="status-time num">{{ st.time }}</span>
+                  </div>
+                  <p class="status-main">{{ st.main }}</p>
+                  <p class="status-sub">{{ st.sub }}</p>
+                </div>
+              </div>
+            </TransitionGroup>
+            <p v-if="homeDemo" class="demo-note">监控与决策卡片为演示数据（/api/events/recent 未就绪）</p>
+          </div>
+        </template>
+
         <div class="chat-main" ref="chatMainContainer">
           <div class="chat-box" ref="messagesContainer">
-            <!-- ═══ 欢迎态层（无会话时显示；归属主页欢迎界面，非对话内容）═══ -->
-            <template v-if="!conversations.length">
-              <!-- 品牌区域 -->
-              <div class="welcome-brand">
-                <img
-                  src="@/assets/parrot-logo.png"
-                  alt="ShoppingClaw Logo"
-                  class="brand-logo"
-                />
-                <div class="brand-text">
-                  <h2 class="brand-name">ShoppingClaw</h2>
-                  <p class="brand-slogan">有虾购，想购就 go</p>
-                </div>
-              </div>
-
-              <!-- 云朵层：上层文本引导 + 下层状态卡片排 -->
-              <div class="fixed-clouds-layer">
-                <div class="text-clouds-wrapper">
-                  <div class="text-clouds-column left-column">
-                    <div
-                      v-for="cloud in currentTextClouds.slice(0, 3)"
-                      :key="cloud.id"
-                      class="cloud-pill text-cloud"
-                      @click="userInput = cloud.text; messageInputRef?.focus()"
-                    >
-                      <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
-                      <div class="action-indicator">
-                        <ChevronRight class="arrow-icon" :size="16" />
-                        <span class="buy-text">一键 go</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="text-clouds-column right-column">
-                    <div
-                      v-for="cloud in currentTextClouds.slice(3, 6)"
-                      :key="cloud.id + '-r'"
-                      class="cloud-pill text-cloud"
-                      @click="userInput = cloud.text; messageInputRef?.focus()"
-                    >
-                      <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
-                      <div class="action-indicator">
-                        <ChevronRight class="arrow-icon" :size="16" />
-                        <span class="buy-text">一键 go</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <TransitionGroup
-                  tag="div"
-                  name="status"
-                  class="icon-clouds-row status-row"
-                >
-                  <div
-                    v-for="st in visibleStatuses"
-                    :key="st.id"
-                    class="cloud-pill status-card"
-                    :style="{ '--stc': statusTypeMeta[st.type].color }"
-                  >
-                    <span class="status-ico">
-                      <component :is="statusTypeMeta[st.type].icon" :size="15" />
-                    </span>
-                    <div class="status-body">
-                      <div class="status-head">
-                        <span class="status-type">{{ statusTypeMeta[st.type].label }}</span>
-                        <span class="status-time num">{{ st.time }}</span>
-                      </div>
-                      <p class="status-main">{{ st.main }}</p>
-                      <p class="status-sub">{{ st.sub }}</p>
-                    </div>
-                  </div>
-                </TransitionGroup>
-                <p v-if="homeDemo" class="demo-note">监控与决策卡片为演示数据（/api/events/recent 未就绪）</p>
-              </div>
-            </template>
-
             <div class="conv-box" v-for="(view, ci) in conversationViews" :key="view.conv.key ?? ci">
               <template v-for="(item, ii) in view.items" :key="ci + '-' + ii">
                 <AgentMessageComponent
@@ -171,60 +172,59 @@
             <!-- 底部占位，防止消息被输入框遮挡 -->
             <div class="chat-bottom-spacer"></div>
           </div>
-        </div>
-        <!-- 悬浮底部输入框 -->
-        <div class="bottom" :class="{ 'start-screen': !conversations.length }">
-          <div class="message-input-wrapper">
-            <div v-if="isLoadingMessages" class="chat-loading">
-              <div class="loading-spinner"></div>
-              <span>正在加载消息...</span>
-            </div>
 
-            <div v-if="!conversations.length" class="chat-examples-input">
-              <h1>{{ currentAgentName }}：想买什么，直接说</h1>
-              <p class="chat-examples-sub">描述越随意越好——预算、给谁买、在意什么，它会先检索、再对比、再做风险评审</p>
-            </div>
+          <!-- 悬浮底部输入框（sticky，随 chat-main 宽度居中） -->
+          <div class="bottom" :class="{ 'start-screen': !conversations.length }">
+            <div class="message-input-wrapper">
+              <div v-if="isLoadingMessages" class="chat-loading">
+                <div class="loading-spinner"></div>
+                <span>正在加载消息...</span>
+              </div>
 
+              <div v-if="!conversations.length" class="chat-examples-input">
+                <h1>{{ currentAgentName }}：想买什么，直接说</h1>
+                <p class="chat-examples-sub">描述越随意越好——预算、给谁买、在意什么，它会先检索、再对比、再做风险评审</p>
+              </div>
 
+              <AgentInputArea
+                ref="messageInputRef"
+                v-model="userInput"
+                :is-loading="isProcessing"
+                :disabled="!currentAgent"
+                :send-button-disabled="(!userInput || !currentAgent) && !isProcessing"
+                :placeholder="conversations.length ? '继续追问，比如：和另一款比，哪个更值？' : '例：预算 5000 给爸妈买台洗地机，要静音好打理'"
+                :supports-file-upload="true"
+                @update:attachments="onAttachmentsChange"
+                :agent-id="currentAgentId"
+                :thread-id="currentChatId"
+                :ensure-thread="ensureActiveThread"
+                :has-state-content="false"
+                :is-panel-open="false"
+                @send="handleSendOrStop"
+              >
+                <template #actions-left-extra>
+                  <ModelSelectorComponent
+                    :model-spec="selectedModel"
+                    :disabled="isProcessing"
+                    @select-model="handleSelectModel"
+                  />
+                  <slot name="input-actions-left"></slot>
+                </template>
+              </AgentInputArea>
 
-            <AgentInputArea
-              ref="messageInputRef"
-              v-model="userInput"
-              :is-loading="isProcessing"
-              :disabled="!currentAgent"
-              :send-button-disabled="(!userInput || !currentAgent) && !isProcessing"
-              :placeholder="conversations.length ? '继续追问，比如：和另一款比，哪个更值？' : '例：预算 5000 给爸妈买台洗地机，要静音好打理'"
-              :supports-file-upload="true"
-              @update:attachments="onAttachmentsChange"
-              :agent-id="currentAgentId"
-              :thread-id="currentChatId"
-              :ensure-thread="ensureActiveThread"
-              :has-state-content="false"
-              :is-panel-open="false"
-              @send="handleSendOrStop"
-            >
-              <template #actions-left-extra>
-                <ModelSelectorComponent
-                  :model-spec="selectedModel"
-                  :disabled="isProcessing"
-                  @select-model="handleSelectModel"
-                />
-                <slot name="input-actions-left"></slot>
-              </template>
-            </AgentInputArea>
-
-            <!-- 示例问题（欢迎态：智能体元数据 examples） -->
-            <div class="example-questions" v-if="!conversations.length && exampleQuestions.length > 0">
-              <div class="example-chips">
-                <div v-for="question in exampleQuestions" :key="question.id"
-                  class="example-chip" @click="handleExampleClick(question.text)">
-                  {{ question.text }}
+              <!-- 示例问题（欢迎态：智能体元数据 examples） -->
+              <div class="example-questions" v-if="!conversations.length && exampleQuestions.length > 0">
+                <div class="example-chips">
+                  <div v-for="question in exampleQuestions" :key="question.id"
+                    class="example-chip" @click="handleExampleClick(question.text)">
+                    {{ question.text }}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div class="bottom-actions" v-if="conversations.length > 0">
-              <p class="note">当前智能体：{{ currentThreadAgentName }}；请注意辨别内容的可靠性</p>
+              <div class="bottom-actions" v-if="conversations.length > 0">
+                <p class="note">当前智能体：{{ currentThreadAgentName }}；请注意辨别内容的可靠性</p>
+              </div>
             </div>
           </div>
         </div>
@@ -1534,6 +1534,7 @@ defineExpose({
   overflow: hidden;
   position: relative;
   width: 100%;
+  min-height: 0;
 }
 
 .chat-main {
@@ -1541,15 +1542,20 @@ defineExpose({
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  overflow-x: hidden;
   min-width: 0;
+  position: relative;
 }
 
 .chat-box {
-  flex: 1;
-  padding: 16px 24px;
-  max-width: 800px;
   width: 100%;
+  max-width: 800px;
   margin: 0 auto;
+  flex-grow: 1;
+  padding: 1rem 2rem;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
 }
 
 .chat-bottom-spacer {
