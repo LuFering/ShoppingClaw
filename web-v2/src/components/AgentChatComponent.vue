@@ -133,7 +133,7 @@
         </template>
 
         <div class="chat-main" ref="chatMainContainer">
-          <div class="chat-box" ref="messagesContainer">
+          <div class="chat-box" :class="{ 'start-screen': !conversations.length }" ref="messagesContainer">
             <div class="conv-box" v-for="(view, ci) in conversationViews" :key="view.conv.key ?? ci">
               <template v-for="(item, ii) in view.items" :key="ci + '-' + ii">
                 <AgentMessageComponent
@@ -1556,6 +1556,12 @@ defineExpose({
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+
+  /* 欢迎态下 chat-box 为空，且与欢迎层同层，
+     关闭其点击捕获以确保云朵卡片可交互 */
+  &.start-screen {
+    pointer-events: none;
+  }
 }
 
 .chat-bottom-spacer {
@@ -1735,6 +1741,9 @@ defineExpose({
   gap: 20px;
   pointer-events: none;
   user-select: none;
+  /* 欢迎层是容器直接子元素且位于 .chat-main 之前，
+     必须提升层级才能浮在 .chat-main/.chat-box 之上并接收点击 */
+  z-index: 6;
 }
 
 .brand-logo {
@@ -1780,6 +1789,7 @@ defineExpose({
   align-items: center;
   gap: 30px;
   pointer-events: none;
+  z-index: 6; /* 同 .welcome-brand：浮在 .chat-main 之上 */
 }
 
 .text-clouds-wrapper {
@@ -1944,6 +1954,12 @@ defineExpose({
   border-radius: 18px;
   text-align: left;
   cursor: default;
+  /* 只读卡片：仅阴影/边框轻微反馈，不做位移与变色 */
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+  &:hover {
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+    border-color: var(--gray-200);
+  }
 }
 
 .status-ico {
