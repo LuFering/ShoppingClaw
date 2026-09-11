@@ -104,8 +104,15 @@ const displayEntries = computed(() =>
 const hasReasoning = computed(() =>
   displayEntries.value.some((entry) => entry.type === 'reasoning')
 )
-const shouldCollapseToolCalls = computed(() => displayEntries.value.length > 0)
-const areToolCallsExpanded = ref(false)
+// 只有在「工具过多」或「包含推理文本」时才需要折叠成一行 summary，
+// 否则应保持逐行平铺（对标 Yuxi：summary 标题行 + 逐条明细同时可见）。
+// 旧实现是 `length > 0`，等于只要有工具就整体收成一条卡片，
+// 视觉上变成一个个重型折叠块，和「正文/工具交错」的轻量时间线相悖。
+const COLLAPSE_THRESHOLD = 5
+const shouldCollapseToolCalls = computed(
+  () => hasReasoning.value || displayEntries.value.length > COLLAPSE_THRESHOLD
+)
+const areToolCallsExpanded = ref(true)
 
 watch(
   [() => normalizedToolCalls.value.length, () => props.isActive],

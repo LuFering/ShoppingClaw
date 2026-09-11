@@ -604,17 +604,30 @@ const conversations = computed(() => {
 
 // 每个会话的展示项：消息 + 内联过程组（Yuxi 式）。
 // live 过程组只属于正在流式的那轮；已完成轮次的快照插在最后一条用户消息之后。
-// 注意：后端 history 里每轮 thinking 已是独立消息（buildDisplayItems 会生成过程组），
-// 此时若再 append 内存快照会重复——只有消息流里没有 thinking 消息（本轮刚流式落库）才 append。
+//
+// ⚠️ 重复渲染陷阱（已修）：
+// 流式过程中，工具调用会被「双写」——既写进 onGoingConv.messages 里的分段组
+// （内联渲染，实现正文/工具交错），又同步进 thinkingState 全局池。
+// 若此时再把整个全局池当作 processAppend 追加为末尾 live 组，
+// 同一批工具就会在页面上出现两次（表现为「已调用 2 个工具」「已调用 3 个工具」
+// 多条并列且互相重叠）。
+// 因此：只有在消息流里「还没有」分段组承载这些工具时，才允许 append 兜底。
 const conversationViews = computed(() => {
   return conversations.value.map((conv) => {
     const isStream = conv.status === 'streaming'
-    const hasThinkingMsgs = (conv.messages || []).some((m) => m && m.type === 'thinking' && m.thinkingProcess)
-    // 已完成轮次不再依赖快照 append：思考过程已在 flush 时落库为 thinking 消息，
-    // 由 buildDisplayItems 内联渲染，避免历史 / 多轮下思考模块被错放到正文框下方
-    const append = isStream
-      ? { steps: thinkingState.steps, planSteps: thinkingState.planSteps, toolCalls: thinkingState.toolCalls, live: isProcessing.value }
-      : null
+    const hasThinkingMsgs = (conv.messages || []).some(
+      (m) => m && m.type === 'thinking' && m.thinkingProcess
+    )
+    // 消息流里已有分段组 -> 工具已内联，禁止再 append，否则重复
+    const append =
+      isStream && !hasThinkingMsgs
+        ? {
+            steps: thinkingState.steps,
+            planSteps: thinkingState.planSteps,
+            toolCalls: thinkingState.toolCalls,
+            live: isProcessing.value
+          }
+        : null
     const items = getConversationDisplayItems(conv, {
       processAppend: append || undefined
     })
@@ -1025,14 +1038,17 @@ const handleSSEEvent = (eventType, data, context) => {
       // 流式文本块
       if (data.content) {
         let idx = aiMsgIndex
-        let content = streamingContent
-        content += data.content
-        // Yuxi 式 flush：正文开始输出时，若上一段是工具组则封口，正文另起新段
+        // Yuxi 式 flush：正文开始输出时，若上一段是工具组则封口，正文另起新段。
+        // ⚠️ 开新段时必须把累积文本清零：否则新段的 content 会变成
+        // 「上一段全文 + 本段」，表现为页面上连续出现内容相同的正文块。
         const lastSeg = ts.onGoingConv.messages[ts.onGoingConv.messages.length - 1]
+        let content = streamingContent
         if (lastSeg && lastSeg.type === 'thinking') {
           lastSeg.live = false
           idx = -1
+          content = ''
         }
+        content += data.content
         if (idx < 0) {
           idx = ts.onGoingConv.messages.length
           ts.onGoingConv.messages.push({
