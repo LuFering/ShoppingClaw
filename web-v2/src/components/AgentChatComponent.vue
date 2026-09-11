@@ -54,7 +54,7 @@
         </div>
       </div>
 
-      <div class="chat-content-container">
+      <div class="chat-content-container" :class="{ 'has-state-panel': statePanelDocked }">
         <div class="chat-main" ref="chatMainContainer">
           <div class="chat-box" ref="messagesContainer">
             <!-- ═══ 欢迎态层（无会话时显示；归属主页欢迎界面，非对话内容）═══ -->
@@ -228,22 +228,24 @@
             </div>
           </div>
         </div>
+
+        <!-- 右侧状态面板（Yuxi 式：与 chat-main 并排；无内容时不渲染空面板） -->
+        <StatePanel
+          v-if="conversations.length > 0 || thinkingState.steps.length > 0 || productIndex.length"
+          :open="statePanelOpen"
+          :mode="statePanelMode"
+          :docked="statePanelDocked"
+          :dock-width="statePanelDockWidth"
+          :statistics="lastStatistics"
+          :plan-steps="thinkingState.planSteps || []"
+          :products="productIndex"
+          :subagents="subagentCalls"
+          @close="statePanelOpen = false"
+          @toggle-mode="statePanelMode = statePanelMode === 'dock' ? 'float' : 'dock'"
+          @refresh="handleAgentStateRefresh"
+        />
       </div>
     </div>
-
-    <!-- 右侧状态面板（Yuxi 式：无内容时不渲染空面板；float 时悬浮于聊天区右缘） -->
-    <StatePanel
-      v-if="conversations.length > 0 || thinkingState.steps.length > 0 || productIndex.length"
-      :open="statePanelOpen"
-      :mode="statePanelMode"
-      :statistics="lastStatistics"
-      :plan-steps="thinkingState.planSteps || []"
-      :products="productIndex"
-      :subagents="subagentCalls"
-      @close="statePanelOpen = false"
-      @toggle-mode="statePanelMode = statePanelMode === 'dock' ? 'float' : 'dock'"
-      @refresh="handleAgentStateRefresh"
-    />
   </div>
 </template>
 
@@ -415,6 +417,28 @@ const savedThinkingStates = ref({})
 const statePanelOpen = ref(window.innerWidth >= 1280)
 const statePanelMode = ref('dock')
 const lastStatistics = ref(null)
+
+// 停靠态：open + dock 模式 + 容器足够宽（对标 Yuxi statePanelCanDock）
+const statePanelDockWidth = 340
+const statePanelDockMinChatWidth = 800
+const chatContainerWidth = ref(window.innerWidth)
+const statePanelDocked = computed(
+  () =>
+    statePanelOpen.value &&
+    statePanelMode.value === 'dock' &&
+    chatContainerWidth.value - statePanelDockWidth > statePanelDockMinChatWidth
+)
+
+const updateChatContainerWidth = () => {
+  const el = document.querySelector('.chat-content-container')
+  chatContainerWidth.value = el ? el.clientWidth : window.innerWidth
+}
+onMounted(() => {
+  updateChatContainerWidth()
+  window.addEventListener('resize', updateChatContainerWidth)
+})
+onUnmounted(() => window.removeEventListener('resize', updateChatContainerWidth))
+watch(statePanelOpen, (v) => { if (v) nextTick(updateChatContainerWidth) })
 
 const threads = ref([])
 const threadMessages = ref({})
@@ -1506,16 +1530,18 @@ defineExpose({
 .chat-content-container {
   flex: 1;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   overflow: hidden;
   position: relative;
+  width: 100%;
 }
 
 .chat-main {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  min-width: 0;
 }
 
 .chat-box {
@@ -1596,16 +1622,15 @@ defineExpose({
 }
 
 .bottom {
-  position: absolute;
+  position: sticky;
   bottom: 0;
-  left: 0;
-  right: 0;
   padding: 16px 24px 24px;
   max-width: 800px;
   width: 100%;
   margin: 0 auto;
   background: linear-gradient(to top, var(--gray-0) 80%, transparent);
   pointer-events: none;
+  z-index: 10;
 
   .message-input-wrapper {
     pointer-events: auto;
