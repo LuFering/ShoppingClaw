@@ -2,7 +2,8 @@
   <BaseToolCall :tool-call="toolCall">
     <template #header>
       <div class="sep-header">
-        <span class="subagent">{{ subagentType }}</span>
+        <span class="subagent">{{ subagentDisplayName }}</span>
+        <span v-if="runStatusLabel" class="run-status" :class="runStatusClass">{{ runStatusLabel }}</span>
         <span class="separator" v-if="shortDescription">|</span>
         <span class="description" v-if="shortDescription">{{ shortDescription }}</span>
       </div>
@@ -31,6 +32,7 @@ import BaseToolCall from '../BaseToolCall.vue'
 import { MdPreview } from 'md-editor-v3'
 import 'md-editor-v3/lib/preview.css'
 import { useThemeStore } from '@/stores/theme'
+import { parseToolCallArgs, getToolCallDisplayStatus, getToolName } from '../toolRegistry'
 
 const props = defineProps({
   toolCall: {
@@ -42,19 +44,39 @@ const props = defineProps({
 const themeStore = useThemeStore()
 const theme = computed(() => (themeStore.isDark ? 'dark' : 'light'))
 
-const parsedArgs = computed(() => {
-  const args = props.toolCall.args || props.toolCall.function?.arguments
-  if (!args) return {}
-  if (typeof args === 'object') return args
-  try {
-    return JSON.parse(args)
-  } catch (e) {
-    return {}
-  }
+const parsedArgs = computed(() => parseToolCallArgs(props.toolCall))
+
+// 子智能体展示名：优先运行记录名 > display_label > 参数中的 subagent_type > 工具名映射
+const subagentRun = computed(() => props.toolCall.subagent_run || null)
+const subagentDisplayName = computed(() => {
+  return (
+    subagentRun.value?.subagent_name ||
+    props.toolCall.display_label ||
+    parsedArgs.value.subagent_type ||
+    parsedArgs.value.subagent ||
+    getToolName('task') ||
+    '子智能体'
+  )
 })
 
-const subagentType = computed(() => parsedArgs.value.subagent_type || 'Unknown Agent')
-const description = computed(() => parsedArgs.value.description || '')
+const description = computed(
+  () => parsedArgs.value.description || subagentRun.value?.description || ''
+)
+
+// 运行状态（对标 Yuxi）：failed → error
+const rawStatus = computed(() => getToolCallDisplayStatus(props.toolCall))
+const runStatus = computed(() => (rawStatus.value === 'error' ? 'failed' : rawStatus.value))
+const runStatusLabel = computed(() => {
+  if (runStatus.value === 'completed') return '已完成'
+  if (runStatus.value === 'failed') return '失败'
+  if (runStatus.value === 'running') return '运行中'
+  return ''
+})
+const runStatusClass = computed(() => ({
+  'is-running': runStatus.value === 'running',
+  'is-completed': runStatus.value === 'completed',
+  'is-failed': runStatus.value === 'failed'
+}))
 
 const shortDescription = computed(() => {
   const desc = description.value
@@ -77,6 +99,17 @@ const shortDescription = computed(() => {
     color: var(--main-700);
     white-space: nowrap;
     flex-shrink: 0;
+  }
+
+  .run-status {
+    flex-shrink: 0;
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+    &.is-running { background: var(--main-50); color: var(--main-700); }
+    &.is-completed { background: var(--color-success-50, var(--gray-100)); color: var(--color-success-500, var(--gray-600)); }
+    &.is-failed { background: var(--color-error-50); color: var(--color-error-500); }
   }
 }
 

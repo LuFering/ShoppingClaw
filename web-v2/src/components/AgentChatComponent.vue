@@ -39,16 +39,16 @@
           </div>
         </div>
         <div class="header__right">
-          <!-- 运行状态栏开关 -->
+          <!-- 状态入口（对标 Yuxi state-entry-btn）：有会话/过程内容时才可用 -->
           <div
-            v-if="conversations.length > 0 || thinkingState.steps.length > 0"
+            v-if="conversations.length > 0 || thinkingState.steps.length > 0 || productIndex.length"
             type="button"
             class="agent-nav-btn"
             :class="{ active: statePanelOpen }"
             @click="statePanelOpen = !statePanelOpen"
           >
-            <Activity class="nav-btn-icon" size="18" />
-            <span class="text">运行状态</span>
+            <ListCollapse class="nav-btn-icon" size="16" />
+            <span class="text">状态</span>
           </div>
           <slot name="header-right"></slot>
         </div>
@@ -57,80 +57,82 @@
       <div class="chat-content-container">
         <div class="chat-main" ref="chatMainContainer">
           <div class="chat-box" ref="messagesContainer">
-            <!-- 欢迎页品牌区域 (空状态显示) -->
-            <div v-if="!conversations.length" class="welcome-brand">
-              <img 
-                src="@/assets/parrot-logo.png" 
-                alt="ShoppingClaw Logo" 
-                class="brand-logo" 
-              />
-              <div class="brand-text">
-                <h2 class="brand-name">ShoppingClaw</h2>
-                <p class="brand-slogan">有虾购，想购就 go</p>
-              </div>
-            </div>
-
-            <!-- 固定云朵层 (空状态显示) -->
-            <div v-if="!conversations.length" class="fixed-clouds-layer">
-              <!-- 上层：左右两栏竖向排列的文本引导云朵 -->
-              <div class="text-clouds-wrapper">
-                <div class="text-clouds-column left-column">
-                  <div 
-                    v-for="cloud in currentTextClouds.slice(0, 3)" 
-                    :key="cloud.id"
-                    class="cloud-pill text-cloud"
-                    @click="userInput = cloud.text; messageInputRef?.focus()"
-                  >
-                    <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
-                    <div class="action-indicator">
-                      <ChevronRight class="arrow-icon" :size="16" />
-                      <span class="buy-text">一键 go</span>
-                    </div>
-                  </div>
-                </div>
-                <div class="text-clouds-column right-column">
-                  <div 
-                    v-for="cloud in currentTextClouds.slice(3, 6)" 
-                    :key="cloud.id + '-r'"
-                    class="cloud-pill text-cloud"
-                    @click="userInput = cloud.text; messageInputRef?.focus()"
-                  >
-                    <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
-                    <div class="action-indicator">
-                      <ChevronRight class="arrow-icon" :size="16" />
-                      <span class="buy-text">一键 go</span>
-                    </div>
-                  </div>
+            <!-- ═══ 欢迎态层（无会话时显示；归属主页欢迎界面，非对话内容）═══ -->
+            <template v-if="!conversations.length">
+              <!-- 品牌区域 -->
+              <div class="welcome-brand">
+                <img
+                  src="@/assets/parrot-logo.png"
+                  alt="ShoppingClaw Logo"
+                  class="brand-logo"
+                />
+                <div class="brand-text">
+                  <h2 class="brand-name">ShoppingClaw</h2>
+                  <p class="brand-slogan">有虾购，想购就 go</p>
                 </div>
               </div>
 
-              <!-- 下层：状态卡片排（滚动队列：队头淡出、队尾滑入，始终一排 4 张） -->
-              <TransitionGroup
-                tag="div"
-                name="status"
-                class="icon-clouds-row status-row"
-              >
-                <div
-                  v-for="st in visibleStatuses"
-                  :key="st.id"
-                  class="cloud-pill status-card"
-                  :style="{ '--stc': statusTypeMeta[st.type].color }"
+              <!-- 云朵层：上层文本引导 + 下层状态卡片排 -->
+              <div class="fixed-clouds-layer">
+                <div class="text-clouds-wrapper">
+                  <div class="text-clouds-column left-column">
+                    <div
+                      v-for="cloud in currentTextClouds.slice(0, 3)"
+                      :key="cloud.id"
+                      class="cloud-pill text-cloud"
+                      @click="userInput = cloud.text; messageInputRef?.focus()"
+                    >
+                      <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
+                      <div class="action-indicator">
+                        <ChevronRight class="arrow-icon" :size="16" />
+                        <span class="buy-text">一键 go</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="text-clouds-column right-column">
+                    <div
+                      v-for="cloud in currentTextClouds.slice(3, 6)"
+                      :key="cloud.id + '-r'"
+                      class="cloud-pill text-cloud"
+                      @click="userInput = cloud.text; messageInputRef?.focus()"
+                    >
+                      <span class="text-content" :class="{ 'fading': cloud.isFading }">{{ cloud.text }}</span>
+                      <div class="action-indicator">
+                        <ChevronRight class="arrow-icon" :size="16" />
+                        <span class="buy-text">一键 go</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <TransitionGroup
+                  tag="div"
+                  name="status"
+                  class="icon-clouds-row status-row"
                 >
-                  <span class="status-ico">
-                    <component :is="statusTypeMeta[st.type].icon" :size="15" />
-                  </span>
-                  <div class="status-body">
-                    <div class="status-head">
-                      <span class="status-type">{{ statusTypeMeta[st.type].label }}</span>
-                      <span class="status-time num">{{ st.time }}</span>
+                  <div
+                    v-for="st in visibleStatuses"
+                    :key="st.id"
+                    class="cloud-pill status-card"
+                    :style="{ '--stc': statusTypeMeta[st.type].color }"
+                  >
+                    <span class="status-ico">
+                      <component :is="statusTypeMeta[st.type].icon" :size="15" />
+                    </span>
+                    <div class="status-body">
+                      <div class="status-head">
+                        <span class="status-type">{{ statusTypeMeta[st.type].label }}</span>
+                        <span class="status-time num">{{ st.time }}</span>
+                      </div>
+                      <p class="status-main">{{ st.main }}</p>
+                      <p class="status-sub">{{ st.sub }}</p>
                     </div>
-                    <p class="status-main">{{ st.main }}</p>
-                    <p class="status-sub">{{ st.sub }}</p>
                   </div>
-                </div>
-              </TransitionGroup>
-              <p v-if="homeDemo" class="demo-note">监控与决策卡片为演示数据（/api/events/recent 未就绪）</p>
-            </div>
+                </TransitionGroup>
+                <p v-if="homeDemo" class="demo-note">监控与决策卡片为演示数据（/api/events/recent 未就绪）</p>
+              </div>
+            </template>
+
             <div class="conv-box" v-for="(view, ci) in conversationViews" :key="view.conv.key ?? ci">
               <template v-for="(item, ii) in view.items" :key="ci + '-' + ii">
                 <AgentMessageComponent
@@ -154,6 +156,18 @@
                 />
               </template>
             </div>
+            <!-- 生成中标志：对话进行中显示"正在生成回复" + 三点动画 + 计时（对标 Yuxi generating-status） -->
+            <div class="generating-status" v-if="isReplyLoading && conversations.length > 0">
+              <div class="generating-indicator">
+                <div class="loading-dots">
+                  <div></div>
+                  <div></div>
+                  <div></div>
+                </div>
+                <span class="generating-text">{{ replyLoadingText }}</span>
+                <span v-if="replyElapsedLabel" class="generating-elapsed">{{ replyElapsedLabel }}</span>
+              </div>
+            </div>
             <!-- 底部占位，防止消息被输入框遮挡 -->
             <div class="chat-bottom-spacer"></div>
           </div>
@@ -171,23 +185,7 @@
               <p class="chat-examples-sub">描述越随意越好——预算、给谁买、在意什么，它会先检索、再对比、再做风险评审</p>
             </div>
 
-            <div v-if="showStartAgentSegment" class="agent-segment-wrapper">
-              <a-segmented
-                :value="currentAgentId"
-                :options="agentSegmentOptions"
-                @change="handleStartAgentChange"
-              />
-            </div>
 
-            <!-- 运行状态内联条：流式进行中显示当前动作 + 耗时，结束自动收起 -->
-            <Transition name="rs-fade">
-              <div v-if="runningStatus" class="running-status" role="status" aria-live="polite">
-                <LoaderCircle class="rs-spin" :size="14" />
-                <span class="rs-phase" :class="'phase-' + runningStatus.phase">{{ runningStatus.phaseLabel }}</span>
-                <span class="rs-text">{{ runningStatus.text }}</span>
-                <span class="rs-time mono">{{ elapsedText }}</span>
-              </div>
-            </Transition>
 
             <AgentInputArea
               ref="messageInputRef"
@@ -215,8 +213,7 @@
               </template>
             </AgentInputArea>
 
-
-            <!-- 示例问题 -->
+            <!-- 示例问题（欢迎态：智能体元数据 examples） -->
             <div class="example-questions" v-if="!conversations.length && exampleQuestions.length > 0">
               <div class="example-chips">
                 <div v-for="question in exampleQuestions" :key="question.id"
@@ -233,8 +230,8 @@
         </div>
       </div>
     </div>
-    
-    <!-- 右侧运行状态栏（无会话时不渲染空面板；float 时悬浮于聊天区右缘） -->
+
+    <!-- 右侧状态面板（Yuxi 式：无内容时不渲染空面板；float 时悬浮于聊天区右缘） -->
     <StatePanel
       v-if="conversations.length > 0 || thinkingState.steps.length > 0 || productIndex.length"
       :open="statePanelOpen"
@@ -245,6 +242,7 @@
       :subagents="subagentCalls"
       @close="statePanelOpen = false"
       @toggle-mode="statePanelMode = statePanelMode === 'dock' ? 'float' : 'dock'"
+      @refresh="handleAgentStateRefresh"
     />
   </div>
 </template>
@@ -255,12 +253,11 @@ import AgentInputArea from '@/components/AgentInputArea.vue'
 import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import ChatSidebarComponent from '@/components/ChatSidebarComponent.vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
-import ProcessGroup from '@/components/ProcessGroup.vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import ConversationProcessGroupComponent from '@/components/ConversationProcessGroupComponent.vue'
 import StatePanel from '@/components/StatePanel.vue'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
-import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Brain, TrendingDown, Tag, Package, Heart, Wrench, ShieldAlert, Star, Activity } from 'lucide-vue-next'
+import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Brain, TrendingDown, Tag, Package, Heart, Wrench, ShieldAlert, Star, Activity, ListCollapse } from 'lucide-vue-next'
 import { handleChatError } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
 import { useAgentStore } from '@/stores/agent'
@@ -626,50 +623,77 @@ const subagentCalls = computed(() =>
   (thinkingState.toolCalls || []).filter((t) => /task|subagent/i.test(t.name || t.function || ''))
 )
 
+// 刷新状态：重新拉取 agent_state（后端未就绪时静默降级）
+const handleAgentStateRefresh = async () => {
+  const threadId = currentChatId.value
+  if (!threadId) return
+  try {
+    const agentId = currentThread.value?.agent_id || currentAgentId.value
+    const res = await agentApi.getAgentState?.(agentId, threadId)
+    const ts = getThreadState(threadId)
+    if (ts && res?.agent_state) {
+      ts.agentState = res.agent_state
+      if (Array.isArray(res.agent_state.todos)) applyPlanSteps(res.agent_state.todos)
+    }
+  } catch (e) {
+    // 接口未就绪：忽略，保持现有状态
+  }
+}
+
 const isLoadingMessages = computed(() => chatUIStore.isLoadingMessages)
 const isStreaming = computed(() => currentThreadState.value?.isStreaming || false)
 const isProcessing = computed(() => isStreaming.value)
 
-// 运行状态内联条：流式进行中的当前动作与耗时
-const runningStatus = computed(() => {
-  if (!isProcessing.value) return null
-  const running = (thinkingState.toolCalls || []).find((t) => t.status === 'running' || t.status === 'calling')
-  if (running) {
-    const name = (running.name || running.function || '工具').replace(/_/g, ' ')
-    return { phase: 'tool', phaseLabel: '调用工具', text: name }
-  }
-  const lastThink = [...(thinkingState.steps || [])].reverse().find((s) => s.type === 'thinking' && s.content)
-  if (lastThink) {
-    const c = (lastThink.content || '').trim().replace(/\s+/g, ' ')
-    return { phase: 'think', phaseLabel: '思考', text: c.length > 48 ? c.slice(0, 48) + '…' : c }
-  }
-  return { phase: 'idle', phaseLabel: '思考', text: '正在规划下一步…' }
+// ═══ 生成中标志（对标 Yuxi generating-status）═══
+// isReplyLoading：本轮回复是否处于"等待/生成中"。占位 AI 消息存在且尚无正文即是。
+const isReplyLoading = computed(() => {
+  if (!isProcessing.value) return false
+  const msgs = onGoingConvMessages.value
+  if (!msgs.length) return true
+  const hasText = msgs.some((m) => m && m.type === 'ai' && (m.content || '').trim())
+  const hasTool = (thinkingState.toolCalls || []).length > 0
+  return !hasText && !hasTool
 })
-
-const elapsed = ref(0)
-let elapsedTimer = null
+const replyLoadingText = computed(() => '正在生成回复...')
+const replyElapsedSeconds = ref(0)
+let replyElapsedTimer = null
+let replyStartedAt = null
+const replyElapsedLabel = computed(() => {
+  const seconds = replyElapsedSeconds.value
+  if (!seconds) return ''
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}分${seconds % 60}s`
+})
+const updateReplyElapsedSeconds = () => {
+  if (!replyStartedAt) return
+  replyElapsedSeconds.value = Math.floor((Date.now() - replyStartedAt) / 1000)
+}
+const startReplyElapsedTimer = ({ reset = false } = {}) => {
+  stopReplyElapsedTimer()
+  if (reset || !replyStartedAt) replyStartedAt = Date.now()
+  updateReplyElapsedSeconds()
+  replyElapsedTimer = window.setInterval(updateReplyElapsedSeconds, 1000)
+}
+const stopReplyElapsedTimer = ({ reset = false } = {}) => {
+  if (replyElapsedTimer) {
+    window.clearInterval(replyElapsedTimer)
+    replyElapsedTimer = null
+  }
+  if (reset) {
+    replyStartedAt = null
+    replyElapsedSeconds.value = 0
+  }
+}
 watch(
-  isProcessing,
-  (v) => {
-    if (v) {
-      elapsed.value = 0
-      if (elapsedTimer) clearInterval(elapsedTimer)
-      elapsedTimer = setInterval(() => { elapsed.value++ }, 1000)
-    } else if (elapsedTimer) {
-      clearInterval(elapsedTimer)
-      elapsedTimer = null
-    }
+  isReplyLoading,
+  (loading) => {
+    if (loading) startReplyElapsedTimer({ reset: true })
+    else stopReplyElapsedTimer({ reset: true })
   },
   { immediate: true }
 )
-
-const elapsedText = computed(() => {
-  const s = elapsed.value
-  const m = Math.floor(s / 60)
-  return m ? `${m}:${String(s % 60).padStart(2, '0')}` : `${s}s`
-})
-
-onUnmounted(() => { if (elapsedTimer) clearInterval(elapsedTimer) })
+onUnmounted(() => stopReplyElapsedTimer())
 
 // 待发送附件（拖拽/选择上传的本地预览），发送后清空
 const pendingAttachments = ref([])
@@ -1514,27 +1538,61 @@ defineExpose({
 }
 
 .generating-status {
-  padding: 12px 0;
+  display: flex;
+  justify-content: flex-start;
+  padding: 1rem 0;
+  animation: fadeInUp 0.4s ease-out;
+  transition: all 0.2s;
+
   .generating-indicator {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--gray-500);
-    font-size: 14px;
+
+    .generating-text {
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: 0.025em;
+      color: var(--gray-600);
+      animation: textBreath 1.8s ease-in-out infinite;
+    }
+
+    .generating-elapsed {
+      color: var(--gray-400);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.5;
+      white-space: nowrap;
+    }
   }
+
   .loading-dots {
-    display: flex;
-    gap: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+
     div {
       width: 6px;
       height: 6px;
+      background: linear-gradient(135deg, var(--main-color), var(--main-700));
       border-radius: 50%;
-      background: var(--gray-400);
       animation: dotPulse 1.4s infinite ease-in-out both;
-      &:nth-child(2) { animation-delay: 0.16s; }
-      &:nth-child(3) { animation-delay: 0.32s; }
+      &:nth-child(1) { animation-delay: -0.32s; }
+      &:nth-child(2) { animation-delay: -0.16s; }
+      &:nth-child(3) { animation-delay: 0s; }
     }
   }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes textBreath {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
 }
 
 .bottom {
@@ -1603,53 +1661,6 @@ defineExpose({
   text-align: center;
   padding-top: 8px;
   .note { font-size: 12px; color: var(--gray-400); }
-}
-
-/* 运行状态内联条 */
-.running-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  max-width: 760px;
-  margin: 0 auto 8px;
-  padding: 7px 14px;
-  border-radius: 999px;
-  background: var(--main-50);
-  border: 1px solid var(--main-100);
-  font-size: 13px;
-  color: var(--main-700);
-  box-shadow: 0 1px 4px var(--shadow-1);
-
-  .rs-spin { flex-shrink: 0; color: var(--main-600); animation: rs-rotate 1s linear infinite; }
-  .rs-phase {
-    flex-shrink: 0;
-    font-weight: 600;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--main-100);
-    color: var(--main-700);
-    &.phase-tool { background: var(--color-info-50); color: var(--color-info-700); }
-  }
-  .rs-text {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--gray-700);
-  }
-  .rs-time { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--gray-500); }
-}
-
-@keyframes rs-rotate { to { transform: rotate(360deg); } }
-
-.rs-fade-enter-active, .rs-fade-leave-active { transition: opacity 0.25s ease, transform 0.25s ease; }
-.rs-fade-enter-from, .rs-fade-leave-to { opacity: 0; transform: translateY(4px); }
-
-@media (prefers-reduced-motion: reduce) {
-  .running-status .rs-spin { animation: none; }
-  .rs-fade-enter-active, .rs-fade-leave-active { transition: none; }
 }
 
 .chat-loading {
