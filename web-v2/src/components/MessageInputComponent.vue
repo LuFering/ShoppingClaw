@@ -717,6 +717,11 @@ defineExpose({
   margin: 0 auto;
   border: 1px solid var(--gray-150);
   border-radius: 0.8rem;
+  /* 显式给白色卡片底（对标 Yuxi 输入区为独立白色浮片）：
+     原先默认无背景，白色只靠 .bottom 的纯白遮罩撑起，
+     导致输入区与消息区糊成一片白色矩形。现在遮罩改为渐隐灰，
+     由卡片自身提供白色实底，层次清晰——浅灰画布 / 白色输入卡片。 */
+  background: var(--gray-0);
   box-shadow: 0 2px 8px var(--shadow-1);
   transition: all 0.3s ease;
   gap: 0px;

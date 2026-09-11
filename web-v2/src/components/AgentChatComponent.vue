@@ -573,6 +573,9 @@ const getThreadState = (threadId, autoCreate = true) => {
       isStreaming: false,
       onGoingConv: createOnGoingConvState(),
       agentState: null,
+      // 生成中标志：由流的生命周期驱动（对标 Yuxi threadState.replyLoadingVisible）
+      replyLoadingVisible: false,
+      contextCompressing: false,
     }
   }
   return chatState.threadStates[threadId] || null
@@ -669,16 +672,26 @@ const isStreaming = computed(() => currentThreadState.value?.isStreaming || fals
 const isProcessing = computed(() => isStreaming.value)
 
 // ═══ 生成中标志（对标 Yuxi generating-status）═══
-// isReplyLoading：本轮回复是否处于"等待/生成中"。占位 AI 消息存在且尚无正文即是。
+// 语义对标 Yuxi 的 threadState.replyLoadingVisible：
+// 由「流的生命周期」驱动（init/开始 → finished/error/interrupted 才结束），
+// 而不是由「是否已有正文/工具调用」驱动。
+// 旧实现用 !hasText && !hasTool 判断，导致一出现正文或工具调用就提前隐藏，
+// 无法贯穿整轮生成过程。
 const isReplyLoading = computed(() => {
-  if (!isProcessing.value) return false
-  const msgs = onGoingConvMessages.value
-  if (!msgs.length) return true
-  const hasText = msgs.some((m) => m && m.type === 'ai' && (m.content || '').trim())
-  const hasTool = (thinkingState.toolCalls || []).length > 0
-  return !hasText && !hasTool
+  const ts = currentThreadState.value
+  if (!ts) return false
+  // 以 thread 级标记为准；isStreaming 作为兜底，保证流异常退出也能收尾
+  return Boolean(ts.replyLoadingVisible)
 })
-const replyLoadingText = computed(() => '正在生成回复...')
+
+const replyLoadingText = computed(() => {
+  const ts = currentThreadState.value
+  if (ts?.contextCompressing) return '正在压缩上下文...'
+  return '正在生成回复...'
+})
+
+// 计时按 thread 维度独立维护：同一对话内再次发起生成会重新计时，
+// 不同对话并行时互不干扰（对标 Yuxi 的 per-thread 计时语义）。
 const replyElapsedSeconds = ref(0)
 let replyElapsedTimer = null
 let replyStartedAt = null
@@ -933,7 +946,9 @@ const normalizeProcessStatus = (status) => {
   const value = String(status || 'pending').toLowerCase()
   if (['completed', 'complete', 'done', 'success', 'called'].includes(value)) return 'completed'
   if (['in_progress', 'running', 'active', 'processing', 'calling'].includes(value)) return 'running'
-  if (['failed', 'error', 'cancelled', 'canceled'].includes(value)) return 'failed'
+  // interrupted：流被上游报错 / 用户中止打断，工具未能收到 tool_complete，
+  // 归一为 failed，避免在过程段里一直显示「进行中」。
+  if (['failed', 'error', 'cancelled', 'canceled', 'interrupted', 'aborted'].includes(value)) return 'failed'
   return 'pending'
 }
 
@@ -1226,6 +1241,10 @@ const handleSendOrStop = async () => {
   const ts = getThreadState(threadId)
   ts.isStreaming = true
   ts.onGoingConv = createOnGoingConvState()
+  // 生成中标志：本轮生成的起点（对标 Yuxi 在 init 事件置位）。
+  // 同一 thread 内再次发起会重新置 true 并重置计时，实现"每次生成独立状态"。
+  ts.replyLoadingVisible = true
+  ts.contextCompressing = false
 
   // 立即放入占位 AI 消息：让对话区在请求返回前就出现“思考中…”，提供“对话已开始”的即时反馈
   ts.onGoingConv.messages.push({ type: 'ai', content: '', id: Date.now(), isPlaceholder: true })
@@ -1346,11 +1365,38 @@ const handleSendOrStop = async () => {
   } finally {
     clearTimeout(timeoutTimer)
     ts.isStreaming = false
+    // 生成中标志收尾：放在 finally 保证正常结束 / 报错 / 用户中止
+    // 三种路径都能正确复位，不会残留"正在生成回复..."
+    ts.replyLoadingVisible = false
+    ts.contextCompressing = false
     delete ts.abort
+    // 收尾悬空工具：上游报错 / 流中断时，后端可能只发了 tool_start 而没有
+    // tool_complete（实测子智能体 400 时会这样），此时工具会永久停在
+    // "进行中"，且末段工具组一直保持活跃态、无法自动收起。
+    // 这里统一把仍处于非终态的工具标记为「已中断」，保证 UI 语义收敛。
+    finalizeDanglingToolCalls(ts)
     // 保存当前线程的思考过程快照
     snapshotThinkingState(threadId)
     ts.onGoingConv = createOnGoingConvState()
   }
+}
+
+// 流结束时收敛所有仍未完结的工具调用状态（进行中 → 已中断）。
+// 同时把对应的内存分段组内的工具一并收敛，避免内联渲染残留"进行中"。
+const finalizeDanglingToolCalls = (ts) => {
+  const isDangling = (s) => s !== 'completed' && s !== 'failed'
+  thinkingState.toolCalls.forEach((t) => {
+    if (isDangling(t.status)) t.status = 'interrupted'
+  })
+  // thinkingState 是全局池，本轮结束后会重置；这里只需同步当前组
+  const segs = ts?.onGoingConv?.messages || []
+  segs.forEach((seg) => {
+    if (seg.type !== 'thinking') return
+    seg.live = false
+    ;(seg.thinkingProcess?.toolCalls || []).forEach((t) => {
+      if (isDangling(t.status)) t.status = 'interrupted'
+    })
+  })
 }
 
 // ═══ 临时：注入演示轮次（验证过程组三态；后端接入后删除）═══
@@ -1652,7 +1698,19 @@ defineExpose({
   max-width: 800px;
   width: 100%;
   margin: 0 auto;
-  background: linear-gradient(to top, var(--gray-0) 80%, transparent);
+  /* 遮罩渐隐（对标 Yuxi .bottom 的 linear-gradient 做法）：
+     旧实现是 `linear-gradient(to top, var(--gray-0) 80%, transparent)`，
+     而 SC 的 --gray-0 是纯白 #ffffff，等于在浅灰画布（body 为 #f6f7f5）
+     上盖出一条 80% 高的白色矩形，与透明背景的 AI 正文形成生硬色块。
+     改为渐变到与页面同色系的 --gray-25，并让不透明区从底部平滑过渡，
+     消息滚动到底部时自然淡出，不再出现"白色文本框"。 */
+  background: linear-gradient(
+    to top,
+    var(--gray-25) 0%,
+    var(--gray-25) 62%,
+    color-mix(in srgb, var(--gray-25) 60%, transparent) 82%,
+    transparent 100%
+  );
   pointer-events: none;
   z-index: 10;
 

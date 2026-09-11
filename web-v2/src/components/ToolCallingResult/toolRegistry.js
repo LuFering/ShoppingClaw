@@ -243,7 +243,10 @@ export const parseToolCallResult = (toolCall) => {
 
 const FINAL_STATUSES = ['completed', 'complete', 'done', 'success', 'called']
 const RUNNING_STATUSES = ['in_progress', 'running', 'active', 'processing', 'calling']
-const ERROR_STATUSES = ['failed', 'error', 'cancelled', 'canceled']
+// interrupted：流被上游报错 / 用户中止打断时，工具只发了 tool_start 而没有
+// tool_complete。归入错误态，避免永久停留在「进行中」；
+// 与 Yuxi getToolCallDisplayStatus 把 interrupted 视为 error 的语义一致。
+const ERROR_STATUSES = ['failed', 'error', 'cancelled', 'canceled', 'interrupted', 'aborted']
 
 /** SC 侧状态归一化：兼容 Yuxi 的 success/error 与 SC 的 completed/failed。 */
 export const normalizeStatus = (status) => {

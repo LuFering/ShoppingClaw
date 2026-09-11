@@ -243,14 +243,32 @@ const getErrorMessage = computed(() => {
 <style lang="less">
 .message-md {
   margin: 8px 0;
+  /* 覆盖 md-editor-v3 自带主题底色：
+     previewTheme="github" 会给预览根节点铺纯白 #ffffff，
+     而对话区画布是 --gray-25(#f8f9f8) / body #f6f7f5，
+     于是 AI 正文被裹成一块突兀的白色矩形（白底 + 浅灰画布边界）。
+     这里把 md 相关的根容器统一置为透明，让正文直接落在画布上，
+     与 Yuxi 的「消息气泡透明、只有容器有底色」保持一致。 */
+  background: transparent !important;
+
   .md-editor-preview-wrapper {
     max-width: 100%;
     padding: 0;
+    background: transparent;
     font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', monospace;
     #preview-only-preview {
       font-size: 1rem;
       line-height: 1.75;
       color: var(--gray-1000);
+      background: transparent;
+    }
+    /* md-editor-v3 在不同主题/版本下会渲染 .md-editor-preview / .md-editor
+       等中间层，同样铺白底，这里一并透明化做兜底。 */
+    .md-editor-preview,
+    .md-editor,
+    .md-editor-content,
+    .github-theme {
+      background: transparent !important;
     }
     h1, h2 { font-size: 1.2rem; }
     h3, h4 { font-size: 1.1rem; }

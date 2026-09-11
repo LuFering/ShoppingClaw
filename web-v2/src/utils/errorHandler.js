@@ -18,8 +18,14 @@ export function translateErrorMessage(raw) {
   if (/InvalidApiKey|invalid_api_key|Authentication|Unauthorized|Token expired/i.test(text)) {
     return '模型服务鉴权失败：请检查 API Key 配置'
   }
-  if (/rate.?limit|429|quota|exceeded/i.test(text)) {
-    return '模型服务请求过于频繁或额度不足，请稍后重试'
+  if (/upstream_provider_shared_pool|temporarily rate-limited/i.test(text)) {
+    return '该免费模型当前被上游限流（免费额度为公共共享池），请稍后重试或切换其他模型'
+  }
+  if (/rate.?limit|429/i.test(text)) {
+    return '模型服务请求过于频繁，请稍后重试或切换其他模型'
+  }
+  if (/quota|insufficient.?balance|exceeded/i.test(text)) {
+    return '模型服务额度不足，请充值或切换其他模型'
   }
   if (/model_not_found|model.*not.*found|does not exist/i.test(text)) {
     return '所选模型不可用，请在模型选择器中更换后重试'
