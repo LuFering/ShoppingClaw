@@ -1,6 +1,13 @@
 <template>
   <div class="product-cards-container">
-    <div v-if="cards.length === 0" class="empty-state">
+    <!-- 还没有结果：不渲染空态。
+         runtime.py 的 LifecycleHandler 会为同一次调用再发一份不带结果的完成事件，
+         若这里无条件显示「暂无商品数据」，界面上会凭空多出一块空卡片区。 -->
+    <div v-if="!hasResult" class="pending-state">
+      <span>等待商品数据…</span>
+    </div>
+
+    <div v-else-if="cards.length === 0" class="empty-state">
       <span>暂无商品数据</span>
     </div>
     
@@ -64,6 +71,7 @@
 <script setup>
 import { computed } from 'vue'
 import { ImageIcon, Star, ChevronRight } from 'lucide-vue-next'
+import { parseProductCards } from '@/utils/productCard'
 
 const StarIcon = Star
 const ChevronRightIcon = ChevronRight
@@ -75,19 +83,14 @@ const props = defineProps({
   }
 })
 
-// 解析工具返回的结构化数据
-const cards = computed(() => {
-  const content = props.toolCall.tool_call_result?.content
-  if (!content) return []
-  
-  try {
-    const data = typeof content === 'string' ? JSON.parse(content) : content
-    return data.cards || []
-  } catch (e) {
-    console.error('[ProductCardTool] 解析失败:', e)
-    return []
-  }
+// 工具是否已经返回了内容（用于区分「还没结果」和「有结果但没卡片」）
+const hasResult = computed(() => {
+  const content = props.toolCall?.tool_call_result?.content
+  return content != null && content !== ''
 })
+
+// 解析工具返回的结构化数据（单卡 / 多卡两种格式都兼容，见 utils/productCard.js）
+const cards = computed(() => parseProductCards(props.toolCall?.tool_call_result?.content))
 
 // 平台标签映射
 const platformMap = {
@@ -125,6 +128,15 @@ const formatPrice = (price) => {
   color: var(--text-tertiary, #9ca3af);
   padding: 16px;
   font-size: 13px;
+}
+
+// 结果尚未到达：比空态更弱，避免误读为「查不到商品」
+.pending-state {
+  text-align: center;
+  color: var(--text-tertiary, #9ca3af);
+  padding: 12px;
+  font-size: 12px;
+  opacity: 0.7;
 }
 
 .cards-list {

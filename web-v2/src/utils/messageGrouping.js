@@ -35,6 +35,8 @@ export const toYuxiToolCall = (toolCall) => {
         }
       : {}),
     ...(status === 'error' && rawOutput ? { error_message: String(rawOutput) } : {}),
+    // 后端 tool_error 事件携带的失败原因优先于上面的兜底
+    ...(toolCall.error_message ? { error_message: String(toolCall.error_message) } : {}),
     ...(toolCall.display_label ? { display_label: toolCall.display_label } : {})
   }
 }

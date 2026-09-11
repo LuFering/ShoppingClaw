@@ -262,6 +262,7 @@ import { getConversationDisplayItems, toYuxiToolCall } from '@/utils/messageGrou
 import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Brain, TrendingDown, Tag, Package, Heart, Wrench, ShieldAlert, Star, Activity, ListCollapse } from 'lucide-vue-next'
 import { handleChatError, translateErrorMessage } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
+import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentStore } from '@/stores/agent'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useUserStore } from '@/stores/user'
@@ -535,6 +536,11 @@ const createOnGoingConvState = () => ({
   // 顺序表：记录 messageId 的出现次序（对象键顺序不可靠时的兜底）
   order: [],
   currentRequestKey: null,
+  // 无 message_id 事件（如 SSE 监控中间件下发的工具事件）共用的稳定回落到键。
+  // 必须整个流内保持不变，详见 ensureMsgEntry 注释。
+  fallbackKey: null,
+  // 已渲染过的商品卡片 tool_call_id，用于双通道 tool_complete 去重
+  renderedCardCalls: null,
 })
 
 // ═══ 对标 Yuxi：按 message_id 写入流式消息 ═══
@@ -544,7 +550,13 @@ const createOnGoingConvState = () => ({
 // 后续 getConversationDisplayItems 只需按顺序遍历即可切出交错结构。
 const ensureMsgEntry = (ts, messageId) => {
   const conv = ts.onGoingConv
-  const key = messageId || `local_${conv.order.length}`
+  // ═══ 修复：无 message_id 时必须回落到**同一个稳定键** ═══
+  // 原实现用 `local_${conv.order.length}` 兜底，而 order.length 每插入一条就 +1，
+  // 于是同一个工具的 tool_start 与 tool_complete 会各自新建一个条目：
+  //   start 写进 local_0（状态 calling），complete 写进 local_2（状态 completed），
+  //   local_0 永远停在「正在调用工具」，界面上就会出现同一工具重复多行且一直转圈。
+  // 后端 SSE 监控中间件（sse_monitor.py）下发的事件不带 message_id，必走这条路径。
+  const key = messageId || conv.fallbackKey || (conv.fallbackKey = '__local__')
   if (!conv.msgChunks[key]) {
     conv.msgChunks[key] = {
       id: key,
@@ -566,8 +578,28 @@ const ensureMsgEntry = (ts, messageId) => {
 // 工具调用写入指定消息的 tool_calls（同 tool_call_id 原地更新，不重复追加）
 const upsertToolCallIntoMessage = (ts, messageId, item) => {
   const entry = ensureMsgEntry(ts, messageId)
+  const targetId = item.id || item.toolCallId
+
+  // ═══ 跨条目去重 ═══
+  // 同一个工具调用会被两条通道各下发一次：
+  //   · SSE 监控中间件（sse_monitor.py）的事件**不带 message_id** → 落到 __local__ 条目
+  //   · legacy thinking_process 的事件**带 message_id** → 落到该轮 AI 消息条目
+  // 不跨条目去重的话，同一个工具会被两个条目各渲染一遍，
+  // 界面上就是「搜索商品」重复出现多行（且其中一行可能一直停在调用中）。
+  // 每次写入前先把该 id 从其它条目摘掉，保证任何时刻只有一个条目持有它。
+  if (targetId) {
+    const conv = ts.onGoingConv
+    for (const key of Object.keys(conv.msgChunks)) {
+      if (key === entry.id) continue
+      const other = conv.msgChunks[key]
+      if (!other || !Array.isArray(other.tool_calls) || !other.tool_calls.length) continue
+      const i = other.tool_calls.findIndex((t) => (t.id || t.toolCallId) === targetId)
+      if (i >= 0) other.tool_calls.splice(i, 1)
+    }
+  }
+
   const list = entry.tool_calls
-  const idx = list.findIndex((t) => (t.id || t.toolCallId) === (item.id || item.toolCallId))
+  const idx = list.findIndex((t) => (t.id || t.toolCallId) === targetId)
   if (idx >= 0) {
     list.splice(idx, 1, {
       ...list[idx],
@@ -601,6 +633,19 @@ const getThreadState = (threadId, autoCreate = true) => {
   }
   return chatState.threadStates[threadId] || null
 }
+
+// ═══ 流式平滑播放（对标 Yuxi useStreamSmoother）═══
+// 后端增量是「一阵一阵」到的，直接落 DOM 会卡顿 + 整段蹦出。
+// 这里把正文增量先缓冲，再逐帧按自适应速率播放；工具事件、终态等不经过此层。
+const streamSmoother = useStreamSmoother({
+  getThreadState,
+  writeDelta: (threadId, messageId, text) => {
+    const ts = getThreadState(threadId)
+    if (!ts || !text) return
+    const entry = ensureMsgEntry(ts, messageId)
+    entry.content += text
+  },
+})
 
 const currentThreadState = computed(() => getThreadState(currentChatId.value))
 
@@ -654,8 +699,11 @@ const productIndex = computed(() => {
   for (const m of currentThreadMessages.value) {
     if (Array.isArray(m.productCards)) out.push(...m.productCards)
   }
+  // 修复：流式缓冲区是 msgChunks（对象映射），没有 messages 字段。
+  // 原实现读 ts.onGoingConv.messages 恒为 undefined，导致生成过程中
+  // 状态面板的产物区一直显示「暂无商品数据」，直到落库后才补上。
   const ts = currentThreadState.value
-  for (const m of ts?.onGoingConv?.messages || []) {
+  for (const m of getOngoingMessages(ts?.onGoingConv)) {
     if (Array.isArray(m.productCards)) out.push(...m.productCards)
   }
   return out.slice(0, 8)
@@ -1012,6 +1060,8 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
     duration: toolCall.duration_ms ?? toolCall.duration ?? null,
     icon: toolCall.icon || meta.icon,
     category: meta.category,
+    // 失败原因（tool_error 事件下发），供工具行与展开区展示
+    error_message: toolCall.error_message ?? null,
     toolCallId,
     // 归属的 AI 消息 id（后端下发）：决定该工具挂到哪条消息下
     messageId: toolCall.message_id || null,
@@ -1047,9 +1097,14 @@ const handleSSEEvent = (eventType, data, context) => {
       // 同一轮 LLM 调用的所有增量共享 message_id，因此 content 直接累加即可；
       // 不同轮次 message_id 不同，会自动生成新的 AI 消息条目，
       // 于是数组顺序天然是 [AI(正文①), AI(正文②), ...]，工具则挂在各自消息上。
+      //
+      // 增量不直接写进 content，而是交给 streamSmoother 逐帧播放：
+      // 后端按 provider 吐字节奏发包，直写会让界面「卡一会儿 → 整段蹦出」。
+      // 这里先 ensureMsgEntry（让条目创建 / 占位气泡清理立刻生效），
+      // 再用解析后的 entry.id 作为平滑器的键，保证无 message_id 时也落到同一条目。
       if (data.content) {
         const entry = ensureMsgEntry(ts, data.message_id)
-        entry.content += data.content
+        streamSmoother.pushText(data.content, threadId, entry.id)
       }
       break
 
@@ -1141,8 +1196,15 @@ const handleSSEEvent = (eventType, data, context) => {
           
           if (cards.length > 0) {
             // 商品卡作为独立消息条目插入，天然与前后正文交错排列
-            const cardKey = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
             const conv = context.ts.onGoingConv
+            // 去重：同一个 render_product_card 可能经「SSE 监控中间件」与
+            // 「legacy thinking_process」两条通道各下发一次 tool_complete，
+            // 不去重会把同一批卡片渲染两遍。
+            const rendered = conv.renderedCardCalls || (conv.renderedCardCalls = new Set())
+            const dedupeKey = String(data.tool_call_id || '')
+            if (dedupeKey && rendered.has(dedupeKey)) break
+            if (dedupeKey) rendered.add(dedupeKey)
+            const cardKey = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
             conv.msgChunks[cardKey] = {
               id: cardKey,
               type: 'ai',
@@ -1158,6 +1220,20 @@ const handleSSEEvent = (eventType, data, context) => {
       }
       break
       
+    case 'tool_error':
+      // 工具执行失败（runtime.py 的 LifecycleHandler 会下发此事件）。
+      // 原先没有对应分支，事件落进 default 后被完全忽略，
+      // 该工具会一直停在「正在调用工具」转圈。
+      upsertToolCall({
+        tool_call_id: data.tool_call_id,
+        function: data.tool_name,
+        name: data.tool_name,
+        status: 'failed',
+        error_message: data.error || data.message,
+        message_id: data.message_id,
+      }, ts)
+      break
+
     case 'agent_state':
       // Agent 状态更新
       ts.agentState = data
@@ -1188,6 +1264,8 @@ const handleSSEEvent = (eventType, data, context) => {
       
     case 'done':
       // 完成事件（含统计信息）
+      // 终态：立刻交付平滑器里剩余正文，避免尾部文字被丢在缓冲里
+      streamSmoother.flushThread(threadId)
       console.log('[SSE] Stream completed:', data.statistics)
       lastStatistics.value = data.statistics || null
       break
@@ -1282,6 +1360,10 @@ const handleSendOrStop = async () => {
 
   // 清空之前的思考步骤
   clearThinkingSteps()
+  // 清掉上一轮可能残留的平滑播放帧任务，避免旧流的缓冲写进新一轮消息。
+  // （原实现在这里引用了 sseQueue / sseRafId / flushSseQueue 三个从未声明的变量，
+  //   发送时直接抛 ReferenceError，整个请求都发不出去；已用 streamSmoother 取代。）
+  streamSmoother.resetThread(threadId)
 
   try {
     const response = await agentApi.sendAgentMessage(currentAgentId.value, {
@@ -1351,15 +1433,23 @@ const handleSendOrStop = async () => {
       }
     }
 
-    // 流式结束，保存最终消息到历史
+    // 流式正常结束。
+    // ═══ 顺序很关键：先交付缓冲 → 再收敛悬空工具 → 最后落库 ═══
+    // 落库时 tool_calls 是浅拷贝（{...tc}），若先落库再收敛，收敛只作用在
+    // 即将被丢弃的流式缓冲上，历史里的工具会永久停在「正在调用工具」。
+    streamSmoother.flushThread(threadId)
+    finalizeDanglingToolCalls(ts, threadId, { asCompleted: true })
     flushOngoingConv(threadId, ts)
+    await syncThreadHistory(threadId)
   } catch (error) {
     // 用户主动停止：不当作错误——把已生成的部分标记为"被用户停止"
     if (error && error.name === 'AbortError') {
+      streamSmoother.flushThread(threadId)
       const msgs = getOngoingMessages(ts.onGoingConv)
       const last = msgs[msgs.length - 1]
       if (last) last.isStoppedByUser = true
-      // 把已生成的部分落库（含"已停止"提示）
+      // 把已生成的部分落库（含"已停止"提示）；顺序同上：先收敛再落库
+      finalizeDanglingToolCalls(ts, threadId)
       flushOngoingConv(threadId, ts)
       if (abortedByTimeout) {
         handleChatError(new Error('请求超时：后端长时间无响应'), 'send')
@@ -1369,6 +1459,8 @@ const handleSendOrStop = async () => {
       const friendly = translateErrorMessage(error.message) || '生成回复失败，请稍后重试'
       handleChatError(error, 'send')
       // 先把已流式产出的消息（含占位 / 思考过程）落库，再追加错误提示，避免重复与错位
+      streamSmoother.flushThread(threadId)
+      finalizeDanglingToolCalls(ts, threadId)
       flushOngoingConv(threadId, ts)
       threadMessages.value[threadId].push({
         type: 'ai',
@@ -1380,6 +1472,8 @@ const handleSendOrStop = async () => {
     }
   } finally {
     clearTimeout(timeoutTimer)
+    // 兜底交付：任何路径都不允许把正文留在平滑器缓冲里
+    streamSmoother.flushThread(threadId)
     ts.isStreaming = false
     // 生成中标志收尾：放在 finally 保证正常结束 / 报错 / 用户中止
     // 三种路径都能正确复位，不会残留"正在生成回复..."
@@ -1390,7 +1484,8 @@ const handleSendOrStop = async () => {
     // tool_complete（实测子智能体 400 时会这样），此时工具会永久停在
     // "进行中"，且末段工具组一直保持活跃态、无法自动收起。
     // 这里统一把仍处于非终态的工具标记为「已中断」，保证 UI 语义收敛。
-    finalizeDanglingToolCalls(ts)
+    // （正常路径已在上方落库前调用过，此函数幂等，这里只作为异常路径的兜底）
+    finalizeDanglingToolCalls(ts, threadId)
     // 保存当前线程的思考过程快照
     snapshotThinkingState(threadId)
     ts.onGoingConv = createOnGoingConvState()
@@ -1400,18 +1495,28 @@ const handleSendOrStop = async () => {
 // 流结束时收敛所有仍未完结的工具调用状态（进行中 → 已中断）。
 // 上游报错 / 流中断时，后端可能只发了 tool_start 而没有 tool_complete，
 // 若不收敛，工具会永久停在"进行中"，且末段工具组一直保持活跃态无法收起。
-const finalizeDanglingToolCalls = (ts) => {
-  const isDangling = (s) => s !== 'completed' && s !== 'failed' && s !== 'interrupted'
+const finalizeDanglingToolCalls = (ts, threadId = null, { asCompleted = false } = {}) => {
+  const TERMINAL = ['completed', 'complete', 'done', 'success', 'called', 'failed', 'error', 'cancelled', 'canceled', 'interrupted', 'aborted']
+  const isDangling = (s) => !TERMINAL.includes(String(s || '').toLowerCase())
+  // 正常结束（收到 done）时标「已完成」：这轮 run 已经跑完，工具确实执行过了，
+  // 只是完成事件没能送达前端（子智能体的工具经 SSE 中间件转发，start/complete
+  // 经常配不上对）。此时若标「已中断」，界面会在一轮成功的对话末尾挂一片红色的
+  // 「执行失败」，比转圈更糟。只有异常中断（报错 / 用户停止）才标「已中断」。
+  const terminal = asCompleted ? 'completed' : 'interrupted'
+  const sweep = (msg) => {
+    ;(msg?.tool_calls || []).forEach((tc) => {
+      if (isDangling(tc.status)) tc.status = terminal
+    })
+  }
   thinkingState.toolCalls.forEach((t) => {
-    if (isDangling(t.status)) t.status = 'interrupted'
+    if (isDangling(t.status)) t.status = terminal
   })
   // 同步收敛消息上挂着的 tool_calls（内联渲染直接读这里）
-  getOngoingMessages(ts?.onGoingConv).forEach((msg) => {
-    ;(msg.tool_calls || []).forEach((tc) => {
-      const st = tc.status
-      if (isDangling(st)) tc.status = 'interrupted'
-    })
-  })
+  getOngoingMessages(ts?.onGoingConv).forEach(sweep)
+  // 兜底再扫一遍已落库的历史：异常路径下若先落库后收敛，
+  // 收敛只作用在流式缓冲上，历史里的工具会一直转圈。此函数幂等，可安全重复调用。
+  const tid = threadId || currentChatId.value
+  if (tid) (threadMessages.value[tid] || []).forEach(sweep)
 }
 
 // ═══ 临时：注入演示轮次（验证过程组三态；后端接入后删除）═══
@@ -1451,8 +1556,13 @@ const flushOngoingConv = (threadId, ts) => {
   for (const msg of onGoing) {
     const hasBody = Boolean(msg.content && msg.content.trim())
     const hasTools = (msg.tool_calls || []).length > 0
-    // 跳过既无正文也无工具的空条目（异常终止场景），避免空白气泡
-    if (!hasBody && !hasTools) continue
+    // ═══ 修复：商品卡片条目既无正文也无 tool_calls，但必须保留 ═══
+    // 卡片是 tool_complete(render_product_card) 时按独立条目插进缓冲的
+    // （见 handleSSEEvent 里 card_ 前缀的条目），原判断只认「正文 / 工具」，
+    // 会把它当空条目丢掉 —— 表现为卡片在流式期间可见，一结束就消失。
+    const hasCards = Array.isArray(msg.productCards) && msg.productCards.length > 0
+    // 跳过既无正文、无工具、也无产物的空条目（异常终止场景），避免空白气泡
+    if (!hasBody && !hasTools && !hasCards) continue
     target.push({
       ...msg,
       type: 'ai',
@@ -1467,6 +1577,33 @@ const flushOngoingConv = (threadId, ts) => {
   if (!wrote) {
     const tp = buildThinkingProcessMsg()
     if (tp) target.push(tp)
+  }
+}
+
+// 流结束后用服务端历史校准本地状态（对标 Yuxi finalizeRunStream 的 fetchThreadMessages）。
+// 后端会把商品卡片、思考过程等结构化产物单独持久化，只有回读才能拿到权威数据；
+// 本地落库只是"让界面立刻收敛"，两者取服务端为准。
+// 拉取失败、服务端条数少于本地（写入尚未可见）、或服务端丢了商品卡片时，
+// 一律保留本地已落库的流式结果，绝不回退。
+const countCardMessages = (list) =>
+  (list || []).filter((m) => Array.isArray(m.productCards) && m.productCards.length > 0).length
+
+const syncThreadHistory = async (threadId) => {
+  if (!threadId) return
+  const local = threadMessages.value[threadId] || []
+  try {
+    const agentId = currentThread.value?.agent_id || currentAgentId.value
+    const res = await agentApi.getAgentHistory(agentId, threadId)
+    const messages = res?.history || []
+    if (!messages.length) return
+    // 只在服务端结果「不更差」时才采用：条数不能变少，
+    // 且商品卡片条数不能少于本地 —— 否则宁可保留本地已落库的流式结果，
+    // 免得回读把卡片弄丢（这正是「卡片先有后无」的另一种触发方式）。
+    if (messages.length < local.length) return
+    if (countCardMessages(messages) < countCardMessages(local)) return
+    threadMessages.value[threadId] = messages
+  } catch (e) {
+    console.warn('History sync after stream failed, keep local messages:', e)
   }
 }
 
