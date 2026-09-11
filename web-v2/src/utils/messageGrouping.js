@@ -82,18 +82,20 @@ const hasVisibleAssistantBody = (message, content) =>
 
 /**
  * 将一轮会话切成「正文 / 工具组 / 正文 …」交替的展示序列。
+ *
+ * 对标 Yuxi：AI 消息自带 tool_calls（后端按 message_id 归并下发），
+ * 因此仅靠顺序遍历 + 「正文前 flush」即可得到交错结构，无需求助外部补丁。
+ *
  * @param {Object} conv - { messages: Message[] }
  * @param {Object} options
  * @param {Function} options.enrichToolCalls - 工具富化（默认走 Yuxi 的 enrichTaskToolCalls）
- * @param {Object}  options.processAppend - SC 流式中尚未分段的全局过程池 { steps, toolCalls, planSteps, live }
  */
 export const getConversationDisplayItems = (
   conv,
   {
     enrichToolCalls = defaultEnrichToolCalls,
     collapseIntermediate = false,
-    runTiming = null,
-    processAppend = null
+    runTiming = null
   } = {}
 ) => {
   if (!Array.isArray(conv?.messages) || conv.messages.length === 0) return []
@@ -181,18 +183,8 @@ export const getConversationDisplayItems = (
 
   flushToolGroup()
 
-  // ── SC 兼容：尚未分段的流式过程池，作为末尾 live 工具组 ──
-  if (processAppend?.live) {
-    const group = buildProcessToolGroup(processAppend, `append-${items.length}`, true)
-    if (group) items.push(group)
-  }
-
   return collapseConversationProcess(items, collapseIntermediate, runTiming)
 }
 
 /** 兼容旧调用名。 */
-export const buildDisplayItems = (messages, processAppend = null) =>
-  getConversationDisplayItems(
-    { messages },
-    { processAppend: processAppend || undefined }
-  )
+export const buildDisplayItems = (messages) => getConversationDisplayItems({ messages })

@@ -98,6 +98,9 @@ def convert_legacy_chunk_to_sse(chunk: Dict[str, Any]) -> list[str]:
             events.append(format_sse_event(EventType.MESSAGE_CHUNK, {
                 "content": content,
                 "role": "assistant",
+                # 归属的 AI 消息 id（LangChain run id）。同一轮的所有增量共享该值，
+                # 前端据此把正文与工具归并为同一条消息，实现 正文->工具->正文 交错。
+                "message_id": chunk.get("message_id"),
             }))
     
     # ═══ Thinking Process 事件 ═══
@@ -121,6 +124,7 @@ def convert_legacy_chunk_to_sse(chunk: Dict[str, Any]) -> list[str]:
                     "tool_call_id": tool_call.get("tool_call_id", ""),
                     "arguments": tool_call.get("args", {}),
                     "meta": tool_call.get("tool_meta", {}),
+                    "message_id": tool_call.get("message_id"),
                 }))
             elif tool_status == "completed":
                 events.append(format_sse_event(EventType.TOOL_COMPLETE, {
@@ -129,6 +133,7 @@ def convert_legacy_chunk_to_sse(chunk: Dict[str, Any]) -> list[str]:
                     "result_preview": str(tool_call.get("content", ""))[:500],
                     "duration_ms": tool_call.get("duration_ms"),
                     "meta": tool_call.get("tool_meta", {}),
+                    "message_id": tool_call.get("message_id"),
                 }))
         
         elif event_type == "tool_result":
@@ -140,6 +145,7 @@ def convert_legacy_chunk_to_sse(chunk: Dict[str, Any]) -> list[str]:
                 "result_content": tool_call.get("content", ""),
                 "duration_ms": tool_call.get("duration_ms"),
                 "meta": tool_call.get("tool_meta", {}),
+                "message_id": tool_call.get("message_id"),
             }))
         
         elif event_type == "plan_update":

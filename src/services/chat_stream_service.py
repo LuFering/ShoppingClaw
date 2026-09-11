@@ -356,7 +356,7 @@ async def stream_agent_chat(
             meta=meta,
         )
 
-    def emit_tool_call(tool_call: dict, *, status: str = "calling") -> bytes:
+    def emit_tool_call(tool_call: dict, *, status: str = "calling", message_id: str | None = None) -> bytes:
         tool_call_id = str(tool_call.get("id") or tool_call.get("tool_call_id") or uuid.uuid4())
         function = tool_call.get("name") or tool_call.get("function") or "unknown"
         args = tool_call.get("args") or {}
@@ -370,6 +370,8 @@ async def stream_agent_chat(
             "function": function,
             "args": args,
             "started_at": asyncio.get_event_loop().time(),
+            # 记录该工具调用所属的 AI 消息 id，供完成事件复用
+            "message_id": message_id,
         }
         emitted_tool_call_ids.add(tool_call_id)
         meta_info = _tool_meta(function)
@@ -384,6 +386,9 @@ async def stream_agent_chat(
                 "status": status,
                 "tool_meta": meta_info,
                 "icon": meta_info.get("icon"),
+                # 归属的 AI 消息 id：前端据此把工具挂到对应消息的 tool_calls 上，
+                # 从而按「正文->工具->正文」顺序自然切段（对标 Yuxi message_id）
+                "message_id": message_id,
             },
             meta=meta,
         )
@@ -421,6 +426,9 @@ async def stream_agent_chat(
                 "duration_ms": duration_ms,
                 "tool_meta": meta_info,
                 "icon": meta_info.get("icon"),
+                # 完成事件沿用 start 时记录的 message_id，保证同一工具
+                # 的 start/complete 归属同一条 AI 消息
+                "message_id": cached.get("message_id"),
             },
             meta=meta,
         )
@@ -592,11 +600,14 @@ async def stream_agent_chat(
                     tool_call_id = tool_chunk.get("id")
                     tool_name = tool_chunk.get("name")
                     if tool_call_id and tool_name and str(tool_call_id) not in emitted_tool_call_ids:
-                        yield emit_tool_call({
-                            "id": str(tool_call_id),
-                            "name": tool_name,
-                            "args": tool_chunk.get("args") or {},
-                        })
+                        yield emit_tool_call(
+                            {
+                                "id": str(tool_call_id),
+                                "name": tool_name,
+                                "args": tool_chunk.get("args") or {},
+                            },
+                            message_id=getattr(msg, "id", None),
+                        )
 
                 if content is not None:  # 允许空字符串，只要不是 None
                     accumulated_content.append(content)
@@ -613,7 +624,17 @@ async def stream_agent_chat(
                 #     return
 
                 ## 流式返回给前端
-                yield make_chunk(content=content, msg=msg.model_dump(), metadata=metadata, status="loading")
+                # message_id 取 LangChain 的 run id（AIMessageChunk.id）：
+                # 同一轮 LLM 调用的所有增量 chunk 共享同一 id，不同轮次则不同。
+                # 前端据此把「正文 + 该轮产生的工具调用」归为同一条消息，
+                # 从而按 正文->工具->正文 的顺序自然切段（对标 Yuxi message_id）。
+                yield make_chunk(
+                    content=content,
+                    msg=msg.model_dump(),
+                    metadata=metadata,
+                    status="loading",
+                    message_id=getattr(msg, "id", None),
+                )
             else:
                 # 处理非 Chunk 类型的消息（如完整的 AIMessage, ToolMessage 或 updates 字典）
                 is_process_update = (metadata or {}).get("stream_mode") == "updates"
@@ -632,7 +653,7 @@ async def stream_agent_chat(
                         tool_call_id = str(tool_call.get("id") or "")
                         if tool_call_id and tool_call_id in emitted_tool_call_ids:
                             continue
-                        yield emit_tool_call(tool_call)
+                        yield emit_tool_call(tool_call, message_id=getattr(msg, "id", None))
 
                 if isinstance(msg, ToolMessage):
                     yield emit_tool_result(msg)
