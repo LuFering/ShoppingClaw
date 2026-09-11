@@ -2,6 +2,39 @@ import { message } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 
 /**
+ * 把上游/后端的原始错误翻译为面向用户的中文提示。
+ * 模型服务（如阿里云百炼）会把原始英文报文透传到前端，
+ * 直接展示对用户没有意义，这里按特征归类后给出可读文案。
+ * @param {string} raw - 原始错误文本
+ * @returns {string} 可读提示（无法归类时返回原文）
+ */
+export function translateErrorMessage(raw) {
+  const text = String(raw || '')
+  if (!text) return ''
+
+  if (/Arrearage|overdue-payment|account is in good standing/i.test(text)) {
+    return '模型服务不可用：上游账户已欠费，请充值后重试'
+  }
+  if (/InvalidApiKey|invalid_api_key|Authentication|Unauthorized|Token expired/i.test(text)) {
+    return '模型服务鉴权失败：请检查 API Key 配置'
+  }
+  if (/rate.?limit|429|quota|exceeded/i.test(text)) {
+    return '模型服务请求过于频繁或额度不足，请稍后重试'
+  }
+  if (/model_not_found|model.*not.*found|does not exist/i.test(text)) {
+    return '所选模型不可用，请在模型选择器中更换后重试'
+  }
+  if (/timeout|timed out/i.test(text)) {
+    return '模型服务响应超时，请稍后重试'
+  }
+  if (/context.*length|too many tokens|max.*tokens/i.test(text)) {
+    return '对话内容过长，请新开对话后重试'
+  }
+  // 无法归类时剥离技术前缀，保留原始细节便于排查
+  return text.replace(/^Error streaming messages:\s*/i, '')
+}
+
+/**
  * 统一聊天错误处理
  * @param {Error} error - 错误对象
  * @param {string} context - 错误上下文（如 'send', 'load', 'create'）
@@ -28,7 +61,9 @@ export function handleChatError(error, context = '') {
     } else if (error.message.includes('timeout')) {
       errorMessage = '请求超时，请重试'
     } else {
-      errorMessage = error.message
+      // 上游模型服务错误（欠费 / 鉴权 / 限流等）先做归类翻译，
+      // 否则会把英文原始报文直接弹给用户
+      errorMessage = translateErrorMessage(error.message) || '操作失败，请稍后重试'
     }
   }
 

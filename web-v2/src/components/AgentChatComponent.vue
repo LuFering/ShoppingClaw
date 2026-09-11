@@ -260,7 +260,7 @@ import ConversationProcessGroupComponent from '@/components/ConversationProcessG
 import StatePanel from '@/components/StatePanel.vue'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
 import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Brain, TrendingDown, Tag, Package, Heart, Wrench, ShieldAlert, Star, Activity, ListCollapse } from 'lucide-vue-next'
-import { handleChatError } from '@/utils/errorHandler'
+import { handleChatError, translateErrorMessage } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
 import { useAgentStore } from '@/stores/agent'
 import { useChatUIStore } from '@/stores/chatUI'
@@ -1154,9 +1154,15 @@ const handleSSEEvent = (eventType, data, context) => {
       }
       break
       
-    case 'error':
-      // 错误事件
-      throw new Error(data.error || 'Unknown error')
+    case 'error': {
+      // 错误事件：后端字段为 { error_type, message }
+      // 抛出携带原始类型的错误，交由 stream 外层 catch 落库为可见的错误消息
+      const errText = data.message || data.error || data.error_message || '生成回复时发生未知错误'
+      const err = new Error(errText)
+      err.errorType = data.error_type || 'unexpected_error'
+      err.isStreamError = true
+      throw err
+    }
       
     case 'done':
       // 完成事件（含统计信息）
@@ -1289,19 +1295,24 @@ const handleSendOrStop = async () => {
           eventId = trimmed.slice(3).trim()
         } else if (trimmed.startsWith('data:')) {
           // 数据行
+          let data
           try {
-            const data = JSON.parse(trimmed.slice(5))
-            
-            // ═══ 处理新协议事件 ═══
-            handleSSEEvent(currentEvent, data, streamContext)
-            
-            // 同步 context 中的状态到局部变量
-            aiMsgIndex = streamContext.aiMsgIndex
-            streamingContent = streamContext.streamingContent
-            
+            data = JSON.parse(trimmed.slice(5))
           } catch (e) {
+            // 仅 JSON 解析失败才静默跳过（分片/非 JSON 行）
             console.warn('Failed to parse SSE data:', e)
+            continue
           }
+
+          // ═══ 处理新协议事件 ═══
+          // 注意：handleSSEEvent 内部可能抛出业务错误（如 event:error），
+          // 必须让它冒泡到外层 catch，否则错误会被当成"解析失败"静默吞掉，
+          // 表现为「生成标志消失但无任何回复且无提示」。
+          handleSSEEvent(currentEvent, data, streamContext)
+
+          // 同步 context 中的状态到局部变量
+          aiMsgIndex = streamContext.aiMsgIndex
+          streamingContent = streamContext.streamingContent
         }
       }
     }
@@ -1320,14 +1331,15 @@ const handleSendOrStop = async () => {
       }
     } else {
       console.error('Stream error:', error)
+      const friendly = translateErrorMessage(error.message) || '生成回复失败，请稍后重试'
       handleChatError(error, 'send')
       // 先把已流式产出的消息（含占位 / 思考过程）落库，再追加错误提示，避免重复与错位
       flushOngoingConv(threadId, ts, streamingContent)
       threadMessages.value[threadId].push({
         type: 'ai',
         content: '',
-        error_type: 'unexpect',
-        error_message: error.message,
+        error_type: error.errorType || 'unexpect',
+        error_message: friendly,
         id: Date.now(),
       })
     }
