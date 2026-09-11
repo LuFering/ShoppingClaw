@@ -263,6 +263,7 @@ import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Brain, Tr
 import { handleChatError, translateErrorMessage } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
+import { planShadowReconcile } from '@/utils/toolCallShadow'
 import { useAgentStore } from '@/stores/agent'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useUserStore } from '@/stores/user'
@@ -1050,7 +1051,6 @@ const resolveToolCallId = (toolCall) => {
 const upsertToolCall = (toolCall = {}, ts = null) => {
   const meta = toolCall.tool_meta || {}
   const toolCallId = resolveToolCallId(toolCall)
-  const existingIndex = thinkingState.toolCalls.findIndex((item) => item.toolCallId === toolCallId || item.id === toolCallId)
   const item = {
     id: toolCallId,
     name: toolCall.function || toolCall.name || meta.name || 'unknown',
@@ -1065,7 +1065,32 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
     toolCallId,
     // 归属的 AI 消息 id（后端下发）：决定该工具挂到哪条消息下
     messageId: toolCall.message_id || null,
+    // 写入时间：影子事件合并需要一个很短的窗口来判定「是不是同一次调用」
+    createdAt: Date.now(),
   }
+
+  // ═══ 影子事件合并 ═══
+  // runtime.py 的 LifecycleHandler 会为同一次调用再发一份事件（id 现算、不带
+  // message_id、完成事件不带结果）。若各自建行，界面上同一次调用会出现两行，
+  // 其中一行是空的。这里把它并入权威记录，或反过来清掉影子行。
+  const plan = planShadowReconcile({ incoming: item, existing: thinkingState.toolCalls })
+  if (plan.mergeInto) {
+    const target = plan.mergeInto
+    // 保留权威记录的 id / 状态 / 结果，只补影子事件带来的真实参数与耗时；
+    // 绝不用影子的 running 覆盖权威的 completed。
+    if (Object.keys(item.args || {}).length) target.args = item.args
+    if (target.duration == null) target.duration = item.duration
+    if (!target.error_message && item.error_message) target.error_message = item.error_message
+    if (ts) upsertToolCallIntoMessage(ts, target.messageId, toYuxiToolCall(target))
+    return target
+  }
+  if (plan.dropIds.length) {
+    thinkingState.toolCalls = thinkingState.toolCalls.filter(
+      (t) => !plan.dropIds.includes(t.toolCallId)
+    )
+  }
+
+  const existingIndex = thinkingState.toolCalls.findIndex((item) => item.toolCallId === toolCallId || item.id === toolCallId)
   if (existingIndex >= 0) {
     thinkingState.toolCalls.splice(existingIndex, 1, {
       ...thinkingState.toolCalls[existingIndex],
