@@ -43,7 +43,7 @@ researcher:
     资深商品情报专家。负责通过多线并行搜索获取实时商品信息，并对原始数据进行去噪、提炼和结构化输出。
     当需要获取市场行情、品类知识或候选商品列表时调用。
 
-  model: "deepseek/deepseek-v4-flash"
+  model: "SenseNova/sensenova-6.8-flash-lite"
 
   tools:
     - search_products
@@ -96,7 +96,7 @@ analyst:
     将商品参数翻译成用户能感知的使用体验，从复杂信息中提炼出真正影响决策的关键差异，
     并给出有观点、有依据的推荐判断。当需要对多个选项做专业分析或为用户提供决策建议时调用。
 
-  model: "deepseek/deepseek-v4-flash"
+  model: "SenseNova/sensenova-6.8-flash-lite"
 
   tools:
     - get_products_specs_extract
@@ -159,7 +159,7 @@ critic:
     为 MasterAgent 的最终决策提供专业的"刹车"依据。
     当需要对推荐方案进行安全性和可靠性评估时调用。
 
-  model: "deepseek/deepseek-v4-flash"
+  model: "SenseNova/sensenova-6.8-flash-lite"
 
   tools:
     - query_risk_policy
@@ -211,7 +211,7 @@ memory_manager:
     并为当前决策提炼出真正有指导价值的个性化参数。
     当需要了解用户偏好、个性化推荐、或记录本次对话产生的新偏好时调用。
 
-  model: "deepseek/deepseek-v4-flash"
+  model: "SenseNova/sensenova-6.8-flash-lite"
 
   tools: []
 

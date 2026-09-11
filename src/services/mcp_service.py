@@ -23,6 +23,7 @@ MCP_SERVERS: Dict[str, Dict[str, Any]] = {
     # 淘宝/拼多多导购 MCP — 本地 stdio 子进程
     "taobao_mcp": {
         "type": "stdio",
+        "enabled": False,  # 挂起：依赖 sinataoke_cn.cmd（Windows 批处理），Linux 容器无法启动
         "description": "淘宝联盟 + 多多进宝商品搜索与转链（sinataoke_cn MCP）",
         "command": "sinataoke_cn.cmd",
         "env": {
@@ -219,6 +220,10 @@ async def get_tools_from_all_servers() -> List[Dict[str, Any]]:
     all_tools_specs: List[Dict[str, Any]] = []
     
     for server_name, server_config in MCP_SERVERS.items():
+        # 挂起的 MCP 服务器不拉取工具，避免 Linux 下阻塞整个工具加载流程
+        if not server_config.get("enabled", True):
+            logger.info(f"MCP 服务器 {server_name} 已挂起（enabled=False），跳过工具拉取。")
+            continue
         try:
             logger.info(f"正在从 MCP 服务器拉取工具: {server_name}")
             srv_type = server_config.get("type", "http")

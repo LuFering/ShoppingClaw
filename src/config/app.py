@@ -21,7 +21,7 @@ class Config(BaseModel):
 
     #模型配置
     default_model:str=Field(
-        default="deepseek/deepseek-v4-flash",
+        default="SenseNova/sensenova-6.8-flash-lite",
         description="默认对话模型",
     )
     # 模型信息（只读，不持久化）
