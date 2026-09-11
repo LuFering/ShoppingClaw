@@ -55,9 +55,18 @@ export function handleChatError(error, context = '') {
   if (error.message) {
     if (error.message.includes('网络') || error.message.includes('fetch')) {
       errorMessage = '网络连接失败，请检查网络设置'
-    } else if (error.message.includes('401') || error.message.includes('未授权') || error.message.includes('超时')) {
+    } else if (error.message.includes('401') || error.message.includes('未授权')) {
+      // 单次请求未授权：仅提示重试，不强制登出（避免正在进行的对话被腰斩跳登录）
+      errorMessage = '请求未授权，请稍后重试'
+      needRelogin = false
+    } else if (error.message.includes('token expired') || error.message.includes('令牌已过期')) {
+      // 仅后端明确「令牌过期」才判定登录失效并登出
       errorMessage = '登录已过期，请重新登录'
       needRelogin = true
+    } else if (error.message.includes('超时') || error.message.includes('timeout')) {
+      // 请求/网络超时：仅提示重试，绝不能当作登录过期，否则长对话会被误判登出
+      errorMessage = '请求超时，请稍后重试'
+      needRelogin = false
     } else if (error.message.includes('403')) {
       errorMessage = '没有权限执行此操作'
     } else if (error.message.includes('404')) {

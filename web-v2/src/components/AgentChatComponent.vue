@@ -1270,10 +1270,15 @@ const handleSendOrStop = async () => {
   ts.abort = () => ac.abort()
   // 防止后端长时间无响应导致界面永久"思考中"：超时主动中断
   let abortedByTimeout = false
-  const timeoutTimer = setTimeout(() => {
-    abortedByTimeout = true
-    ac.abort()
-  }, 120000)
+  let timeoutTimer = null
+  const resetTimeout = () => {
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    timeoutTimer = setTimeout(() => {
+      abortedByTimeout = true
+      ac.abort()
+    }, 120000)
+  }
+  resetTimeout()
 
   // 清空之前的思考步骤
   clearThinkingSteps()
@@ -1308,6 +1313,8 @@ const handleSendOrStop = async () => {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+
+      resetTimeout()  // 收到数据即重置无数据超时计时，长对话不会被误杀
 
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')

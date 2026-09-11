@@ -74,28 +74,26 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
 
       // 特殊处理401和403错误
       if (response.status === 401) {
-        // 如果是认证失败，可能需要重新登录
         const userStore = useUserStore()
-
-        // 检查是否是token过期
-        const isTokenExpired =
+        // 仅当明确是「登录态失效」（令牌过期 / 认证类请求失败）才强制登出跳转，
+        // 避免单次业务请求 401 把正在进行的对话腰斩并强制跳登录页
+        const isExpired =
           errorData &&
           (errorData.detail?.includes('令牌已过期') ||
             errorData.detail?.includes('token expired') ||
             errorMessage?.includes('令牌已过期') ||
             errorMessage?.includes('token expired'))
+        const isAuthEndpoint = (url || '').includes('/auth/')
 
-        message.error(isTokenExpired ? '登录已过期，请重新登录' : '认证失败，请重新登录')
-
-        // 如果用户当前认为自己已登录，则登出
-        if (userStore.isLoggedIn) {
-          userStore.logout()
+        if (isExpired || isAuthEndpoint) {
+          message.error(isExpired ? '登录已过期，请重新登录' : '认证失败，请重新登录')
+          if (userStore.isLoggedIn) userStore.logout()
+          setTimeout(() => {
+            window.location.href = '/login'
+          }, 1500)
+        } else {
+          message.error('请求未授权，请稍后重试')
         }
-
-        // 使用setTimeout确保消息显示后再跳转
-        setTimeout(() => {
-          window.location.href = '/login'
-        }, 1500)
 
         throw new Error('未授权，请先登录')
       } else if (response.status === 403) {

@@ -130,7 +130,10 @@ router.beforeEach(async (to, from, next) => {
     try {
       await userStore.getCurrentUser()
     } catch (error) {
-      console.error('获取用户信息失败:', error)
+      // /api/auth/me 明确返回非 200（token 失效）→ 清除登录态，交由登录页重新鉴权。
+      // 注意：业务请求（/api/chat/* 等）的 401 不在此处处理，由 base.js/errorHandler 判定，
+      // 避免单次业务请求失败把正在进行的对话腰斩跳登录。
+      console.error('登录态已失效，需重新登录:', error)
       userStore.logout()
     }
   }
