@@ -4,6 +4,7 @@ SSE 协议适配器 - 将旧的 status-based 协议转换为新的 EventType-bas
 这个模块提供了向后兼容的转换函数，允许逐步迁移到新的 SSE 协议。
 """
 import json
+import logging
 from typing import Any, Dict, Optional
 
 from src.services.sse_protocol import EventType
@@ -48,6 +49,36 @@ def format_sse_event(event_type: EventType | str, data: Dict[str, Any]) -> str:
         ""  # 额外空行（SSE 规范）
     ]
     return "\n".join(lines)
+
+
+def _coerce_plan_steps(plan: Any) -> list[dict]:
+    """把 plan 归一化成步骤列表，绝不抛异常。
+
+    正常情况 plan 是 ``{"steps": [...]}``（见 ThinkingProcessMiddleware）。
+    但线上实测出现过 plan 是**字符串**的情况——LangGraph 的 custom 流在某些
+    中间件写入后会把嵌套结构转成 str。此时原来的 ``plan.get("steps")`` 直接抛
+    AttributeError，异常冒泡到 stream_agent_chat 的外层 except，
+    **整条 SSE 流被打断**，前端只能看到一句
+    「Error streaming messages: 'str' object has no attribute 'get'」。
+
+    宁可少推一次计划更新，也不能让整轮对话崩掉，所以这里做容错：
+    字符串尝试 JSON 解析，解析不出或结构不对就返回空列表。
+    """
+    if isinstance(plan, dict):
+        steps = plan.get("steps")
+        return steps if isinstance(steps, list) else []
+    if isinstance(plan, list):
+        return plan
+    if isinstance(plan, str):
+        try:
+            return _coerce_plan_steps(json.loads(plan))
+        except Exception:
+            logging.warning(
+                "[sse_adapter] plan_update 的 plan 不是预期结构，已忽略: %r",
+                plan[:200] if len(plan) > 200 else plan,
+            )
+            return []
+    return []
 
 
 def convert_legacy_chunk_to_sse(chunk: Dict[str, Any]) -> list[str]:
@@ -149,9 +180,8 @@ def convert_legacy_chunk_to_sse(chunk: Dict[str, Any]) -> list[str]:
             }))
         
         elif event_type == "plan_update":
-            plan = chunk.get("plan", {})
             events.append(format_sse_event(EventType.PLAN_UPDATE, {
-                "steps": plan.get("steps", []),
+                "steps": _coerce_plan_steps(chunk.get("plan")),
             }))
     
     # ═══ Agent State 事件 ═══
