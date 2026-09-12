@@ -36,6 +36,34 @@ def extract_agent_state(values: dict) -> dict:
     return result
 
 
+async def get_agent_state_view(
+    *,
+    agent_id: str,
+    thread_id: str,
+    current_user_id: str,
+    db=None,
+) -> dict:
+    """读取某个 thread 的智能体状态（TODO / 文件等），供前端状态面板刷新。
+
+    路由 ``GET /api/chat/agent/{agent_id}/state`` 一直从这里 import 这个函数，
+    但它此前并不存在 —— 该接口固定返回 500
+    （``cannot import name 'get_agent_state_view'``）。
+    这里按流式链路里同样的方式取状态：拿 agent → 取 graph → aget_state → 提取。
+    """
+    from src.agents import agent_manager
+
+    agent = agent_manager.get_agent(agent_id)
+    if agent is None:
+        raise ValueError(f"智能体 {agent_id} 不存在或未就绪")
+
+    graph = await agent.get_graph()
+    state = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    values = getattr(state, "values", {}) if state else {}
+    if not isinstance(values, dict):
+        values = {}
+    return {"agent_state": extract_agent_state(values)}
+
+
 def _ensure_full_msg(full_msg: AIMessage | None, accumulated_content: list[str]) -> AIMessage | None:
     if not full_msg and accumulated_content:
         return AIMessage(content="".join(accumulated_content))

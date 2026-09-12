@@ -17,7 +17,7 @@
     <div v-else-if="message.type === 'ai'" class="assistant-message">
       <MdPreview
         v-if="message.content"
-        editorId="preview-only"
+        :editorId="mdEditorId"
         :theme="'light'"
         previewTheme="github"
         :showCodeRowNumber="false"
@@ -79,6 +79,14 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['retry', 'retryStoppedMessage'])
+
+// md-editor-v3 会用 editorId 生成 DOM id，并按该 id 反查内部元素。
+// 原先把 editorId 写死成 'preview-only'，多条 AI 消息同时渲染时 id 重复，
+// 库内部查不到元素就抛
+//   Cannot read properties of null (reading 'querySelectorAll')
+// （端到端测试抓到过这个未捕获异常）。改为每条消息一个唯一 id。
+let mdInstanceSeq = 0
+const mdEditorId = `md-${props.message?.id ?? 'anon'}-${(mdInstanceSeq += 1)}`
 
 const isCopied = ref(false)
 
