@@ -1464,7 +1464,10 @@ const handleSendOrStop = async () => {
     // 即将被丢弃的流式缓冲上，历史里的工具会永久停在「正在调用工具」。
     streamSmoother.flushThread(threadId)
     finalizeDanglingToolCalls(ts, threadId, { asCompleted: true })
-    flushOngoingConv(threadId, ts)
+    // 落库后**立刻**清空流式缓冲再回读历史：
+    // 否则「已落库的历史」与「仍在的流式缓冲」会同时渲染，结束瞬间出现一帧重影
+    // （实测正文长度会翻倍、消息条数翻倍）。回读是网络请求，窗口不短，必须提前清。
+    commitOngoingConv(threadId, ts)
     await syncThreadHistory(threadId)
   } catch (error) {
     // 用户主动停止：不当作错误——把已生成的部分标记为"被用户停止"
@@ -1473,9 +1476,9 @@ const handleSendOrStop = async () => {
       const msgs = getOngoingMessages(ts.onGoingConv)
       const last = msgs[msgs.length - 1]
       if (last) last.isStoppedByUser = true
-      // 把已生成的部分落库（含"已停止"提示）；顺序同上：先收敛再落库
+      // 把已生成的部分落库（含"已停止"提示）；顺序同上：先收敛再落库再清缓冲
       finalizeDanglingToolCalls(ts, threadId)
-      flushOngoingConv(threadId, ts)
+      commitOngoingConv(threadId, ts)
       if (abortedByTimeout) {
         handleChatError(new Error('请求超时：后端长时间无响应'), 'send')
       }
@@ -1486,7 +1489,7 @@ const handleSendOrStop = async () => {
       // 先把已流式产出的消息（含占位 / 思考过程）落库，再追加错误提示，避免重复与错位
       streamSmoother.flushThread(threadId)
       finalizeDanglingToolCalls(ts, threadId)
-      flushOngoingConv(threadId, ts)
+      commitOngoingConv(threadId, ts)
       threadMessages.value[threadId].push({
         type: 'ai',
         content: '',
@@ -1603,6 +1606,16 @@ const flushOngoingConv = (threadId, ts) => {
     const tp = buildThinkingProcessMsg()
     if (tp) target.push(tp)
   }
+}
+
+// 落库 + 立刻清空流式缓冲。
+//
+// 必须成对做：只落库不清缓冲的话，「已落库的历史」与「仍在的流式缓冲」会同时被
+// conversations 计算属性渲染出来，结束瞬间出现一帧重影——实测正文长度与消息条数
+// 都会翻倍，看起来就是「最后整段蹦了一下」。回读历史是网络请求，窗口不短，更要提前清。
+const commitOngoingConv = (threadId, ts) => {
+  flushOngoingConv(threadId, ts)
+  ts.onGoingConv = createOnGoingConvState()
 }
 
 // 流结束后用服务端历史校准本地状态（对标 Yuxi finalizeRunStream 的 fetchThreadMessages）。

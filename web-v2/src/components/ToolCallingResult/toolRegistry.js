@@ -296,7 +296,12 @@ export const getToolCallDisplayStatus = (toolCall, activeSubagentToolCallIds) =>
   if (['error', 'failed', 'cancelled', 'interrupted'].includes(runStatus)) return 'error'
   if (getToolCallId(toolCall) === 'task') {
     if (status === 'completed') return 'completed'
-    return activeSubagentToolCallIds?.has(String(toolCall.id)) ? 'running' : 'completed'
+    // 状态未知时保守显示「运行中」，不要凭空宣称已完成。
+    // Yuxi 有后端下发的 agent_state.subagent_runs 来兜底判断活跃子智能体，
+    // SC 后端没有这个数据，原实现就退化成「不在活跃集合里 = 已完成」，
+    // 于是子智能体还在跑（实测可跑 60s+）时，界面上却已经显示「已完成」。
+    // 真正的收尾由 AgentChatComponent.finalizeDanglingToolCalls 在流结束时兜底。
+    return 'running'
   }
   if (['failed', 'cancelled', 'interrupted'].includes(runStatus)) return 'error'
   if (status === 'completed' || runStatus === 'completed' || parseToolCallResult(toolCall)?.status)
