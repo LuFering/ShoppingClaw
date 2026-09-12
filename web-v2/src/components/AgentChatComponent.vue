@@ -847,6 +847,75 @@ const createNewChat = async () => {
   }
 }
 
+// ═══ 刷新恢复：用户中途刷新页面后重新打开该对话时，后端 SSESessionManager 仍保留
+// 本轮流式事件的缓冲。订阅回放接口把缓冲事件重新喂给 handleSSEEvent，
+// 重建刷新瞬间已生成但未落库的部分，避免「一刷新就丢了一半回答」。
+// 仅当缓冲里没有 done 事件（说明刷新时生成仍在进行）才重建；已完成 / 无缓冲的对话
+// 直接走历史记录，不做任何覆盖。回放缓冲只含「助手侧」事件（init/message_chunk/
+// tool_*/thinking/done），不含用户提问，所以用户消息保留历史记录，只重建助手侧。
+const resumeInProgressStream = async (threadId) => {
+  const st = getThreadState(threadId)
+  let authHeaders = {}
+  try { authHeaders = userStore.getAuthHeaders() } catch (e) { /* ignore */ }
+  const url = `/api/chat/sessions/${encodeURIComponent(threadId)}/events?last_event_id=-1`
+  let resp
+  try {
+    resp = await fetch(url, { headers: { Accept: 'text/event-stream', ...authHeaders } })
+  } catch (e) { return false }
+  if (!resp.ok) return false
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let curEvent = null
+  const events = []
+  const deadline = Date.now() + 6000  // 实测回放会很快结束（会话已停用），兜底 6s
+  try {
+    while (Date.now() < deadline) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      for (const line of lines) {
+        const t = line.trim()
+        if (!t) continue
+        if (t.startsWith('event:')) curEvent = t.slice(6).trim()
+        else if (t.startsWith('data:')) {
+          let d
+          try { d = JSON.parse(t.slice(5)) } catch { d = {} }
+          events.push({ type: curEvent, data: d })
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+  try { reader.cancel() } catch (e) { /* ignore */ }
+
+  if (events.length === 0) return false
+  // 已完成（含 done）或异常终止（含 error）的对话：历史已加载，无需重建
+  if (events.some((e) => e.type === 'done' || e.type === 'error')) return false
+
+  // 重建助手侧：先清掉历史里该轮助手的部分，仅保留用户提问
+  const history = threadMessages.value[threadId] || []
+  const userMsgs = history.filter((m) => m.role === 'user' || m.type === 'human')
+  threadMessages.value[threadId] = userMsgs
+
+  st.onGoingConv = createOnGoingConvState()
+  clearThinkingSteps()
+  streamSmoother.resetThread(threadId)
+  const ctx = { ts: st, threadId }
+  for (const e of events) {
+    try { handleSSEEvent(e.type, e.data, ctx) } catch (err) { /* 单条坏事件不阻断整体重建 */ }
+  }
+  streamSmoother.flushThread(threadId)
+  finalizeDanglingToolCalls(st, threadId, { asCompleted: true })
+  commitOngoingConv(threadId, st)
+  st.isStreaming = false
+  st.replyLoadingVisible = false
+  try { await syncThreadHistory(threadId) } catch (e) { /* ignore */ }
+  return true
+}
+
 const selectChat = async (threadId) => {
   if (!threadId || threadId === currentChatId.value) return
   chatState.currentThreadId = threadId
@@ -860,7 +929,10 @@ const selectChat = async (threadId) => {
     ])
     const messages = historyRes?.history || []
     threadMessages.value[threadId] = messages
-    
+
+    // 刷新恢复：若刷新瞬间该对话仍在生成，用回放接口重建未落库的部分
+    try { await resumeInProgressStream(threadId) } catch (err) { console.warn('resume failed:', err) }
+
     // 从后端历史消息中恢复思考过程（仅在内存快照不存在时）
     if (!savedThinkingStates.value[threadId]) {
       const thinkingMsg = messages.find(m => m.type === 'thinking' && m.thinkingProcess)

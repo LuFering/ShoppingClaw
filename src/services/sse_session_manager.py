@@ -32,6 +32,19 @@ class SSESession:
     
     def add_event(self, event: Dict[str, Any]):
         """添加事件到历史和队列"""
+        # 事件类型统一成字符串再入缓冲：
+        # 上游有的传 EventType 枚举（sse_monitor / done_event / title_event），有的传 str（_sse_sink）。
+        # 注意 EventType 是 (str, Enum) 子类——用 isinstance(t, str) 判断会漏掉它，
+        # 结果事件类型带着 "EventType." 前缀进缓冲，回放时渲染成 "event: EventType.DONE"，
+        # 前端 switch 匹配不上，刷新后续传直接失效。所以必须显式按 Enum 处理成 .value。
+        from enum import Enum
+        t = event.get("type")
+        if t is not None:
+            if isinstance(t, Enum):
+                event["type"] = t.value
+            elif not isinstance(t, str):
+                event["type"] = str(t)
+
         event["event_id"] = str(self.last_event_id)
         event["timestamp"] = time.time()  # 添加时间戳
         self.events.append(event)
@@ -102,13 +115,15 @@ class SSESessionManager:
     async def create_session(self, session_id: str) -> SSESession:
         """
         创建新的 SSE 会话
-        
+
         Args:
             session_id: 会话 ID（通常是 thread_id）
-            
+
         Returns:
             SSESession 对象
         """
+        logging.info(f"[REPLAY-TRACE] create_session called for {session_id} "
+                     f"(already_exists={session_id in self._sessions})")
         session = SSESession(session_id)
         self._sessions[session_id] = session
         return session
@@ -132,6 +147,26 @@ class SSESessionManager:
         if len(session.events) > self._max_history:
             session.events = session.events[-self._max_history:]
     
+    def emit_nowait(self, session_id: str, event: Dict[str, Any]):
+        """同步版 emit —— 供 make_chunk 这类同步上下文调用。
+
+        emit 是 async，但内部只做「追加历史 + 入队」，没有真正的 await 点。
+        同步场景若用 asyncio.create_task(emit(...)) 会把事件顺序打乱
+        （回放时序依赖 add_event 里的自增 event_id），所以单独提供这个确定性版本。
+        """
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+
+        session.add_event(event)
+        try:
+            session.queue.put_nowait(event)
+        except asyncio.QueueFull:  # 队列无界，理论上不会发生
+            pass
+
+        if len(session.events) > self._max_history:
+            session.events = session.events[-self._max_history:]
+
     async def event_generator(
         self,
         session_id: str,

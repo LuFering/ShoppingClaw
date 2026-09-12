@@ -22,7 +22,12 @@ from src.services.history_manager import HistoryManager
 from src.services.user_memory import get_user_memory_service
 # ═══ 新增：SSE 协议支持 ═══
 from src.services.sse_protocol import EventType
-from src.services.sse_adapter import format_sse_event, convert_legacy_chunk_to_sse
+from src.services.sse_adapter import (
+    format_sse_event,
+    convert_legacy_chunk_to_sse,
+    legacy_chunk_to_events,
+    event_type_str,
+)
 from src.agents.common.middleware.sse_monitor import SSEMonitoringMiddleware
 from src.services.sse_session_manager import get_session_manager
 
@@ -278,6 +283,7 @@ async def stream_agent_chat(
     # ═══ 初始化 SSE 会话管理器 ═══
     thread_id = config.get("thread_id") or str(uuid.uuid4())
     session_manager = get_session_manager()
+    logging.info(f"[REPLAY-TRACE] stream_agent_chat ENTER thread={thread_id}")
     await session_manager.create_session(thread_id)
     
     # ═══ SSE 监控中间件引用（延迟获取：get_graph() 在 stream_messages 内部首次调用时创建）═══
@@ -285,12 +291,27 @@ async def stream_agent_chat(
 
     # TODO:优化成Streamable HTTP
     def make_chunk(content=None, **kwargs):
-        """实现 SSE 协议的数据格式部分 - 兼容旧格式"""
+        """实现 SSE 协议的数据格式部分 - 兼容旧格式。
+
+        同时把每个事件写进 SSE 会话缓冲，供刷新 / 断线后用
+        ``GET /api/chat/sessions/{thread_id}/events`` 回放。
+        顺序是「先 emit 再序列化」：emit 会分配自增 event_id，
+        序列化时正好把它当作 SSE 的 ``id:`` 行，前端就能拿它做续传游标。
+        """
         chunk_data = {"request_id": meta.get("request_id"), "response": content, **kwargs}
-        
-        # ═══ 转换为新的 SSE 事件格式 ═══
-        sse_events = convert_legacy_chunk_to_sse(chunk_data)
-        return "".join(sse_events).encode("utf-8")
+
+        events = legacy_chunk_to_events(chunk_data)
+        for etype, edata in events:
+            # 就地写入 type，让 emit_nowait 把自增的 event_id 写回**同一个** dict。
+            # 若这里改成 {"type": ..., **edata} 建新字典，被序列化的 edata 就没有
+            # event_id，format_sse_event 会退化成用毫秒时间戳当 id——
+            # 结果直播流的 id 是时间戳、回放缓冲的 id 是自增序号，两边对不上，
+            # 前端拿直播 id 去续传会一条都回放不出来。
+            edata["type"] = event_type_str(etype)
+            session_manager.emit_nowait(thread_id, edata)
+        return "".join(
+            format_sse_event(event_type_str(t), d) for t, d in events
+        ).encode("utf-8")
 
     if image_content:
         human_message = HumanMessage(
@@ -528,6 +549,9 @@ async def stream_agent_chat(
                     "thread_id": thread_id,
                     "title": generated_title,
                 }
+                # 同时写进 SSE 会话缓冲：刷新后回放能恢复会话标题
+                # （emit_nowait 就地补 event_id，format_sse_event 复用同一 dict，id 与缓冲一致）
+                session_manager.emit_nowait(thread_id, title_event)
                 yield format_sse_event(EventType.TITLE, title_event).encode("utf-8") + b"\n"
                 title_updated = True
 
@@ -745,17 +769,17 @@ async def stream_agent_chat(
                 if isinstance(msg, dict) and msg.get("status") == "thinking_process" and msg.get("event"):
                     # 持久化收集：该通道才是 SC 推理内容/工具调用的真实来源
                     _collect_thinking_event(msg)
-                    # 直接转换为标准 SSE 格式，绕过默认的 make_chunk 逻辑
-                    legacy_chunk = {
-                        "status": "thinking_process",
-                        "event": msg.get("event"),
-                        "content": msg.get("content"),
-                        "plan": msg.get("plan"),
-                        "tool_call": msg.get("tool_call"),
-                    }
-                    sse_events = convert_legacy_chunk_to_sse(legacy_chunk)
-                    for sse in sse_events:
-                        yield sse.encode("utf-8") + b"\n"
+                    # 走 make_chunk 而不是直接 convert：只有经 make_chunk 才会写进
+                    # SSE 会话缓冲（刷新后回放要用），也才能拿到与缓冲一致的 event_id。
+                    # 原先直接 yield 转换结果，导致这类事件既进不了回放、
+                    # id 还退化成毫秒时间戳，前端续传时对不上。
+                    yield make_chunk(
+                        status="thinking_process",
+                        event=msg.get("event"),
+                        content=msg.get("content"),
+                        plan=msg.get("plan"),
+                        tool_call=msg.get("tool_call"),
+                    )
                     continue
 
                 # ═══ 处理 custom 模式下的其他自定义事件 ═══
@@ -764,16 +788,14 @@ async def stream_agent_chat(
                     if msg.get("status") == "thinking_process" and msg.get("event"):
                         _collect_thinking_event(msg)
 
-                        legacy_chunk = {
-                            "status": "thinking_process",
-                            "event": msg.get("event"),
-                            "content": msg.get("content"),
-                            "plan": msg.get("plan"),
-                            "tool_call": msg.get("tool_call"),
-                        }
-                        sse_events = convert_legacy_chunk_to_sse(legacy_chunk)
-                        for sse in sse_events:
-                            yield sse.encode("utf-8") + b"\n"
+                        # 同上：走 make_chunk 才会进回放缓冲、id 才与缓冲一致
+                        yield make_chunk(
+                            status="thinking_process",
+                            event=msg.get("event"),
+                            content=msg.get("content"),
+                            plan=msg.get("plan"),
+                            tool_call=msg.get("tool_call"),
+                        )
                         continue
 
                 if not is_process_update:

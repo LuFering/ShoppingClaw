@@ -653,6 +653,39 @@ async def get_agent_state(
         raise HTTPException(status_code=500, detail=f"获取AgentState出错: {str(e)}")
 
 
+# ── SSE 事件回放（刷新 / 断线续传）───────────────────────
+
+@chat.get("/sessions/{thread_id}/events")
+async def stream_session_events(
+    thread_id: str,
+    last_event_id: int = 0,
+    current_user: User = Depends(get_required_user),
+):
+    """回放并续传某个 thread 的 SSE 事件流。
+
+    对话可能跑好几分钟，用户中途刷新 / 断线后不应该丢掉整轮回复。
+    前端在发消息时把 thread 记进 localStorage，重新进入页面时带
+    ``last_event_id``（上次收到的事件 id，首次为 0）订阅这里：
+    服务端先把缓冲里 id 更大的事件回放一遍，再继续推新事件。
+
+    事件缓冲由 ``stream_agent_chat`` 的 make_chunk 写入，进程内保留最近 1000 条；
+    会话不存在（如对话早已结束并被清理）时会推一条 ``Session not found`` 的 error 事件。
+    """
+    from src.services.sse_session_manager import get_session_manager
+
+    session_manager = get_session_manager()
+    return StreamingResponse(
+        session_manager.event_generator(thread_id, last_event_id=last_event_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 # ── 速率限制状态查询 ───────────────────────────────────
 
 @chat.get("/rate-limit-status")
