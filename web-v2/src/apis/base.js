@@ -15,6 +15,10 @@ import { message } from 'ant-design-vue'
  * @returns {Promise} - 请求结果
  */
 export async function apiRequest(url, options = {}, requiresAuth = true, responseType = 'json') {
+  // silent：用于「后端尚未实现、前端已有降级数据」的可选端点（如 /api/events/recent）。
+  // 只抑制控制台噪音与错误弹窗，异常仍照常抛出，由调用方决定降级。
+  // 不这么做的话，首页每次加载都会往控制台吐一条 404，干扰真实报错的排查。
+  const silent = options?.silent === true
   try {
     const isFormData = options?.body instanceof FormData
     // 默认请求配置
@@ -45,17 +49,19 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       let errorMessage = `请求失败: ${response.status}, ${response.statusText}`
       let errorData = null
 
-      console.log('API请求失败:', {
-        url,
-        status: response.status,
-        statusText: response.statusText,
-        headers: Object.fromEntries(response.headers.entries())
-      })
+      if (!silent) {
+        console.log('API请求失败:', {
+          url,
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries())
+        })
+      }
 
       try {
         errorData = await response.json()
         errorMessage = errorData.detail || errorData.message || errorMessage
-        console.log('API错误详情:', errorData)
+        if (!silent) console.log('API错误详情:', errorData)
 
         // 如果是422错误，打印更详细的信息
         if (response.status === 422) {
@@ -121,7 +127,7 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       return response
     }
   } catch (error) {
-    console.error('API请求错误:', error)
+    if (!silent) console.error('API请求错误:', error)
     throw error
   }
 }

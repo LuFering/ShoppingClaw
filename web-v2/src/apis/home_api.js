@@ -29,7 +29,9 @@ export const homeApi = {
   async getHomeData() {
     const [sug, ev] = await Promise.allSettled([
       apiGet('/api/chat/home/suggestions', {}, false),
-      apiGet('/api/events/recent?limit=8', {}, false)
+      // 该端点后端尚未实现，前端固定走 FALLBACK_EVENTS 降级。
+      // 加 silent 避免首页每次加载都往控制台吐一条 404，掩盖真实报错。
+      apiGet('/api/events/recent?limit=8', { silent: true }, false)
     ])
     const sugRes = okArr(sug)
     const evRes = okArr(ev)

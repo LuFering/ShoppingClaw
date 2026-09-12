@@ -1371,15 +1371,39 @@ const handleSendOrStop = async () => {
   // 支持"停止"时真正中断 fetch
   const ac = new AbortController()
   ts.abort = () => ac.abort()
-  // 防止后端长时间无响应导致界面永久"思考中"：超时主动中断
+  // 防止后端长时间无响应导致界面永久"思考中"。
+  //
+  // ═══ 超时后先探活，再决定是否中断 ═══
+  // 不能一超时就 abort：子智能体执行期间后端可能连续 100s+ 一个 SSE 事件都没有
+  // （端到端实测最长静默 130.5s），这种静默是正常的，硬超时会把跑到一半的对话
+  // 直接掐死。所以超时后先查一次 thread 状态：
+  //   · 后端还响应（哪怕返回 4xx/5xx）→ 说明服务在，重新计时继续等
+  //   · 网络层失败（fetch 抛 TypeError，服务真的不可达）→ 才中断
+  const IDLE_TIMEOUT_MS = 120000
   let abortedByTimeout = false
   let timeoutTimer = null
+  let probing = false
   const resetTimeout = () => {
     if (timeoutTimer) clearTimeout(timeoutTimer)
-    timeoutTimer = setTimeout(() => {
-      abortedByTimeout = true
-      ac.abort()
-    }, 120000)
+    timeoutTimer = setTimeout(async () => {
+      if (probing) return
+      probing = true
+      try {
+        const agentId = currentThread.value?.agent_id || currentAgentId.value
+        await agentApi.getAgentState?.(agentId, threadId)
+        probing = false
+        if (!ac.signal.aborted) resetTimeout()
+      } catch (e) {
+        probing = false
+        const unreachable = e instanceof TypeError
+        if (unreachable) {
+          abortedByTimeout = true
+          ac.abort()
+        } else if (!ac.signal.aborted) {
+          resetTimeout()
+        }
+      }
+    }, IDLE_TIMEOUT_MS)
   }
   resetTimeout()
 
