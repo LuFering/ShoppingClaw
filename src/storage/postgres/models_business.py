@@ -335,3 +335,28 @@ class Conversation(Base):
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at),
         }
+
+
+class ShoppingDecision(Base):
+    """购物档案（决策库）记录
+
+    每条记录以整份 ShoppingRecord（phase 五状态机 + 分段字段）存进 data 列，
+    前端以「整册同步」方式工作，故此处不做字段级拆解，保持与前端契约一致。
+    主键为 (user_id, id) 复合键：记录 id 由前端生成（如 nd-1），跨用户会重复。
+    """
+
+    __tablename__ = "shopping_decisions"
+
+    id = Column(String, primary_key=True)  # 前端生成的记录 id（如 nd-1 / us-3）
+    user_id = Column(String, primary_key=True)  # 归属用户
+    phase = Column(String, nullable=False, default="need", index=True)  # need/candidate/decided/using/dropped
+    data = Column(JSONB, nullable=False, default=dict)  # 完整 ShoppingRecord
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    __table_args__ = (
+        Index("ix_shopping_decisions_user_phase", "user_id", "phase"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.data or {}
