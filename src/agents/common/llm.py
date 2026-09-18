@@ -226,12 +226,16 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
                             raise
 
             # enable_thinking 是 DeepSeek 专有字段；其他 provider 传了会 400
+            # timeout / max_retries：上游（尤其共享免费池）会偶发长尾挂起，
+            # 不设超时会让整条 SSE 流无限等待，前端表现为"一直在转圈"。
             _ctor_kwargs = {
                 "model": model,
                 "api_key": api_key,
                 "base_url": base_url,
                 "stream_usage": True,
                 "max_tokens": 8192,
+                "timeout": float(os.getenv("CHAT_MODEL_TIMEOUT", "120")),
+                "max_retries": int(os.getenv("CHAT_MODEL_MAX_RETRIES", "1")),
             }
             if provider == "deepseek":
                 _ctor_kwargs["extra_body"] = {"enable_thinking": True}
@@ -259,6 +263,8 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
                 api_key=api_key,
                 base_url=base_url,
                 stream_usage=True,
+                timeout=float(os.getenv("CHAT_MODEL_TIMEOUT", "120")),
+                max_retries=int(os.getenv("CHAT_MODEL_MAX_RETRIES", "1")),
             )
             _model_cache[cache_key] = model_instance
             return model_instance

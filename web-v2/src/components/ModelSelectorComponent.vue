@@ -51,7 +51,10 @@
             </a-menu-item-group>
           </template>
         </a-menu>
-        <div class="model-dropdown-footer">选择后立即对下一次提问生效</div>
+        <div class="model-dropdown-footer">
+          选择后立即对下一次提问生效
+          <span class="model-dropdown-hint">（若所选模型限额用尽，会自动改用默认模型）</span>
+        </div>
       </div>
     </template>
   </a-dropdown>
@@ -242,5 +245,9 @@ const handleSelect = (spec) => {
   border-top: 1px solid var(--gray-100);
   color: var(--gray-500);
   font-size: 11px;
+}
+
+.model-dropdown-hint {
+  color: var(--gray-400, #bfbfbf);
 }
 </style>
