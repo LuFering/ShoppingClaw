@@ -30,6 +30,19 @@ from src.services.sse_adapter import (
 )
 from src.agents.common.middleware.sse_monitor import SSEMonitoringMiddleware
 from src.services.sse_session_manager import get_session_manager
+# ═══ 新增：编排轨迹合成（把真实执行事实翻成前端契约 v1.0 的 orchestration / subagent_run）
+from src.services.orchestration_composer import (
+    Orchestrator,
+    ORCHESTRATION_REVEAL_STEPS,
+    new_trace,
+    fill_from_subagent_directory,
+    display_name,
+    TOOL_ORCHESTRATE,
+    # ★ 注意：TOOL_TASK 之前漏引入，导致第一次真的派发任务时
+    #   `if tool_name == TOOL_TASK` 直接 NameError，整条流被打断。
+    #   契约里的三个编排工具名必须**全部**引进来，缺一个就是线上事故。
+    TOOL_TASK,
+)
 
 
 def extract_agent_state(values: dict) -> dict:
@@ -89,6 +102,54 @@ def _truncate(value, limit: int = 3000):
         return value if len(value) <= limit else value[:limit] + f"... ({len(value)} chars total)"
     text = _safe_json_dumps(value)
     return value if len(text) <= limit else text[:limit] + f"... ({len(value)} chars total)"
+
+
+def _slug_from_task_args(raw_args) -> str:
+    """从 `task` 工具调用的 args 里取子智能体 slug。
+
+    args 可能是 dict，也可能是流式过程中尚未拼完的 JSON 字符串。
+    取不到返回空串（宁可不发 drill，也不要发前端匹配不到的 slug）。
+    """
+    args = raw_args
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except Exception:
+            return ""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("subagent_type", "subagent_slug", "slug"):
+        val = args.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def _resolve_task_slug(tool_msg) -> str:
+    """从 `task` 的 ToolMessage 里反查被派遣的子智能体 slug。
+
+    LangGraph 的 ToolMessage 只带 `tool_call_id`，不含原始 args，
+    所以依次尝试几条路径：
+      1. message 自带的 additional_kwargs / response_metadata；
+      2. tool_call_id 里内嵌的 slug（SubAgentMiddleware 常见做法是
+         `task-<slug>-<hash>` 或直接把 slug 拼进 id）。
+    取不到就返回空串 —— 宁可不下发 drill，也不要发一个前端找不到卡片的 slug。
+    """
+    for attr in ("additional_kwargs", "response_metadata"):
+        meta = getattr(tool_msg, attr, None)
+        if isinstance(meta, dict):
+            for key in ("subagent_type", "subagent_slug", "slug"):
+                val = meta.get(key)
+                if val:
+                    return str(val)
+    tcid = str(getattr(tool_msg, "tool_call_id", "") or "")
+    # 形如 task-researcher-ab12cd34 时取中间段
+    if tcid.startswith("task-") and tcid.count("-") >= 2:
+        rest = tcid[len("task-"):]
+        head = rest.rsplit("-", 1)[0]
+        if head:
+            return head
+    return ""
 
 
 def _message_text(content) -> str:
@@ -393,6 +454,11 @@ async def stream_agent_chat(
     accumulated_content: list[str] = []
     active_tool_calls: dict[str, dict] = {}
     emitted_tool_call_ids: set[str] = set()
+    # 真实 tool_call_id -> SubagentRun。
+    # 必须定义在 emit_tool_result 之前的作用域里：后者在 task 完成时
+    # 要按 id 反查并下发终态 subagent_run。放在后面虽然靠闭包延迟解析
+    # 也能跑，但那是在依赖「调用晚于定义」的隐式顺序，太脆。
+    _subagent_runs: dict[str, object] = {}
 
     def emit_plan_from_state(agent_state: dict) -> bytes | None:
         steps = _todos_to_plan_steps(agent_state.get("todos") if isinstance(agent_state, dict) else None)
@@ -405,7 +471,13 @@ async def stream_agent_chat(
             meta=meta,
         )
 
-    def emit_tool_call(tool_call: dict, *, status: str = "calling", message_id: str | None = None) -> bytes:
+    def emit_tool_call(
+        tool_call: dict,
+        *,
+        status: str = "calling",
+        message_id: str | None = None,
+        subagent_run: dict | None = None,
+    ) -> bytes:
         tool_call_id = str(tool_call.get("id") or tool_call.get("tool_call_id") or uuid.uuid4())
         function = tool_call.get("name") or tool_call.get("function") or "unknown"
         args = tool_call.get("args") or {}
@@ -424,21 +496,30 @@ async def stream_agent_chat(
         }
         emitted_tool_call_ids.add(tool_call_id)
         meta_info = _tool_meta(function)
+        _tool_call_payload = {
+            "tool_call_id": tool_call_id,
+            "function": function,
+            "name": function,
+            "args": args,
+            "status": status,
+            "tool_meta": meta_info,
+            "icon": meta_info.get("icon"),
+            # 归属的 AI 消息 id：前端据此把工具挂到对应消息的 tool_calls 上，
+            # 从而按「正文->工具->正文」顺序自然切段（对标 Yuxi message_id）
+            "message_id": message_id,
+        }
+        # ═══ 富载荷：task 卡的 subagent_run ═══
+        # task 是 langchain 的 subagent_task 中间件真正发出来的工具调用
+        # （不是我们合成的），它本身不带契约 v1.0 的 subagent_run 字段。
+        # 这里由编排层把「这个子智能体在做什么」翻译成契约形态挂上去，
+        # 否则前端 TaskTool.vue 只能渲染一张没有任何内容的空壳卡。
+        # 同理 orchestration 字段由 _synthesize_orchestration 单独走。
+        if subagent_run is not None:
+            _tool_call_payload["subagent_run"] = subagent_run
         return make_chunk(
             status="thinking_process",
             event="tool_call",
-            tool_call={
-                "tool_call_id": tool_call_id,
-                "function": function,
-                "name": function,
-                "args": args,
-                "status": status,
-                "tool_meta": meta_info,
-                "icon": meta_info.get("icon"),
-                # 归属的 AI 消息 id：前端据此把工具挂到对应消息的 tool_calls 上，
-                # 从而按「正文->工具->正文」顺序自然切段（对标 Yuxi message_id）
-                "message_id": message_id,
-            },
+            tool_call=_tool_call_payload,
             meta=meta,
         )
 
@@ -461,24 +542,32 @@ async def stream_agent_chat(
             "icon": meta_info.get("icon"),
             "category": meta_info.get("category"),
         })
+        _done_payload = {
+            "tool_call_id": tool_call_id,
+            "function": function,
+            "name": function,
+            "args": cached.get("args", {}),
+            "content": _truncate(getattr(tool_msg, "content", ""), 3000),
+            "output": _truncate(getattr(tool_msg, "content", ""), 3000),
+            "status": "completed",
+            "duration_ms": duration_ms,
+            "tool_meta": meta_info,
+            "icon": meta_info.get("icon"),
+            # 完成事件沿用 start 时记录的 message_id，保证同一工具
+            # 的 start/complete 归属同一条 AI 消息
+            "message_id": cached.get("message_id"),
+        }
+        # ═══ task 完成：把终态 subagent_run 一起下发 ═══
+        # 否则 subagent_run 永远停在 start 时那份「running」快照，
+        # 前端卡片会一直转圈。
+        if function == TOOL_TASK:
+            _final_run = _subagent_runs.get(tool_call_id)
+            if _final_run is not None:
+                _done_payload["subagent_run"] = _final_run.build()  # type: ignore[attr-defined]
         return make_chunk(
             status="thinking_process",
             event="tool_result",
-            tool_call={
-                "tool_call_id": tool_call_id,
-                "function": function,
-                "name": function,
-                "args": cached.get("args", {}),
-                "content": _truncate(getattr(tool_msg, "content", ""), 3000),
-                "output": _truncate(getattr(tool_msg, "content", ""), 3000),
-                "status": "completed",
-                "duration_ms": duration_ms,
-                "tool_meta": meta_info,
-                "icon": meta_info.get("icon"),
-                # 完成事件沿用 start 时记录的 message_id，保证同一工具
-                # 的 start/complete 归属同一条 AI 消息
-                "message_id": cached.get("message_id"),
-            },
+            tool_call=_done_payload,
             meta=meta,
         )
 
@@ -587,6 +676,117 @@ async def stream_agent_chat(
                     "icon": tc.get("icon"),
                     "category": tc.get("category"),
                 })
+        # ═══ 编排合成器：维护气泡边界 + 合成 orchestrate/task 卡 ═══
+        # 契约规则：一个气泡 = 一段前置文本 + 它引出的那个状态块（tool_start）。
+        # 只有「即将发 tool_start」时才推进气泡 id，纯文本段一律复用当前 id。
+        # 这条规则与 Yuxi 的 _stream_message_id（同 run 共享 id）等价，但把
+        # 「何时换」的判断权显式交给调用方，避免正文被拼成一大段或用空对空切碎。
+        _round_no = int((meta or {}).get("round") or 1)
+        orchestrator = Orchestrator(f"round-{_round_no}")
+        # 已发过的 orchestrate 卡，避免重复合成（同一轮只应有一张）
+        _orch_synthesized = False
+        # 本轮出现过的工具名 —— 用于推导 skills / plannedTools
+        _seen_tool_names: list[str] = []
+
+        # ═══ 气泡归属：编排层合成的工具，必须落在「编排气泡」里 ═══
+        # 线上实测踩到的坑（S0 实测，run 01a0b29f）：
+        #   orchestrate 卡用 message_id="round-1-s1"（编排气泡），
+        #   紧跟着的 task 卡却用了 LLM 的 run id "lc_run--01a0b29f-…"，
+        #   结果两张卡被前端分到**两个气泡**里，卡片被硬生生劈开。
+        #   这正是项目里反复踩过三次的 message_id 坑。
+        # 规则：整轮里所有 tool_start / tool_complete，只要它属于编排决策
+        #   （orchestrate 自身、以及被 orchestrate 决策派出去的 task），
+        #   一律挂编排气泡；其余业务工具（search_products 等）仍挂 LLM run id，
+        #   这样它们会紧跟在那段解说正文之后，形成「正文→工具」的自然节奏。
+        _ORCH_OWNED_TOOLS = {TOOL_ORCHESTRATE, TOOL_TASK}
+
+        def _tool_bubble(tool_name: str, llm_message_id: str | None) -> str | None:
+            """决定一个工具事件该挂哪个气泡。"""
+            if tool_name in _ORCH_OWNED_TOOLS:
+                return orchestrator.bubble()
+            return llm_message_id or orchestrator.bubble()
+
+        # 真实 tool_call_id -> SubagentRun。task 完成时按它反查是谁跑完了。
+        # （已在函数作用域顶部声明，这里不再重复定义，避免遮蔽。）
+
+        # 子智能体「打算用哪些工具」的静态声明。
+        # 来源：subagents.yaml 里的工具清单。子智能体实现尚未落地时，
+        # 这份计划让卡片先有内容可渲染（plannedTools 先亮，tools 后补）。
+        _SUBAGENT_PLANNED_TOOLS: dict[str, list[str]] = {
+            "researcher": ["search_products", "get_product_full_detail", "get_products_specs_batch"],
+            "analyst": ["get_products_specs_extract", "filter_products_by_criteria", "query_category_knowledge"],
+            "critic": ["query_risk_policy"],
+            "memory_manager": [],
+            "pre_purchase": ["search_products", "get_product_full_detail"],
+            "post_purchase": [],
+        }
+
+        def _planned_tools_for(slug: str) -> list[str]:
+            return list(_SUBAGENT_PLANNED_TOOLS.get(slug) or [])
+
+        async def _synthesize_orchestration(*, tool_chunk, orchestrator, make_chunk, all_tool_names):
+            """合成 orchestrate 卡的渐进显形。
+
+            这是「runtime 合成」路线（对照表 v2 的 §3.1 方式 B）：
+            **不改 LLM、不注册新工具**，而是在 runtime 侧把已经发生的执行事实
+            翻译成契约形态。好处是零 LLM 成本，且渐进节奏完全可控。
+
+            5 档显形（ORCHESTRATION_REVEAL_STEPS）：
+              Skill → RAG → MCP → 派遣 → 决策
+            每档复用**同一个 tool_call_id**，前端 upsertToolCall 就地覆盖，
+            所以卡片会一段一段长出来，前端零改动。
+
+            ⚠️ 本函数只在**模型已经发出 `task`**（= 它自己决定要派）时才被调用。
+            所以这里不含任何「要不要派」的判定 —— 那张卡本身就是派遣的结果。
+            原先的第一档「意图分诊 + 置信度」已于 2026-09-18 移除（见 composer docstring）。
+            """
+            try:
+                args = tool_chunk.get("args") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
+                subagent_slug = str(args.get("subagent_type") or args.get("slug") or "researcher")
+                task_desc = str(args.get("description") or args.get("task") or "")
+            except Exception:
+                subagent_slug, task_desc = "researcher", ""
+
+            # ── 从真实执行事实推导轨迹（不含意图/置信度）──
+            trace = new_trace()
+            try:
+                from src.agents.subagents import load_subagent_slugs  # type: ignore
+                available = await load_subagent_slugs()
+            except Exception:
+                # subagents.yaml 的 key —— 与后端实际配置一致
+                available = ["researcher", "analyst", "critic", "memory_manager"]
+
+            fill_from_subagent_directory(
+                trace,
+                available_slugs=available,
+                selected=[(subagent_slug, task_desc)],
+            )
+            # 把「本轮已出现的工具」作为 Skill 的佐证补进去
+            for name in all_tool_names[-3:]:
+                trace.skills.append(
+                    {"id": f"tool_{name}", "name": name, "detail": "本轮已调用"}
+                )
+
+            # ── 渐进显形：同 id 连发 5 档 ──
+            orchestrator.begin_orchestration()
+            for n in range(1, len(ORCHESTRATION_REVEAL_STEPS) + 1):
+                payload = orchestrator.reveal_step(trace, n)
+                yield make_chunk(**payload)
+                # 让前端有时间逐档渲染；过密会合并成一帧、看不出渐进
+                await asyncio.sleep(0.12)
+
+            # ── 收尾 ──
+            yield make_chunk(**orchestrator.complete_orchestration(trace))
+
+        def _emit_composed(payload: dict) -> bytes:
+            """把合成出的旧风格 chunk 经统一出口下发（走 make_chunk 才进回放缓冲）。"""
+            return make_chunk(**payload)
+
         # 流式执行 Agent 推理
         async for chunk in agent.stream_messages(messages, input_context=input_context):
             # ═══ 处理 SSE 监控中间件事件 ═══
@@ -598,6 +798,12 @@ async def stream_agent_chat(
                     names = [e.get("tool_name", e.get("type", "?")) for e in middleware_events]
                     print(f"[SSE-DRAIN] drained {len(middleware_events)} events: {names}", flush=True)
                 for event in middleware_events:
+                    # ★ 补 message_id —— sse_monitor 自身不发这个字段。
+                    # 没有它，前端会把工具卡挂到 __local__ 兜底条目，
+                    # 工具卡就不跟随气泡了（见后端落地对照表 v2 风险 R1）。
+                    # 沿用「当前气泡」而非新开，保证「正文 → 工具」同属一条。
+                    if not event.get("message_id"):
+                        event["message_id"] = orchestrator.bubble()
                     await session_manager.emit(thread_id, event)
                     yield format_sse_event(event["type"], event).encode("utf-8") + b"\n"
             
@@ -652,14 +858,90 @@ async def stream_agent_chat(
                     tool_call_id = tool_chunk.get("id")
                     tool_name = tool_chunk.get("name")
                     if tool_call_id and tool_name and str(tool_call_id) not in emitted_tool_call_ids:
+                        # ═══ 合成 orchestrate 卡（契约层虚构的编排动作，registry 里没有）═══
+                        # 时机：第一次看见 `task` 工具调用 = 派遣决策已定。
+                        # 在它之前把编排轨迹显形出来，用户先看到「为什么派、派谁」，
+                        # 再看到子智能体真正开始干活 —— 这正是契约的「文本先行 → 状态块」节奏。
+                        if tool_name == "task" and not _orch_synthesized:
+                            _orch_synthesized = True
+                            async for _c in _synthesize_orchestration(
+                                tool_chunk=tool_chunk,
+                                orchestrator=orchestrator,
+                                make_chunk=make_chunk,
+                                all_tool_names=_seen_tool_names,
+                            ):
+                                yield _c
+
+                        # ═══ 给 task 卡挂上契约 v1.0 的 subagent_run ═══
+                        # 子智能体自身的工具实现还没落地（research 工具包缺 'jd' 模块），
+                        # 但「它在做什么、用了哪些 Skill/RAG、计划调哪些工具」这些
+                        # 编排事实我们**知道**，所以先把卡片填成有内容的样子，
+                        # 等真实子智能体接上来时只需把 tools 换成实际执行记录。
+                        _sub_run_payload = None
+                        if tool_name == TOOL_TASK:
+                            try:
+                                _tc_args = tool_chunk.get("args") or {}
+                                if isinstance(_tc_args, str):
+                                    _tc_args = json.loads(_tc_args) if _tc_args.strip().startswith("{") else {}
+                                _t_slug = str(
+                                    _tc_args.get("subagent_type")
+                                    or _tc_args.get("slug")
+                                    or "researcher"
+                                )
+                                _t_desc = str(
+                                    _tc_args.get("description") or _tc_args.get("task") or ""
+                                )
+                            except Exception:
+                                _t_slug, _t_desc = "researcher", ""
+                            _t_call_id = str(tool_call_id)
+                            _run = _subagent_runs.get(_t_call_id)
+                            if _run is None:
+                                _, _run, _ = orchestrator.start_task(
+                                    slug=_t_slug,
+                                    task=_t_desc,
+                                    planned_tools=_planned_tools_for(_t_slug),
+                                )
+                                # ★ 关键：把合成 id 换成 langchain 真实 tool_call_id。
+                                #   task 卡是中间件真发的，前端按真实 id 匹配卡片；
+                                #   若 subagent_run.call_id 仍是自造 id，卡片挂不上。
+                                orchestrator.rebind_task_call_id(_run, _t_call_id)
+                                _subagent_runs[_t_call_id] = _run
+                            _sub_run_payload = _run.build()
+
                         yield emit_tool_call(
                             {
                                 "id": str(tool_call_id),
                                 "name": tool_name,
                                 "args": tool_chunk.get("args") or {},
                             },
-                            message_id=getattr(msg, "id", None),
+                            # 气泡归属：task 挂编排气泡（与 orchestrate 同泡），
+                            # 避免编排卡被切成两个气泡（S0 实测踩坑）。
+                            message_id=_tool_bubble(tool_name, getattr(msg, "id", None)),
+                            subagent_run=_sub_run_payload,
                         )
+                        # 记录工具名，供编排轨迹推导 skills
+                        if tool_name not in _seen_tool_names:
+                            _seen_tool_names.append(tool_name)
+
+                        # ═══ subagent_drill: expand ═══
+                        # 子智能体开始干活前 → 展开它的卡片，让用户看见内部过程。
+                        # 顺序讲究：必须**在** task 的 tool_start 之后发，
+                        # 否则 setToolCallDrill 倒序找不到刚建的那张卡。
+                        if tool_name == TOOL_TASK:
+                            _expand_slug = ""
+                            _run_ref = _subagent_runs.get(str(tool_call_id))
+                            if _run_ref is not None:
+                                _expand_slug = getattr(_run_ref, "slug", "") or ""
+                            if not _expand_slug:
+                                _expand_slug = _slug_from_task_args(tool_chunk.get("args"))
+                            if _expand_slug:
+                                yield make_chunk(
+                                    status="subagent_drill",
+                                    slug=display_name(_expand_slug),
+                                    action="expand",
+                                    description="",
+                                    message_id=orchestrator.bubble(),
+                                )
 
                 if content is not None:  # 允许空字符串，只要不是 None
                     accumulated_content.append(content)
@@ -705,10 +987,44 @@ async def stream_agent_chat(
                         tool_call_id = str(tool_call.get("id") or "")
                         if tool_call_id and tool_call_id in emitted_tool_call_ids:
                             continue
-                        yield emit_tool_call(tool_call, message_id=getattr(msg, "id", None))
+                        _tc_name = tool_call.get("name") or tool_call.get("function") or ""
+                        yield emit_tool_call(
+                            tool_call,
+                            message_id=_tool_bubble(_tc_name, getattr(msg, "id", None)),
+                        )
 
                 if isinstance(msg, ToolMessage):
+                    # ═══ task 收尾：先把子智能体状态置 completed，再发完成事件 ═══
+                    # 顺序很重要：emit_tool_result 会从 active_tool_calls 取缓存，
+                    # 而 subagent_run 需要「已完成」的终态一起下发，否则卡片
+                    # 永远停在 running（前端不会自己猜完成）。
+                    _done_tool_name = getattr(msg, "name", "")
+                    _done_call_id = str(getattr(msg, "tool_call_id", "") or "")
+                    _done_run = None
+                    if _done_tool_name == TOOL_TASK and _done_call_id:
+                        _done_run = _subagent_runs.get(_done_call_id)
+                        if _done_run is not None:
+                            _done_run.status = "completed"  # type: ignore[attr-defined]
                     yield emit_tool_result(msg)
+                    # ═══ subagent_drill: collapse ═══
+                    # 子智能体干完 → 把之前展开的那一段收起来，视线交还给主线对话。
+                    # 这是后端的**全新事件**（原先完全没有），前端 case 已就绪。
+                    # 只写 drill 标志、不当场改展开态 —— 由 BaseToolCall 自己 watch，
+                    # 这样用户手动折叠过的卡片不会被强行重开。
+                    if _done_tool_name == TOOL_TASK:
+                        _slug = ""
+                        if _done_run is not None:
+                            _slug = getattr(_done_run, "slug", "") or ""
+                        if not _slug:
+                            _slug = _resolve_task_slug(msg)
+                        if _slug:
+                            yield make_chunk(
+                                status="subagent_drill",
+                                slug=display_name(_slug),
+                                action="collapse",
+                                description="",
+                                message_id=orchestrator.bubble(),
+                            )
                     # 持久化 render_product_card 结果到存储，供历史记录加载
                     _tool_name = getattr(msg, "name", "")
                     if _tool_name == "render_product_card":

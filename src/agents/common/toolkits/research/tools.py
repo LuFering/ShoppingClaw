@@ -10,8 +10,21 @@ from typing import Dict, Any, List, Optional
 from urllib.parse import quote
 from pydantic import BaseModel, Field
 
-# 京东SDK静态导入
-import jd.api
+# 京东SDK导入（★ 必须可选）
+# 原先是  静态导入，但容器内并未安装京东开放平台 SDK
+# （pip list 无 jd / jos），于是**整个 research 工具包**导入即失败：
+#   [Toolkit] Failed to load research toolkit: No module named 'jd'
+# 后果是 search_products / get_product_full_detail / get_products_specs_batch
+# 三个工具一个都没注册，researcher 子智能体工具数为 0 —— 主智能体派了也干不了活。
+# 现在改成可选导入：SDK 在则用官方 API 补充好评率/店铺ID，
+# 不在则官方 API 那一路整体跳过，只走 JustoneAPI（价格/销量/好评词/服务保障）。
+try:
+    import jd
+    import jd.api  # noqa: F401
+    _JD_SDK_AVAILABLE = True
+except Exception:  # pragma: no cover - 依赖环境
+    jd = None  # type: ignore[assignment]
+    _JD_SDK_AVAILABLE = False
 from src.agents.common.toolkits.registry import tool
 from src.agents.common.toolkits.research.schemas import (
     JdDeepSearchInput,
@@ -65,11 +78,22 @@ def _parse_sales(sales_str: Optional[str]) -> Optional[int]:
 
 
 def init_jd_sdk():
-    """初始化京东SDK认证（**单例模式**，仅首次调用时真正初始化）"""
+    """初始化京东SDK认证（**单例模式**，仅首次调用时真正初始化）
+
+    ★ SDK 缺失时必须**优雅降级**而非抛异常：
+      京东官方 SDK 未安装时，调用方（search_products 等）本就包在 try/except 里，
+      但裸的  会先抛 NameError/AttributeError 让日志变脏。
+      这里显式返回 (False, None) 表示「官方 API 这一路不可用」，
+      调用方据此跳过官方 API，继续走 JustoneAPI。
+    """
     global _jd_initialized, _jd_access_token
 
     if _jd_initialized:
         return True, _jd_access_token
+
+    if not _JD_SDK_AVAILABLE or jd is None:
+        logger.info("[JD API] 官方 SDK 未安装，跳过官方 API（仅使用 JustoneAPI）")
+        return False, None
 
     # 从环境变量读取配置
     app_key = os.getenv("JD_APP_KEY")
@@ -568,8 +592,12 @@ def search_products(
     except Exception as e:
         logger.warning(f"[Tool] 官方API搜索失败: {e}")
     
-    # 2. 如果需要价格，调用JustoneAPI补充数据
-    if need_price and JUSTONE_API_KEY and len(products) > 0:
+    # 2. 调用 JustoneAPI —— 它才是**主力数据源**（价格/销量/好评词/服务保障）
+    #    ★ 修复：原逻辑是 `if ... and len(products) > 0`，即「官方 API 先有结果
+    #      才去调 Justone」。官方 SDK 未安装时 products 恒为空，Justone 永远不被调用，
+    #      整个搜索工具形同虚设（count=0）。现在两路独立采集，最后做全外连接合并。
+    justone_map: Dict[str, Dict[str, Any]] = {}
+    if JUSTONE_API_KEY:
         try:
             url = f"{JUSTONE_BASE_URL}/api/jd/search-item-list/v1"
             params = {
@@ -577,39 +605,79 @@ def search_products(
                 "keyword": keyword,
                 "page": str(page)
             }
-            
-            response = requests.get(url, params=params, timeout=10)
+
+            response = requests.get(url, params=params, timeout=15)
             result = response.json()
-            
+
             if result.get('code') == 0:
-                justone_products = result.get('data', {}).get('products', [])
-                
-                # 按ID匹配，合并数据
-                justone_map = {str(p['id']): p for p in justone_products}
-                
-                for product in products:
-                    sku_id = product['id'].replace('jd_', '')  # 去掉前缀匹配
-                    if sku_id in justone_map:
-                        j = justone_map[sku_id]
-                        
-                        # 映射到Product模型字段
-                        product['price'] = float(j.get('price', 0)) if j.get('price') else None
-                        product['shop_name'] = j.get('shopName')
-                        product['sales_count'] = _parse_sales(j.get('sales'))  # 转换为int
-                        product['good_comment_keywords'] = j.get('gcw', [])
-                        product['installment_info'] = j.get('foi')
-                        product['promo_tags'] = j.get('promoTag')
-                        product['url'] = j.get('landUrl')
-                        
+                justone_products = result.get('data', {}).get('products', []) or []
+                justone_map = {str(p.get('id')): p for p in justone_products}
+                logger.info(f"[Tool] Justone 返回 {len(justone_map)} 条")
+            else:
+                logger.warning(f"[Tool] JustoneAPI 返回错误: {result.get('message')}")
         except Exception as e:
             logger.warning(f"[Tool] JustoneAPI搜索失败: {e}")
-    
+    else:
+        logger.warning("[Tool] 未配置 JUSTONE_API_KEY，价格/销量数据将缺失")
+
+    # 3. 全外连接合并两路数据源
+    def _apply_justone(product: Dict[str, Any], j: Dict[str, Any]) -> None:
+        """把 Justone 的字段合并进商品对象（就地）。"""
+        product['price'] = float(j.get('price', 0)) if j.get('price') else None
+        product['shop_name'] = j.get('shopName')
+        product['sales_count'] = _parse_sales(j.get('sales'))
+        product['good_comment_keywords'] = j.get('gcw', [])
+        product['installment_info'] = j.get('foi')
+        product['promo_tags'] = j.get('promoTag')
+        product['url'] = j.get('landUrl')
+        product['month_sales'] = j.get('monthSales')
+
+    _merged_ids = set()
+    if products:
+        # 官方 API 有结果 → 逐个挂上 Justone 的富字段
+        for product in products:
+            sku_id = str(product.get('id', '')).replace('jd_', '')
+            j = justone_map.get(sku_id)
+            if j:
+                _apply_justone(product, j)
+                _merged_ids.add(sku_id)
+        # Justone 独有的商品（官方 API 没返回的）也补进来，避免漏掉热销款
+        for sku_id, j in justone_map.items():
+            if sku_id in _merged_ids:
+                continue
+            _prod = {
+                "id": f"jd_{sku_id}",
+                "title": j.get('title', ''),
+                "image_url": f"https://img10.360buyimg.com/n1/{j.get('imageUrl', '')}",
+                "platform": "jd",
+            }
+            _apply_justone(_prod, j)
+            products.append(_prod)
+    else:
+        # 官方 SDK 缺失 / 无结果 → 完全以 Justone 为准
+        for sku_id, j in justone_map.items():
+            _prod = {
+                "id": f"jd_{sku_id}",
+                "title": j.get('title', ''),
+                "image_url": f"https://img10.360buyimg.com/n1/{j.get('imageUrl', '')}",
+                "platform": "jd",
+            }
+            _apply_justone(_prod, j)
+            products.append(_prod)
+
+    # 4. 过滤掉既无标题又无价格的脏数据
+    products = [
+        p for p in products
+        if p.get('title') or p.get('price')
+    ]
+
     result = {
         "status": "success",
         "count": len(products),
         "products": products  # 已是Product兼容结构
     }
     _search_cache[cache_key] = result
+    logger.info(f"[Tool] 整合搜索完成: {keyword} → {len(products)} 条")
     return result
 
 

@@ -141,6 +141,10 @@
   --accent-800: #74d8b1;
   --accent-900: #a3e7cd;
 
+  /* 填充面 + 其上的文字：深色取 accent-400 作底，配近黑字 = 5.44:1 */
+  --accent-solid: #26996f;
+  --on-accent: #0e1012;
+
   --pos: #34c08c;
   --neg: #e8735f;
   --warn: #dca63a;

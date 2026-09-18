@@ -39,6 +39,11 @@ class EventType(str, Enum):
     # ═══ 工具类 (Tool Events) ═══
     TOOL_START = "tool_start"             # 工具调用开始
     TOOL_COMPLETE = "tool_complete"       # 工具调用完成
+
+    # ═══ 子智能体类 (Subagent Events) ═══
+    # 子智能体卡片的「展开 / 收起」指令。前端 handleSSEEvent 的
+    # case 'subagent_drill' 消费它；后端由 runtime 合成（不是真实工具返回值）。
+    SUBAGENT_DRILL = "subagent_drill"
     
     # ═══ 统计类 (Statistics Events) ═══
     STATISTICS = "statistics"             # Token/耗时统计

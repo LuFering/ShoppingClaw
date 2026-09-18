@@ -208,18 +208,42 @@
             <div class="state-collapse-inner">
               <div id="state-section-subagents" class="state-section-content">
                 <div v-if="subagents.length" class="state-list">
-                  <div v-for="(s, i) in subagents" :key="i" class="state-list-item">
+                  <div
+                    v-for="(s, i) in subagents"
+                    :key="i"
+                    class="state-list-item state-subagent-item"
+                    :class="{ 'is-open': expandedSub === i }"
+                    role="button"
+                    tabindex="0"
+                    :aria-expanded="expandedSub === i"
+                    @click="toggleSub(i)"
+                    @keydown.enter.self.prevent="toggleSub(i)"
+                    @keydown.space.self.prevent="toggleSub(i)"
+                  >
                     <Bot :size="15" class="state-list-item-icon" />
                     <div class="state-list-item-body">
                       <div class="state-list-item-title state-subagent-title">
-                        <span>{{ s.name }}</span>
+                        <span>{{ subagentName(s) }}</span>
                         <span
-                          class="state-subagent-status-icon"
+                          class="state-subagent-badge"
                           :class="subagentStatusClass(s.status)"
-                        ></span>
+                        >{{ subagentStatusLabel(s.status) }}</span>
                       </div>
-                      <div class="state-list-item-meta">{{ s.status || '' }}</div>
+                      <div v-if="subagentDetail(s)" class="state-list-item-meta">
+                        {{ subagentDetail(s) }}
+                      </div>
+                      <!-- 交付结果：点击子智能体行展开查看 -->
+                      <div v-if="expandedSub === i" class="subagent-result">
+                        <div class="subagent-result-label">交付结果</div>
+                        <div v-if="subagentResult(s)" class="subagent-result-body">{{ subagentResult(s) }}</div>
+                        <div v-else class="subagent-result-empty">执行中，结果返回后显示</div>
+                      </div>
                     </div>
+                    <ChevronRight
+                      :size="14"
+                      class="state-subagent-caret"
+                      :class="{ 'is-open': expandedSub === i }"
+                    />
                   </div>
                 </div>
                 <div v-else class="state-panel-empty">本轮未派发子智能体</div>
@@ -233,8 +257,8 @@
 </template>
 
 <script setup>
-import { reactive, computed } from 'vue'
-import { ChevronDown, RefreshCw, PanelRightClose, PanelTop, PanelBottom, Package, Bot, Timer, Wrench } from 'lucide-vue-next'
+import { reactive, computed, ref, watch } from 'vue'
+import { ChevronDown, ChevronRight, RefreshCw, PanelRightClose, PanelTop, PanelBottom, Package, Bot, Timer, Wrench } from 'lucide-vue-next'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -267,12 +291,51 @@ const normalizeStatus = (status) => {
 }
 
 const subagentStatusClass = (status) => {
-  const v = normalizeStatus(status)
-  if (v === 'completed') return 'state-subagent-completed-icon'
-  if (v === 'failed') return 'state-subagent-failed-icon'
-  if (v === 'in_progress') return 'state-subagent-running-icon'
+  const raw = String(status || '').toLowerCase()
+  if (['running', 'calling', 'in_progress', 'active', 'processing'].includes(raw))
+    return 'is-running'
+  if (['completed', 'done', 'success', 'ok', 'existing'].includes(raw)) return 'is-completed'
+  if (['failed', 'error', 'cancelled', 'canceled', 'interrupted'].includes(raw))
+    return 'is-failed'
   return ''
 }
+
+// 子智能体展示名：参数 subagent_type / subagent > display_label > 工具名兜底
+const subagentName = (s) =>
+  s?.args?.subagent_type || s?.args?.subagent || s?.display_label || s?.name || '子智能体'
+
+const subagentStatusLabel = (status) => {
+  const raw = String(status || '').toLowerCase()
+  if (raw === 'running' || raw === 'calling' || raw === 'in_progress' || raw === 'active')
+    return '运行中'
+  if (raw === 'completed' || raw === 'done' || raw === 'success' || raw === 'ok') return '已完成'
+  if (['failed', 'error', 'cancelled', 'canceled', 'interrupted'].includes(raw)) return '失败'
+  if (raw === 'pending') return '等待中'
+  return status || ''
+}
+
+// 一行信息：参数里的任务描述优先，完成后回退 result_preview
+const subagentDetail = (s) => {
+  const a = s?.args || {}
+  return a.description || s?.result_preview || ''
+}
+
+// ═══ 子智能体行展开：点击行查看该子智能体交付的结果 ═══
+// 同一时刻只展开一个，避免面板被多条结果撑高。
+const expandedSub = ref(-1)
+const toggleSub = (i) => {
+  expandedSub.value = expandedSub.value === i ? -1 : i
+}
+// 新一轮开始（子智能体列表清空）时收起，避免残留上一轮的展开态
+watch(
+  () => (props.subagents || []).length,
+  (len) => {
+    if (!len) expandedSub.value = -1
+  }
+)
+
+// 交付结果：完整结果（tool_complete 的 result_content → output）优先，回退一行摘要
+const subagentResult = (s) => s?.output ?? s?.result_content ?? s?.result_preview ?? ''
 
 const totalTodoCount = computed(() => (props.planSteps || []).length)
 const completedTodoCount = computed(
@@ -720,16 +783,88 @@ const fmtSeconds = (v) => {
   background: var(--gray-300);
 }
 
-.state-subagent-completed-icon {
-  background: var(--color-success-700);
+.state-subagent-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 17px;
+  padding: 0 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+
+  &.is-running {
+    color: var(--main-700);
+    background: var(--main-50);
+  }
+
+  &.is-completed {
+    color: var(--color-success-700);
+    background: var(--color-success-50, var(--gray-100));
+  }
+
+  &.is-failed {
+    color: var(--color-error-700);
+    background: var(--color-error-50, var(--gray-100));
+  }
 }
 
-.state-subagent-failed-icon {
-  background: var(--color-error-700);
+/* ═══ 子智能体行：可点击，展开查看交付结果 ═══ */
+.state-subagent-item {
+  cursor: pointer;
+
+  &:hover {
+    background: var(--gray-50);
+    border-color: var(--gray-150);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-200);
+    outline-offset: 2px;
+  }
+
+  &.is-open {
+    align-items: flex-start;
+    background: var(--gray-50);
+  }
 }
 
-.state-subagent-running-icon {
-  background: var(--color-info-700);
+.state-subagent-caret {
+  flex-shrink: 0;
+  color: var(--gray-300);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+
+  &.is-open {
+    transform: rotate(90deg);
+  }
+}
+
+.subagent-result {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--gray-100);
+  border-radius: 7px;
+  background: var(--gray-0);
+}
+
+.subagent-result-label {
+  margin-bottom: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--gray-400);
+}
+
+.subagent-result-body {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--gray-700);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.subagent-result-empty {
+  font-size: 12px;
+  color: var(--gray-400);
 }
 
 @media (prefers-reduced-motion: reduce) {

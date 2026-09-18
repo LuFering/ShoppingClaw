@@ -236,7 +236,7 @@
           :mode="statePanelMode"
           :docked="statePanelDocked"
           :dock-width="statePanelDockWidth"
-          :statistics="lastStatistics"
+          :statistics="panelStatistics"
           :plan-steps="thinkingState.planSteps || []"
           :products="productIndex"
           :subagents="subagentCalls"
@@ -735,6 +735,44 @@ const isLoadingMessages = computed(() => chatUIStore.isLoadingMessages)
 const isStreaming = computed(() => currentThreadState.value?.isStreaming || false)
 const isProcessing = computed(() => isStreaming.value)
 
+// ═══ 本轮统计（右侧状态面板）═══
+// 后端只在 done 事件带 statistics，流式过程中面板会一直显示「0 工具 / 耗时 —」。
+// 这里从 thinkingState.toolCalls 实时推导：条数、失败数实时累计，
+// 耗时在流式期间按起始时间每秒跳动；done 后与后端终值合并（取较大值，防抖）。
+const roundStartedAt = ref(0)
+const statsNow = ref(Date.now())
+let statsTicker = null
+watch(isStreaming, (on) => {
+  if (on) {
+    roundStartedAt.value = Date.now()
+    lastStatistics.value = null
+    statsTicker = setInterval(() => {
+      statsNow.value = Date.now()
+    }, 1000)
+  } else if (statsTicker) {
+    clearInterval(statsTicker)
+    statsTicker = null
+  }
+})
+const panelStatistics = computed(() => {
+  const calls = thinkingState.toolCalls || []
+  const backend = lastStatistics.value
+  const live = calls.length
+  const failed = calls.filter((t) => ['error', 'failed'].includes(t.status)).length
+  // 没有流在跑、没有后端终值、也没有工具记录 → 显示「暂无进行中的轮次」
+  if (!isStreaming.value && !backend && !live) return null
+  const total = Math.max(live, Number(backend?.total_tool_calls) || 0)
+  const timeCost = isStreaming.value && roundStartedAt.value
+    ? (statsNow.value - roundStartedAt.value) / 1000
+    : Number(backend?.time_cost) ||
+      (Number(backend?.elapsed_ms) ? Number(backend.elapsed_ms) / 1000 : 0)
+  return {
+    total_tool_calls: total,
+    failed_calls: Math.max(failed, Number(backend?.failed_calls) || 0),
+    time_cost: timeCost
+  }
+})
+
 // ═══ 生成中标志（对标 Yuxi generating-status）═══
 // 语义对标 Yuxi 的 threadState.replyLoadingVisible：
 // 由「流的生命周期」驱动（init/开始 → finished/error/interrupted 才结束），
@@ -801,6 +839,27 @@ const pendingAttachments = ref([])
 const onAttachmentsChange = (atts) => { pendingAttachments.value = atts || [] }
 
 const scrollController = new ScrollController('.chat-main')
+
+// ═══ 新一轮对话置顶锚定 ═══
+// 发起一条消息后，把「这一轮」钉在容器顶部，屏蔽掉上一段对话；
+// 流式输出期间保持置顶（新内容都追加在锚点下方，锚点位置不变，并用 ResizeObserver 兜底布局抖动）；
+// 用户主动滚动 → 立即解除（ScrollController.handleScroll）；本轮结束 → 解除，用户可从上到下完整阅读。
+// 锚点必须是「本轮的用户消息元素」，不能是 .conv-box：
+// historyConversations 是**整条线程一个大 conv**（见 historyConversations 实现），
+// 占位消息被丢弃的瞬间 live conv 会变空，"最后一个 .conv-box" 就退化成那个
+// 从第一条消息开始的历史盒子 → 被拉到 scrollTop≈0，表现就是"定位到第一条消息"。
+// 因此按本轮用户消息的 id 精确定位（AgentMessageComponent 已输出 data-msg-id）。
+const pinLatestTurnToTop = (msgId) => {
+  const selector = msgId
+    ? `.message-box[data-msg-id="${msgId}"]`
+    : '.message-box.human'
+  scrollController.pinToSelector(selector)
+}
+
+// 本轮流结束 → 解除锚定，把滚动控制权交还给用户
+watch(isStreaming, (on) => {
+  if (!on) scrollController.releasePin()
+})
 
 onMounted(async () => {
   nextTick(() => {
@@ -1132,8 +1191,18 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
     duration: toolCall.duration_ms ?? toolCall.duration ?? null,
     icon: toolCall.icon || meta.icon,
     category: meta.category,
+    // 一行可读摘要（后端 tool_complete 可能随结果下发），供工具头部直接展示，
+    // 避免只看到「工具 X 执行完成」而丢失「查到什么」的关键信息。
+    result_preview: toolCall.result_preview ?? null,
     // 失败原因（tool_error 事件下发），供工具行与展开区展示
     error_message: toolCall.error_message ?? null,
+    // 子智能体执行轨迹（调用工具 / 检索 RAG / 使用 Skill），由 tool_start / tool_complete 携带，
+    // 供左侧 TaskTool 详情与右侧状态面板子智能体行展示其执行状态与交付结果。
+    subagent_run: toolCall.subagent_run ?? null,
+    // 主智能体编排轨迹（Skill / RAG / MCP / 派遣决策），由 orchestrate 工具携带
+    orchestration: toolCall.orchestration ?? null,
+    // 下钻标志（expand / collapse）：由 subagent_drill 事件写入，卡片据此自行展开或收起
+    drill: toolCall.drill ?? null,
     toolCallId,
     // 归属的 AI 消息 id（后端下发）：决定该工具挂到哪条消息下
     messageId: toolCall.message_id || null,
@@ -1153,6 +1222,8 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
     if (Object.keys(item.args || {}).length) target.args = item.args
     if (target.duration == null) target.duration = item.duration
     if (!target.error_message && item.error_message) target.error_message = item.error_message
+    if (item.subagent_run) target.subagent_run = item.subagent_run
+    if (item.orchestration) target.orchestration = item.orchestration
     if (ts) upsertToolCallIntoMessage(ts, target.messageId, toYuxiToolCall(target))
     return target
   }
@@ -1163,13 +1234,17 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
   }
 
   const existingIndex = thinkingState.toolCalls.findIndex((item) => item.toolCallId === toolCallId || item.id === toolCallId)
-  if (existingIndex >= 0) {
-    thinkingState.toolCalls.splice(existingIndex, 1, {
-      ...thinkingState.toolCalls[existingIndex],
-      ...item,
-      args: Object.keys(item.args || {}).length ? item.args : thinkingState.toolCalls[existingIndex].args,
-      output: item.output ?? thinkingState.toolCalls[existingIndex].output
-    })
+    if (existingIndex >= 0) {
+      thinkingState.toolCalls.splice(existingIndex, 1, {
+        ...thinkingState.toolCalls[existingIndex],
+        ...item,
+        args: Object.keys(item.args || {}).length ? item.args : thinkingState.toolCalls[existingIndex].args,
+        output: item.output ?? thinkingState.toolCalls[existingIndex].output,
+        result_preview: item.result_preview ?? thinkingState.toolCalls[existingIndex].result_preview,
+        subagent_run: item.subagent_run ?? thinkingState.toolCalls[existingIndex].subagent_run,
+        orchestration: item.orchestration ?? thinkingState.toolCalls[existingIndex].orchestration,
+        drill: item.drill ?? thinkingState.toolCalls[existingIndex].drill
+      })
   } else {
     thinkingState.toolCalls.push(item)
   }
@@ -1182,6 +1257,23 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
     )
   }
   return item
+}
+
+// ═══ 子智能体下钻：把 expand / collapse 写到对应 task 卡片上 ═══
+// 后端不重复下发整个工具调用，只给 slug + action；这里找到该子智能体的任务卡并打标记。
+// 找不到（事件早于 tool_start 到达）时忽略——不影响主流程。
+const setToolCallDrill = (slug, action, ts = null) => {
+  if (!slug || !action) return
+  const target = [...thinkingState.toolCalls]
+    .reverse()
+    .find(
+      (t) =>
+        String(t.name || '') === 'task' &&
+        String(t.args?.subagent_type || t.args?.subagent || '') === String(slug)
+    )
+  if (!target) return
+  target.drill = action
+  if (ts) upsertToolCallIntoMessage(ts, target.messageId, toYuxiToolCall(target))
 }
 
 // ═══ SSE 事件处理函数（新协议）═══
@@ -1249,6 +1341,14 @@ const handleSSEEvent = (eventType, data, context) => {
       }, ts)
       break
       
+    case 'subagent_drill':
+      // 子智能体「展开 / 收起」：后端在开始干活前下发 expand（让用户看见它内部在做什么），
+      // 干完下发 collapse（把之前展开的那一段收起来，视线交还给主线对话）。
+      // 只写 drill 标志，由 BaseToolCall 自己 watch 后改展开态 ——
+      // 这样用户手动折叠过的卡片不会被无条件重新展开。
+      setToolCallDrill(data.slug, data.action, ts)
+      break
+
     case 'tool_start':
       // 工具调用开始
       upsertToolCall({
@@ -1259,6 +1359,8 @@ const handleSSEEvent = (eventType, data, context) => {
         args: data.arguments || {},
         icon: data.meta?.icon,
         category: data.meta?.category,
+        subagent_run: data.subagent_run,
+        orchestration: data.orchestration,
         message_id: data.message_id,
       }, ts)
       break
@@ -1273,6 +1375,8 @@ const handleSSEEvent = (eventType, data, context) => {
         duration_ms: data.duration_ms,
         result_preview: data.result_preview,
         output: data.result_content ?? data.output ?? data.result_preview,
+        subagent_run: data.subagent_run,
+        orchestration: data.orchestration,
         message_id: data.message_id,
       }, ts)
       
@@ -1439,6 +1543,9 @@ const handleSendOrStop = async () => {
     isPlaceholder: true,
   }
   if (!ts.onGoingConv.order.includes(placeholderKey)) ts.onGoingConv.order.push(placeholderKey)
+
+  // 新一轮置顶：把本轮用户消息钉到容器顶部，屏蔽上一段对话
+  pinLatestTurnToTop(userMsg.id)
 
   // 支持"停止"时真正中断 fetch
   const ac = new AbortController()
@@ -1883,6 +1990,10 @@ defineExpose({
   overflow-x: hidden;
   min-width: 0;
   position: relative;
+  /* 关闭浏览器滚动锚定：Chrome 会在内容增长时主动调整 scrollTop 以"保持视觉稳定"，
+     这会与新一轮置顶的强制对齐打架，表现为流式期间内容往下跑、挤占上方消息。
+     置顶期间滚动位置由 ScrollController 全权负责，不需要浏览器插手。 */
+  overflow-anchor: none;
 }
 
 .chat-box {

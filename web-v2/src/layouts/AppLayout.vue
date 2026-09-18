@@ -1,16 +1,18 @@
 <script setup>
 import { ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { Bot, Library, CalendarClock, Plug, Home, Radar, Wrench } from 'lucide-vue-next'
+import { Bot, Library, CalendarClock, Plug, Home, Radar, Wrench, Gift, ClipboardList } from 'lucide-vue-next'
 import UserMenuButton from '@/components/UserMenuButton.vue'
 import parrotLogo from '@/assets/parrot-logo.png'
 
 const route = useRoute()
 
-// 高频主区：问一句（主页）、看情报（主动助理）、翻台账（购物档案）
+// 高频主区：问一句（主页）、看情报（主动助理）、替人买（代购送礼）、做规划（采购规划）、翻台账（购物档案）
 const mainList = [
   { name: '主页', path: '/agent', icon: Home },
   { name: '主动助理', path: '/assistant', icon: Radar },
+  { name: '代购送礼', path: '/proxy', icon: Gift },
+  { name: '采购规划', path: '/planning', icon: ClipboardList },
   { name: '购物档案', path: '/decisions', icon: Library }
 ]
 

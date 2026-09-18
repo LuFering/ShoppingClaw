@@ -49,6 +49,69 @@ const router = createRouter({
       ]
     },
     {
+      path: '/proxy',
+      name: 'ProxyShopping',
+      component: AppLayout,
+      children: [
+        {
+          // 三栏工作台：左 礼物探索流 / 中 人物档案卡 / 右 交付区
+          path: '',
+          name: 'GiftWorkbench',
+          component: () => import('../views/GiftWorkbenchView.vue'),
+          meta: { keepAlive: false, requiresAuth: false }
+        },
+        {
+          // v2 礼盒生长保留但不再挂主导航，便于与 v3 对照
+          path: 'box',
+          name: 'GiftBox',
+          component: () => import('../views/GiftBoxView.vue'),
+          meta: { keepAlive: false, requiresAuth: false }
+        },
+        {
+          // v1 流式卷轴保留但不再挂主导航，便于与 v2 对照、必要时回退
+          path: 'scroll',
+          name: 'GiftStream',
+          component: () => import('../views/GiftStreamView.vue'),
+          meta: { keepAlive: true, requiresAuth: false }
+        },
+        {
+          // 旧的分步向导页保留但不再挂主导航，便于对照与回退
+          path: 'wizard',
+          name: 'ProxyShoppingWizard',
+          component: () => import('../views/ProxyShoppingView.vue'),
+          meta: { keepAlive: true, requiresAuth: false }
+        }
+      ]
+    },
+    {
+      path: '/planning',
+      name: 'PurchasePlanning',
+      component: AppLayout,
+      children: [
+        {
+          // 对话入口页：结构化输入 + 预设方案，负责把需求收敛成参数
+          path: '',
+          name: 'PurchasePlanningEntry',
+          component: () => import('../views/PurchaseEntryView.vue'),
+          meta: { keepAlive: true, requiresAuth: false }
+        },
+        {
+          // 工作台执行页：左执行流 / 中决策图 / 右待交付，按任务实例化，不进 keepAlive
+          path: 'run',
+          name: 'PurchaseWorkbench',
+          component: () => import('../views/PurchaseWorkbenchView.vue'),
+          meta: { keepAlive: false, requiresAuth: false }
+        },
+        {
+          // 旧的分步向导页保留但不再挂路由，便于对照与回退
+          path: 'wizard',
+          name: 'PurchasePlanningWizard',
+          component: () => import('../views/PurchasePlanningView.vue'),
+          meta: { keepAlive: true, requiresAuth: false }
+        }
+      ]
+    },
+    {
       path: '/decisions',
       name: 'DecisionLibrary',
       component: AppLayout,

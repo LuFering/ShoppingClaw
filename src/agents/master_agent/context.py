@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Optional, List, Dict
 
 from src.agents.common.context import BaseContext
-from src.agents.common.model.intent_state import IntentState
 
 BASE_AGENT_PROMPT = (Path(__file__).parent / "BASE_PROMPT.md").read_text(encoding="utf-8")
 
@@ -30,7 +29,7 @@ class MasterContext(BaseContext):
         },
     )
 
-    intent:Optional[IntentState]=field(
+    intent:Optional[dict]=field(
         default=None,
         metadata={
             "name":"意图状态",

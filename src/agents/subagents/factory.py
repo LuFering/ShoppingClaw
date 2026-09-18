@@ -2,12 +2,12 @@ from pathlib import Path
 import yaml
 from langchain.agents import create_agent
 from langchain_core.prompts import ChatPromptTemplate
-from src.agents.common.model import load_chat_model
+from src.agents.common.llm import load_chat_model
 from src.agents.common.toolkits import get_all_tool_instances
 
 # 导入 SubAgent 输出协议
 try:
-    from agents.common.model import ResearcherOutput, AnalystOutput, CriticOutput, MemoryOutput
+    from src.agents.common.model import ResearcherOutput, AnalystOutput, CriticOutput, MemoryOutput
 except ImportError:
     ResearcherOutput = AnalystOutput = CriticOutput = MemoryOutput = None
 

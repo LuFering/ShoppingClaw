@@ -1,5 +1,5 @@
 <template>
-  <BaseToolCall :tool-call="toolCall" hide-params>
+  <BaseToolCall :tool-call="toolCall" hide-params :default-expanded="true">
     <template #header>
       <div class="sep-header">
         <span class="note">提问</span>

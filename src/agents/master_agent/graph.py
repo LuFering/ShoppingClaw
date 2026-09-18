@@ -15,7 +15,7 @@ from src.agents.common.middleware.patch_tool_calls import PatchToolCallsMiddlewa
 from src.agents.common.middleware.skills import SkillsMiddleware
 from src.agents.common.middleware.subagents import SubAgentMiddleware
 from src.agents.common.middleware.summarization import SummaryOffloadMiddleware
-from src.agents.common.models import load_chat_model
+from src.agents.common.llm import load_chat_model
 from src.agents.common.toolkits import get_all_tool_instances
 from src.agents.common.toolkits.runtime import configure_runtime, get_lifecycle_handler
 from src.agents.master_agent.context import MasterContext

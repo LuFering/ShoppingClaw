@@ -116,22 +116,13 @@ const areToolCallsExpanded = ref(true)
 
 watch(
   [() => normalizedToolCalls.value.length, () => props.isActive],
-  ([, isActive], [, previousActive]) => {
-    // 如果是活跃状态，强制展开
+  ([, isActive]) => {
+    // 活跃时强制展开。
+    // 非活跃时**不再自动收起**：旧实现在「活跃→非活跃」和初始化时都强制置 false，
+    // 导致对话一结束「已调用 N 个工具」就自动折叠成一行摘要，刚看到的过程被收走。
+    // 现在保持用户当前状态（初始为展开），收起与否完全交给用户点击。
     if (isActive) {
       areToolCallsExpanded.value = true
-      return
-    }
-
-    // 从活跃转为非活跃（例如：正文开始输出了），则收起
-    if (previousActive === true && isActive === false) {
-      areToolCallsExpanded.value = false
-      return
-    }
-
-    // 初始化或非活跃状态下，默认保持收起
-    if (!previousActive && !isActive) {
-      areToolCallsExpanded.value = false
     }
   },
   { immediate: true }

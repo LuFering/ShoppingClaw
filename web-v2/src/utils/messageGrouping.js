@@ -37,7 +37,15 @@ export const toYuxiToolCall = (toolCall) => {
     ...(status === 'error' && rawOutput ? { error_message: String(rawOutput) } : {}),
     // 后端 tool_error 事件携带的失败原因优先于上面的兜底
     ...(toolCall.error_message ? { error_message: String(toolCall.error_message) } : {}),
-    ...(toolCall.display_label ? { display_label: toolCall.display_label } : {})
+    ...(toolCall.display_label ? { display_label: toolCall.display_label } : {}),
+    // 子智能体执行轨迹（调用工具 / 检索 RAG / 使用 Skill）必须透传到消息级 tool_calls。
+    // 左侧对话里的子智能体卡片由 TaskTool 渲染，读的是消息级 toolCall.subagent_run；
+    // 这里若丢字段，TaskTool 的「执行详情」就会一直是空的。
+    ...(toolCall.subagent_run ? { subagent_run: toolCall.subagent_run } : {}),
+    // 主智能体编排轨迹：左侧 orchestrate 卡片读消息级 toolCall.orchestration
+    ...(toolCall.orchestration ? { orchestration: toolCall.orchestration } : {}),
+    // 下钻标志（expand / collapse）：左侧 TaskTool 卡片据此自动展开/收起
+    ...(toolCall.drill ? { drill: toolCall.drill } : {})
   }
 }
 
@@ -113,7 +121,12 @@ export const getConversationDisplayItems = (
   }
 
   conv.messages.forEach((message, index) => {
-    const seed = message.id || index
+    // seed 决定「正文 / 工具组」的交替边界：
+    // 后端把一条 message_id 的消息拆成若干条 {type:'ai'|'thinking'} 片段下发，
+    // **同属一个 message_id 的片段必须归并成同一条展示项**，不同 message_id 才切开。
+    // 因此 seed 用 message_id 优先；这样「一段前导文本 + 紧随其后的状态块」
+    // 天然拼成 [AI(t1), 工具卡, AI(t2), 工具卡, …]，而不是把所有文本并成一大段。
+    const seed = message.message_id || message.messageId || message.id || index
 
     // ── SC 过程段：思考 + 工具调用 ──
     if (message.type === 'thinking') {

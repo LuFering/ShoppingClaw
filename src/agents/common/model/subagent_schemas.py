@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Any
-from agents.common.model.product import Product
+from src.agents.common.model.product import Product
 
 class ResearcherData(BaseModel):
     """Researcher 输出的数据结构化封装。请确保所有数据均源自工具调用结果。"""

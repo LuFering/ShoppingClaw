@@ -139,7 +139,7 @@ _EXCLUDED_STATE_KEYS = {"messages", "todos", "structured_response", "skills_meta
 def _get_output_schema(subagent_type: str):
     """按 Agent 类型获取对应的 Pydantic 输出协议（懒加载，避免循环依赖）。"""
     try:
-        from agents.common.model import (
+        from src.agents.common.model import (
             ResearcherOutput,
             AnalystOutput,
             CriticOutput,

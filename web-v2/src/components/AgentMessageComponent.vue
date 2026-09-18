@@ -3,7 +3,12 @@
     <img :src="`data:image/jpeg;base64,${message.image_content}`" alt="上传的图片" />
   </div>
   <!-- 思考过程数据消息不渲染到对话区（仅用于恢复右侧思考面板） -->
-  <div v-if="message.type !== 'thinking'" class="message-box" :class="[message.type, customClasses]">
+  <div
+    v-if="message.type !== 'thinking'"
+    class="message-box"
+    :class="[message.type, customClasses]"
+    :data-msg-id="message.id ?? null"
+  >
     <!-- 用户消息 -->
     <div v-if="message.type === 'human'" class="message-copy-btn human-copy"
       @click="copyToClipboard(message.content)" :class="{ 'is-copied': isCopied }">

@@ -45,6 +45,16 @@ import AskUserQuestionTool from './tools/AskUserQuestionTool.vue'
 // SC 电商业务工具
 import ProductCardTool from './tools/ProductCardTool.vue'
 import ChartTool from './tools/ChartTool.vue'
+import ShopTool from './tools/ShopTool.vue'
+
+// SC 交付形态（购物档案视角）：一个工具 = 一种产物 = 一个专属组件
+import DecisionArchiveTool from './tools/DecisionArchiveTool.vue'
+import ComparisonTableTool from './tools/ComparisonTableTool.vue'
+import ReminderListTool from './tools/ReminderListTool.vue'
+import ReviewCardTool from './tools/ReviewCardTool.vue'
+
+// 主智能体编排（编排层执行状态：Skill / RAG / MCP / 派遣决策）
+import OrchestrateTool from './tools/OrchestrateTool.vue'
 
 import { getToolCallId, isHiddenToolCall } from './toolRegistry'
 
@@ -96,10 +106,54 @@ const TOOL_RENDERERS = {
   write_file: WriteFileTool,
   write_todos: TodoListTool,
 
-  // 电商业务（SC 扩展）
+  // 电商业务（SC 扩展）—— 通用购物工具统一走 ShopTool（可读头部 + 结构化结果）
+  search_products: ShopTool,
+  jd_search: ShopTool,
+  search: ShopTool,
+  pdd_goods_search: ShopTool,
+  taobao_searchMaterial: ShopTool,
+  taobao_getItemInfo: ShopTool,
+  compare_products: ShopTool,
+  compare: ShopTool,
+  get_price: ShopTool,
+  price_history: ShopTool,
+  query_coupon: ShopTool,
+  coupon: ShopTool,
+  check_stock: ShopTool,
+  stock: ShopTool,
+  shop_reliability: ShopTool,
+  analyze_shop_reliability: ShopTool,
+  analyze_reviews: ShopTool,
+  reviews: ShopTool,
+  risk_audit: ShopTool,
+  critic: ShopTool,
+  get_product_full_detail: ShopTool,
+  get_products_specs_batch: ShopTool,
+  get_products_specs_extract: ShopTool,
+  query_category_knowledge: ShopTool,
+  get_user_profile: ShopTool,
+  get_user_shopping_context: ShopTool,
+
+  // 专属呈现（保留独立组件）
   render_product_card: ProductCardTool,
   chart: ChartTool,
-  draw_chart: ChartTool
+  draw_chart: ChartTool,
+
+  // ── 交付形态（购物档案视角）─────────────────────────────
+  // 查不到实名订单、也不爬每款售后政策，所以"购后"不做物流/工单，
+  // 而是把决策沉淀进购物档案：归档 → 阶段 → 提醒 → 复盘。
+  save_to_archive: DecisionArchiveTool,
+  update_record_phase: DecisionArchiveTool,
+  render_comparison: ComparisonTableTool,
+  set_reminder: ReminderListTool,
+  write_review: ReviewCardTool,
+
+  // ── 主智能体编排（编排层自己的执行状态）─────────────────
+  orchestrate: OrchestrateTool,
+
+  // ── 主智能体反问澄清（契约里叫 ask_user，渲染复用 Yuxi 的提问组件）──
+  ask_user: AskUserQuestionTool,
+  ask_user_question: AskUserQuestionTool
 }
 
 const currentRenderer = computed(() => TOOL_RENDERERS[toolId.value] || null)

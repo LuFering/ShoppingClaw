@@ -10,7 +10,6 @@ __all__ = [
     "MemoryMiddleware",
     "SkillsMiddleware",
     "SSEMonitoringMiddleware",
-    "StateInjectorMiddleware",
     "SubAgent",
     "SubAgentMiddleware",
     "SummaryOffloadMiddleware",
@@ -27,7 +26,6 @@ from src.agents.common.middleware.memory import MemoryMiddleware
 from src.agents.common.middleware.offload import ToolResultOffloadMiddleware
 from src.agents.common.middleware.skills import SkillsMiddleware
 from src.agents.common.middleware.sse_monitor import SSEMonitoringMiddleware
-from src.agents.common.middleware.state_injector import StateInjectorMiddleware
 from src.agents.common.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
 from src.agents.common.middleware.summarization import SummaryOffloadMiddleware
 from src.agents.common.middleware.thinkingprocess import ThinkingProcessMiddleware

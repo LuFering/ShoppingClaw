@@ -17,6 +17,85 @@ load_dotenv()
 REASONING_AWARE_PROVIDERS = ("deepseek", "aliyun", "SenseNova", "openai")
 _model_cache: dict[str, BaseChatModel] = {}
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 限额熔断（circuit breaker）
+#
+# 背景：上层（前端模型选择器）会把用户选中的 "provider/model" 随请求传下来，
+# 一旦该模型配额用尽（429 insufficient_quota / tpm/rpm 超限）或欠费（402），
+# 整条 SSE 流会直接在第一次 model 调用处抛错，前端只会看到一句问候语，
+# 所有工具卡 / 编排卡 / 子智能体卡统统不出现 —— 表现为"前端设计丢了"，
+# 实际是模型压根没跑起来。
+#
+# 对策：把「已经确认不可用」的模型记进一个带 TTL 的黑名单，加载时直接跳过它，
+# 静默回退到默认模型（config.default_model）。这样即使前端 localStorage 里
+# 存着一个欠费的模型名，对话也能正常跑完并出卡片。
+# ═══════════════════════════════════════════════════════════════════════════
+_UNAVAILABLE_TTL_SECONDS = 600  # 10 分钟内不再重试同一个死模型
+_unavailable_models: dict[str, float] = {}
+_UNAVAILABLE_MARKERS = (
+    "insufficient_quota",
+    "insufficient balance",
+    "inference exceeds tpm/rpm limit",
+    "free quota exhausted",
+    "rate limit",
+    "429003",
+    # deepseek 官方 402 只有一句 "Insufficient Balance"
+)
+
+
+def mark_model_unavailable(fully_specified_name: str, reason: str = "") -> None:
+    """把一个模型标记为「暂时不可用」，在 TTL 内加载时会被跳过。"""
+    import time as _time
+
+    if not fully_specified_name:
+        return
+    first = fully_specified_name not in _unavailable_models
+    _unavailable_models[fully_specified_name] = _time.time() + _UNAVAILABLE_TTL_SECONDS
+    if first:
+        logging.warning(
+            f"[ModelHealth] 模型 {fully_specified_name} 已标记为不可用 "
+            f"({_UNAVAILABLE_TTL_SECONDS}s 内跳过)：{reason}"
+        )
+
+
+def is_model_unavailable(fully_specified_name: str) -> bool:
+    """判断模型是否仍在熔断窗口内。窗口过期会自动清除。"""
+    import time as _time
+
+    exp = _unavailable_models.get(fully_specified_name)
+    if exp is None:
+        return False
+    if _time.time() >= exp:
+        _unavailable_models.pop(fully_specified_name, None)
+        logging.info(f"[ModelHealth] 模型 {fully_specified_name} 熔断窗口已过期，恢复可用")
+        return False
+    return True
+
+
+def is_quota_error(exc: BaseException) -> bool:
+    """判断异常是否属于「这个模型不能用了」这一类（配额/欠费/限流）。"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "ratelimiterror" in text or "apistatuserror" in text:
+        return True
+    return any(m in text for m in _UNAVAILABLE_MARKERS)
+
+
+def load_chat_model_with_fallback(fully_specified_name: str):
+    """加载模型；若该模型已被熔断，则回退到 config.default_model。
+
+    返回 (model_instance, actual_spec_used)。
+    """
+    if fully_specified_name and is_model_unavailable(fully_specified_name):
+        fallback = config.default_model
+        if fallback != fully_specified_name:
+            logging.warning(
+                f"[ModelHealth] {fully_specified_name} 处于熔断窗口，"
+                f"本次对话改用默认模型 {fallback}"
+            )
+            return load_chat_model(fallback), fallback
+    return load_chat_model(fully_specified_name), fully_specified_name
+
+
 def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
     # 检查缓存：相同模型名 + 相同 kwargs 直接复用
     cache_key = f"{fully_specified_name}__{hash(frozenset(kwargs.items()))}" if kwargs else fully_specified_name

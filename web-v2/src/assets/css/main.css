@@ -4,6 +4,7 @@
 @import './shorts.css';
 @import './page.less';
 @import './markdown-preview.less';
+@import './gift.less';
 
 :root {
   --header-height: 45px;
@@ -197,6 +198,11 @@ h1, h2, h3, h4, h5, h6 {
   --accent-700: #0f6349;
   --accent-800: #0b4d39;
   --accent-900: #073528;
+
+  /* 填充面 + 其上的文字：--accent-500 是线条/文字色，白字压上去只有 4.31:1，不达 AA。
+     填充类元素（徽标 / 主按钮 / 激活圆点）一律用 --accent-solid + --on-accent。 */
+  --accent-solid: #0f6349; /* 浅色取 accent-700，配 --on-accent = 7.25:1 */
+  --on-accent: #ffffff;
 
   --pos: #1f9d5b; /* 上涨 / 已验证（绿） */
   --neg: #d6543f; /* 风险 / 下跌（暖红） */

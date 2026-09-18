@@ -43,6 +43,7 @@
             :result-content="resultContent"
           >
             工具&nbsp; <span class="tool-name">{{ toolName }}</span> &nbsp; 执行完成
+            <span v-if="headerDetail" class="tool-header-detail">· {{ headerDetail }}</span>
           </slot>
 
           <slot
@@ -53,10 +54,15 @@
           >
             工具&nbsp; <span class="tool-name">{{ toolName }}</span> &nbsp; 执行失败
             <span v-if="toolCall.error_message">（{{ toolCall.error_message }}）</span>
+            <span
+              v-else-if="headerDetail"
+              class="tool-header-detail"
+            >· {{ headerDetail }}</span>
           </slot>
 
           <slot name="header-running" v-else :tool-name="toolName">
             正在调用工具: &nbsp; <span class="tool-name">{{ toolName }}</span>
+            <span v-if="headerDetail" class="tool-header-detail">· {{ headerDetail }}</span>
           </slot>
         </template>
       </div>
@@ -75,8 +81,13 @@
         <div class="tool-params" v-if="hasParams && !hideParams">
           <slot name="params" :tool-call="toolCall" :args="formattedArgs">
             <div class="tool-params-content">
-              <strong>参数: </strong>
-              <span>{{ formattedArgs }}</span>
+              <template v-if="paramRows">
+                <div v-for="(p, i) in paramRows" :key="i" class="param-row">
+                  <span class="param-key">{{ p.key }}</span>
+                  <span class="param-val">{{ p.val }}</span>
+                </div>
+              </template>
+              <span v-else><strong>参数: </strong>{{ formattedArgs }}</span>
             </div>
           </slot>
         </div>
@@ -113,7 +124,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { Loader, ChevronsUpDown, ChevronsDownUp, XCircle, CheckCircle } from 'lucide-vue-next'
 import { useAgentStore } from '@/stores/agent'
 import { storeToRefs } from 'pinia'
@@ -123,7 +134,8 @@ import {
   getToolIcon,
   getToolName,
   findToolInList,
-  getToolCallStatus
+  getToolCallStatus,
+  parseToolCallArgs
 } from './toolRegistry'
 
 const props = defineProps({
@@ -164,6 +176,17 @@ const isTimeline = computed(() => props.appearance === 'timeline')
 const toggleExpand = () => {
   isExpanded.value = !isExpanded.value
 }
+
+// 下钻开关：后端在子智能体开始/结束时下发 subagent_drill 事件（expand / collapse），
+// 由 AgentChatComponent 写到 toolCall.drill 上，这里被动跟随。
+// 注意只在值真正变化时改 isExpanded，否则用户手动折叠后会被立刻覆盖回去。
+watch(
+  () => props.toolCall?.drill,
+  (v) => {
+    if (v === 'expand') isExpanded.value = true
+    else if (v === 'collapse') isExpanded.value = false
+  }
+)
 
 const toolStatus = computed(() => getToolCallStatus(props.toolCall))
 const hasToolError = computed(() => toolStatus.value === 'error')
@@ -217,7 +240,71 @@ const hasParams = computed(() => {
 
 // Result Logic
 const resultContent = computed(() => {
-  return props.toolCall.tool_call_result?.content ?? props.toolCall.result
+  // 兼容 SC 流式侧：完整结果落在 output 字段（SSE tool_complete 写入），
+  // 后端若只下发 result_preview，这里也一并纳入，保证展开区有内容可渲染。
+  return (
+    props.toolCall.tool_call_result?.content ??
+    props.toolCall.result ??
+    props.toolCall.output ??
+    props.toolCall.result_preview ??
+    null
+  )
+})
+
+// 一行可读摘要：优先 result_preview / 非结构化文本；结构化结果交给 #result 插槽自解析。
+const previewText = computed(() => {
+  const rp = props.toolCall?.result_preview
+  if (rp) return String(rp)
+  const out = props.toolCall?.output ?? props.toolCall?.result
+  if (typeof out === 'string' && !out.trim().startsWith('{')) return out
+  const c = parsedResultData.value
+  if (c && (c.result_preview || c.summary || c.preview)) return c.result_preview || c.summary || c.preview
+  return ''
+})
+
+// 运行中 / 失败态：从参数推断「在做什么」，给头部一行描述（对标 Yuxi 的可读头部）。
+const argHint = computed(() => {
+  const a = parseToolCallArgs(props.toolCall) || {}
+  if (a.keyword || a.q) {
+    const kw = a.keyword || a.q
+    return [kw, a.budget ? `预算 ¥${a.budget}` : ''].filter(Boolean).join(' · ')
+  }
+  if (a.items) return `对比：${Array.isArray(a.items) ? a.items.join('、') : a.items}`
+  if (a.product || a.product_name) return a.product || a.product_name
+  if (a.platform) return `平台：${a.platform}`
+  if (a.sku || a.goods_id) return `SKU ${a.sku || a.goods_id}`
+  if (a.category) return `品类：${a.category}`
+  const entries = Object.entries(a)
+    .slice(0, 2)
+    .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
+  return entries.join(' · ')
+})
+
+// 头部一行描述：完成后显示摘要，运行中显示参数意图，失败显示错误信息。
+const headerDetail = computed(() => {
+  if (effectiveStatus.value === 'error')
+    return props.toolCall?.error_message || argHint.value || '执行失败'
+  if (effectiveStatus.value === 'completed' && previewText.value) return previewText.value
+  return argHint.value
+})
+
+// 参数以「键值对」渲染（比裸 JSON 更易读），长值截断；非对象参数退回原样。
+const paramRows = computed(() => {
+  const args = props.toolCall.args ?? props.toolCall.function?.arguments
+  let obj = args
+  if (typeof args === 'string') {
+    try {
+      obj = JSON.parse(args)
+    } catch {
+      return null
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
+  return Object.entries(obj).map(([k, v]) => {
+    let val = typeof v === 'object' ? JSON.stringify(v) : String(v)
+    if (val.length > 120) val = val.slice(0, 117) + '…'
+    return { key: k, val }
+  })
 })
 
 const hasResult = computed(() => {
@@ -288,6 +375,15 @@ const formatResultData = (data) => {
     .tool-name {
       font-weight: 600;
       color: var(--main-700);
+    }
+
+    .tool-header-detail {
+      font-weight: 400;
+      color: var(--gray-500);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
     }
 
     .tool-loader {
@@ -393,6 +489,24 @@ const formatResultData = (data) => {
         overflow-x: auto;
         color: var(--gray-600);
         line-height: 1.5;
+
+        .param-row {
+          display: flex;
+          gap: 8px;
+          padding: 2px 0;
+
+          .param-key {
+            flex-shrink: 0;
+            color: var(--gray-500);
+            font-weight: 500;
+          }
+
+          .param-val {
+            color: var(--gray-800);
+            word-break: break-word;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+          }
+        }
 
         pre {
           margin: 0;
