@@ -1,4 +1,5 @@
 """内置工具集 - ShoppingClaw 硬编码工具实现"""
+import asyncio
 import logging
 import re
 from typing import Annotated, Any, List, Optional
@@ -13,7 +14,33 @@ from src.agents.common.toolkits import tool
 from src.storage.postgres.manager import pg_manager
 from src.storage.postgres.models_business import User
 
+# 偏好写入锁：串行化 config_json 的「读-改-写」，避免并发丢字段。
+# 注意：asyncio.Lock 必须在事件循环内创建/使用；本模块在进程启动时导入，
+# 且所有调用都在同一个 serve loop 内（uvicorn 单事件循环），因此安全。
+_PREF_WRITE_LOCK = asyncio.Lock()
+
+
+def _as_user_pk(user_id):
+    """把入参规范成 users.id 主键（integer 列）。
+
+    users.id 是 integer，而 runtime 传进来的是字符串（如 "7"）。
+    直接比较会触发 `operator does not exist: integer = character varying`。
+    非数字入参（模型有时会瞎填 "user"）转不动，返回 -1 ——
+    主键不自增到负数，查询必然落空，由工具层的「未找到用户」兜底。
+    """
+    try:
+        return int(user_id)
+    except (TypeError, ValueError):
+        return -1
+
+
 logger = logging.getLogger(__name__)
+
+# ⚠️ 用户标识约定（2026-09-22 统一）：
+#   本模块所有工具按**主键 users.id** 查用户（如 "7"），
+#   因为 runtime 传入的 user_id 就是 str(current_user.id)。
+#   历史上这里写的是 User.user_id（登录 ID，如 "scdev"），
+#   与传入值对不上，导致工具恒查不到用户、归档静默失败。
 
 
 # ==================== 数据模型定义 ====================
@@ -54,7 +81,7 @@ async def get_user_shopping_context(user_id: str) -> str:
     logger.info(f"[Tool] 获取综合购物上下文: {user_id}")
     try:
         async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(User).where(User.user_id == user_id))
+            result = await session.execute(select(User).where(User.id == _as_user_pk(user_id)))
             user = result.scalars().first()
             
             if not user:
@@ -93,9 +120,19 @@ async def save_user_preference(user_id: str, key: str, value: str) -> str:
         value: 偏好值（如 "小米", "5000"）
     """
     logger.info(f"[Tool] 保存用户偏好: {user_id} | {key} = {value}")
+    # ═══ 串行化「读-改-写」（2026-09-22）═══
+    # 模型会并发为多个字段各调一次本工具（实测一次对话 7 次调用）。
+    # 若不串行，多个事务读到同一份 config_json 快照、各自加键再写回，
+    # 最后一个提交的胜出 —— 实测 4 个字段只留下 2 个。
+    async with _PREF_WRITE_LOCK:
+        return await _save_user_preference_inner(user_id, key, value)
+
+
+async def _save_user_preference_inner(user_id: str, key: str, value: str) -> str:
+    """save_user_preference 的实际逻辑（由上面的锁串行化后调用）。"""
     try:
         async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(User).where(User.user_id == user_id))
+            result = await session.execute(select(User).where(User.id == _as_user_pk(user_id)))
             user = result.scalars().first()
             
             if not user:
@@ -136,7 +173,7 @@ async def recall_past_decisions(user_id: str, topic: str) -> str:
     logger.info(f"[Tool] 检索历史决策: {user_id} | {topic}")
     try:
         async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(User).where(User.user_id == user_id))
+            result = await session.execute(select(User).where(User.id == _as_user_pk(user_id)))
             user = result.scalars().first()
             
             if not user or not user.config_json:
@@ -181,7 +218,7 @@ async def track_task_progress(
     logger.info(f"[Tool] 追踪任务进度: {user_id} | {stage} | {status}")
     try:
         async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(User).where(User.user_id == user_id))
+            result = await session.execute(select(User).where(User.id == _as_user_pk(user_id)))
             user = result.scalars().first()
             if not user:
                 return f"错误: 未找到用户 {user_id}"
@@ -349,7 +386,7 @@ async def get_user_profile(user_id: str) -> str:
     logger.info(f"[Tool] 获取用户画像: {user_id}")
     try:
         async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(User).where(User.user_id == user_id))
+            result = await session.execute(select(User).where(User.id == _as_user_pk(user_id)))
             user = result.scalars().first()
             
             if not user:
@@ -395,47 +432,62 @@ async def get_user_profile(user_id: str) -> str:
 )
 def render_product_card(product: dict) -> str:
     """将商品数据渲染为精美的 Markdown 卡片。
-    
+
     参数:
-        product: 商品字典，包含 title, price, platform, url, image_url, rating, shop_name 等
+        product: 商品字典，包含 sku_id, title, price, platform, url, image_url,
+                 rating, shop_name 等
     """
     logger.info(f"[Tool] 渲染商品卡片: {product.get('title', 'Unknown')}")
-    
+
     title = product.get("title", "未知商品")
+    sku_id = product.get("sku_id")
     try:
         price = float(product.get("price", 0))
     except (ValueError, TypeError):
         price = 0.0
-    platform = product.get("platform", "unknown")
-    url = product.get("url", "#")
+
+    # 平台码归一化：工具层统一使用 jd / taobao / pdd。
+    # 线上实测曾出现中文"京东"直接透传到卡片，前端按 platform 取图标会失配。
+    _platform_alias = {
+        "京东": "jd", "jd": "jd",
+        "淘宝": "taobao", "天猫": "taobao", "taobao": "taobao",
+        "拼多多": "pdd", "pdd": "pdd",
+    }
+    platform = _platform_alias.get(str(product.get("platform", "")).strip(), product.get("platform", "unknown"))
+
+    # url 缺失时下发 null，前端回退为不可点击。
+    # 原先默认 "#" 会让卡片看起来可点却点不动 —— 属于伪造链接，契约禁止。
+    url = product.get("url") or None
     image_url = product.get("image_url")
     rating = product.get("rating")
     shop_name = product.get("shop_name", "未知店铺")
-    
+
     platform_icons = {"jd": "🔴 京东", "taobao": "🟠 淘宝", "pdd": "🔴 拼多多"}
-    p_icon = platform_icons.get(platform, "🛒 " + platform)
-    
+    p_icon = platform_icons.get(platform, "🛒 " + str(platform))
+
     card = [
         f"### {title}",
         f"**{p_icon}** | **{shop_name}**",
         f"---",
         f"💰 **到手价: ¥{price:.2f}**",
     ]
-    
+
     if rating:
         card.append(f"⭐ **评分: {rating}**")
-        
-    card.append(f"\n[点击查看详情 >>]({url})")
-    
+
+    if url:
+        card.append(f"\n[点击查看详情 >>]({url})")
+
     if image_url:
         # 使用 HTML 标签控制图片大小，适配 Streamlit
         card.append(f'\n<img src="{image_url}" width="200">')
-        
+
     # Return structured JSON for frontend SSE interception
     import json
     return json.dumps({
         "type": "product_card",
         "data": {
+            "sku_id": sku_id,
             "title": title,
             "price": price,
             "platform": platform,

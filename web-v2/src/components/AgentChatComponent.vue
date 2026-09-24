@@ -113,14 +113,14 @@
                 v-for="st in visibleStatuses"
                 :key="st.id"
                 class="cloud-pill status-card"
-                :style="{ '--stc': statusTypeMeta[st.type].color }"
+                :style="{ '--stc': statusMeta(st.type).color }"
               >
                 <span class="status-ico">
-                  <component :is="statusTypeMeta[st.type].icon" :size="15" />
+                  <component :is="statusMeta(st.type).icon" :size="15" />
                 </span>
                 <div class="status-body">
                   <div class="status-head">
-                    <span class="status-type">{{ statusTypeMeta[st.type].label }}</span>
+                    <span class="status-type">{{ statusMeta(st.type).label }}</span>
                     <span class="status-time num">{{ st.time }}</span>
                   </div>
                   <p class="status-main">{{ st.main }}</p>
@@ -259,7 +259,7 @@ import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import ConversationProcessGroupComponent from '@/components/ConversationProcessGroupComponent.vue'
 import StatePanel from '@/components/StatePanel.vue'
 import { getConversationDisplayItems, toYuxiToolCall } from '@/utils/messageGrouping'
-import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Brain, TrendingDown, Tag, Package, Heart, Wrench, ShieldAlert, Star, Activity, ListCollapse } from 'lucide-vue-next'
+import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Activity, ListCollapse } from 'lucide-vue-next'
 import { handleChatError, translateErrorMessage } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
@@ -269,6 +269,7 @@ import { useChatUIStore } from '@/stores/chatUI'
 import { useUserStore } from '@/stores/user'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
+import { statusMeta } from '@/utils/statusMeta'
 import { agentApi, threadApi } from '@/apis'
 import { homeApi } from '@/apis/home_api'
 import { message } from 'ant-design-vue'
@@ -323,16 +324,9 @@ let textRefreshTimer = null
 const homeDemo = ref(false)
 
 // 状态卡片排：类型语义（颜色/标签/图标）—— 替代原"手机数码"类分类入口
-const statusTypeMeta = {
-  price:   { label: '盯价 · 降价', color: '#d6543f', icon: TrendingDown },
-  coupon:  { label: '券 · 到期',   color: '#b45309', icon: Tag },
-  stock:   { label: '库存 · 补货', color: '#185fa5', icon: Package },
-  decide:  { label: '决策 · 待定', color: '#178a67', icon: Brain },
-  fav:     { label: '收藏 · 动态', color: '#178a67', icon: Star },
-  prefer:  { label: '偏好 · 确认', color: '#178a67', icon: Heart },
-  care:    { label: '售后 · 耗材', color: '#185fa5', icon: Wrench },
-  review:  { label: '风评 · 异动', color: '#b45309', icon: ShieldAlert },
-}
+// 2026-09-24（U5）：表已抽到 @/utils/statusMeta，助理页共用同一份。
+// 用 statusMeta() 取值而非直接下标：未知 type 会拿到兜底项，
+// 不会因为 meta[type].color 读到 undefined 把整张卡渲染崩掉。
 
 // 状态卡片数据：来自 /api/events/recent（失败降级演示数据并标记）
 const statusMaster = [
@@ -372,7 +366,12 @@ const loadHomeData = async () => {
       promptsPool.value = prompts
       currentTextClouds.value.forEach((cloud, i) => { cloud.text = prompts[i % prompts.length] })
     }
-    if (events?.length) {
+    // 只有**请求失败**才保留演示卡。请求成功但为空 = 确实还没有事件，
+    // 必须如实清空 —— 原先写的是 `if (events?.length)`，于是空数组会
+    // 落进 else 分支、把演示数据留在屏幕上，同时 homeDemo=false 也不显示
+    // 降级提示：等于把编造的「戴森 V12 券明天过期」当成真实状态展示。
+    // home_api.js:40 的注释早就点出过这个坑，但只改了 API 层没改这里。
+    if (!demo) {
       statusQueue.value = events.slice(0, 4).map((e, i) => ({
         id: e.id || `st-home-${i}`,
         type: e.type,

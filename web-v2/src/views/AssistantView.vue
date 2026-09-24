@@ -4,11 +4,29 @@
     <section class="chat-pane">
       <header class="chat-head">
         <h1 class="chat-title">主动助理</h1>
-        <span class="chat-status"><span class="dot" />在线 · 监控运行中</span>
-        <span v-if="demoStatus.assistant" class="chat-demo">演示数据 · 等待 /api/assistant/overview</span>
+        <span class="chat-status">
+          <span class="dot" :class="{ off: !briefStats.watching }" />
+          {{ briefStats.watching ? `在盯 ${briefStats.watching} 个任务` : '暂无监控任务' }}
+        </span>
+        <span v-if="demoStatus.assistant" class="chat-demo">接口不可用 · /api/assistant/overview</span>
       </header>
 
       <div ref="scrollEl" class="chat-scroll">
+        <!-- 加载态（U4）：首次进入不再闪空白 -->
+        <div v-if="loading" class="state-hint">
+          <a-spin tip="加载助理数据…" />
+        </div>
+        <!-- 错误态：如实说明并给重试 -->
+        <div v-else-if="loadError" class="state-hint">
+          <p class="hint-err">{{ loadError }}</p>
+          <a-button size="small" @click="initState">重试</a-button>
+        </div>
+        <!-- 空态（U4）：引导用户起步，而不是留白 -->
+        <div v-else-if="!messages.length" class="state-hint">
+          <p class="hint-title">还没有情报</p>
+          <p class="hint-sub">在对话里说「帮我盯一下 XX 的价格」，这里就会有它的动静。</p>
+        </div>
+
         <template v-for="m in messages" :key="m.id">
           <!-- 每日简报卡 -->
           <div v-if="m.kind === 'brief'" class="msg ai">
@@ -66,27 +84,44 @@
             <span class="msg-time mono">{{ m.time }}</span>
           </div>
           <div v-else class="msg ai">
-            <div class="bubble">{{ m.text }}</div>
+            <!-- AI 回复按 Markdown 渲染（与 AgentMessageComponent 同一套 MdPreview），
+                 否则「已帮你挂上盯价任务：**蓝牙音箱**」会把星号原样显示出来 -->
+            <div class="bubble bubble-md">
+              <MdPreview :model-value="m.text" :preview-theme="'github'" />
+            </div>
             <span class="msg-time mono">{{ m.time }}</span>
           </div>
         </template>
       </div>
 
       <footer class="chat-input">
-        <input
+        <!-- U3：多行输入（Enter 发送 / Shift+Enter 换行），与其他对话入口一致。
+             原先这里是单行 <input>，长指令会被截断看不到自己写了什么。 -->
+        <textarea
+          ref="inputEl"
           v-model="draft"
           class="input"
-          type="text"
-          placeholder="给助理安排任务，如：帮我把洗碗机加进监控…"
-          @keydown.enter="send"
+          rows="1"
+          :disabled="sending"
+          placeholder="给助理安排任务，如：帮我把洗碗机加进监控…（Shift+Enter 换行）"
+          @keydown.enter.exact.prevent="send"
+          @input="autoGrow"
         />
-        <a-button type="primary" class="send-btn" :disabled="!draft.trim()" @click="send">
-          <Send :size="14" />
+        <a-button type="primary" class="send-btn" :loading="sending" :disabled="!draft.trim()" @click="send">
+          <Send v-if="!sending" :size="14" />
         </a-button>
       </footer>
     </section>
 
-    <!-- ============ 右：信息区（三 tab） ============ -->
+    <!-- ============ 右：我在盯什么 / 我该做什么（U2） ============ -->
+    <!--
+      右栏刻意**不再**放简报与情报流：
+        · 简报已经是左栏第一张卡，右栏再放一遍是同一条信息看两遍；
+        · 情报流与左栏「命中提醒」卡同源（都来自 task_execution_logs），
+          同样重复。
+      改放左栏没有的维度 —— 左栏讲「现在发生了什么」，右栏讲
+      「我在盯什么（任务清单）/ 我该做什么（待办）」。
+    -->
     <aside class="info-pane">
       <div class="info-tabs">
         <button
@@ -95,36 +130,36 @@
           class="info-tab"
           :class="{ on: infoTab === t.key }"
           @click="infoTab = t.key"
-        >{{ t.label }}</button>
+        >{{ t.label }}<span v-if="t.count" class="tab-count">{{ t.count }}</span></button>
       </div>
 
-      <!-- 今日简报 -->
-      <div v-if="infoTab === 'brief'" class="info-body">
-        <div class="brief-stats">
-          <span class="stat-pill">命中 <b>{{ briefStats.hits }}</b></span>
-          <span class="stat-pill">待确认 <b>{{ briefStats.drafts }}</b></span>
-          <span class="stat-pill">在盯 <b>{{ briefStats.watching }}</b></span>
+      <!-- 监控任务清单 -->
+      <div v-if="infoTab === 'watching'" class="info-body">
+        <div v-if="!watching.length" class="info-empty">
+          <p class="hint-title">还没有监控任务</p>
+          <p class="hint-sub">在左边的输入框说「帮我盯一下 XX 的价格」，任务会出现在这里。</p>
         </div>
-        <ul class="brief-points">
-          <li v-for="(p, i) in briefPoints" :key="i" :class="'pt-' + p.tone">{{ p.text }}</li>
-        </ul>
-        <p class="brief-note">简报每天 09:00 生成，命中事件实时更新。</p>
-      </div>
-
-      <!-- 情报流 -->
-      <div v-else-if="infoTab === 'feed'" class="info-body">
-        <div v-for="f in feed" :key="f.id" class="feed-row">
-          <span class="state" :class="'rs-' + f.result"><span class="dot" />{{ resultLabel(f.result) }}</span>
-          <div class="feed-main">
-            <p class="feed-title">{{ f.product }}</p>
-            <p class="feed-msg">{{ f.change }}</p>
+        <div v-for="w in watching" :key="w.id" class="watch-row">
+          <span class="state" :class="w.active ? 'rs-ok' : 'rs-empty'">
+            <span class="dot" />{{ w.active ? '监控中' : '已暂停' }}
+          </span>
+          <div class="watch-main">
+            <p class="watch-title">{{ w.name }}</p>
+            <p class="watch-target">{{ w.target }}</p>
+            <p class="watch-meta">
+              {{ w.freq }}<template v-if="w.nextAt"> · 下次 {{ w.nextAt }}</template>
+              <template v-if="w.runCount"> · 已跑 {{ w.runCount }} 次</template>
+            </p>
           </div>
-          <span class="feed-time mono">{{ f.time }}</span>
         </div>
       </div>
 
       <!-- 待办 -->
       <div v-else class="info-body">
+        <div v-if="!todos.length" class="info-empty">
+          <p class="hint-title">没有待办</p>
+          <p class="hint-sub">购物档案里等你确认的记录会出现在这里。</p>
+        </div>
         <div v-for="t in todos" :key="t.id" class="todo-row">
           <span class="state" :class="'st-' + t.kind"><span class="dot" />{{ t.kindLabel }}</span>
           <div class="todo-main">
@@ -138,73 +173,139 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, computed, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { Send } from 'lucide-vue-next'
+import { MdPreview } from 'md-editor-v3'
+import 'md-editor-v3/lib/preview.css'
 import { assistantApi } from '@/apis/assistant_api'
+import { apiPost } from '@/apis/base'
 import { demoStatus } from '@/apis/demoStatus'
+import { doneText, hitLabel } from '@/utils/statusMeta'
 
-const hitLabel = (t) => ({ price: '降价', stock: '补货', coupon: '优惠券', rank: '榜单', shop: '店铺活动' }[t] || t)
-const resultLabel = (r) => ({ hit: '命中', ok: '成功', empty: '无变化', fail: '失败', run: '执行中' }[r] || r)
-const doneText = (a) => ({ viewed: '已查看', archive: '已转存到购物档案', ignored: '已忽略', later: '已稍后处理' }[a] || a)
+const router = useRouter()
+
+// 忽略事件：真的调后端，不是只改本地状态
+const dismissEvent = async (eid) => {
+  try {
+    await apiPost(`/api/events/${encodeURIComponent(eid)}/dismiss`, {}, {}, true)
+  } catch { /* 忽略失败只让卡片留在原地，不打断界面 */ }
+  await initState()
+}
+
+// 语义文案统一走 @/utils/statusMeta（U5）—— 原先这里内联了
+// hitLabel / resultLabel / doneText 三张表，而 AgentChatComponent 里
+// 另有一份 statusTypeMeta，加一种类型要改两处，必然会漂。
 
 let seq = 0
 const nid = () => `m-${++seq}`
 
-// ===== 数据（assistant_api mock 服务层；后端主动事件/简报聚合接口实现后替换）=====
-const messages = ref([])
+// ===== 数据（真实后端：GET /api/assistant/overview）=====
+// 2026-09-23：原「本地种子 + 关键词兜底」形态已删除，全部改由聚合接口驱动。
+// 刷新即恢复历史（修 U1）—— 卡片序列由后端实时合成，不再存在内存里。
+const loading = ref(true)
+const loadError = ref('')
+const sending = ref(false)
+// 服务端合成的卡片序列（简报/命中/草稿）与本地这一轮的对话分开存：
+// initState() 会整体替换服务端序列，若把本地消息也放进去，建完任务后的
+// 刷新会把用户刚发的消息和回复一起抹掉。
+const serverMessages = ref([])
+const localMessages = ref([])
+const messages = computed(() => [...serverMessages.value, ...localMessages.value])
 const briefStats = ref({ hits: 0, drafts: 0, watching: 0 })
-const briefPoints = ref([])
-const feed = ref([])
+const watching = ref([])
 const todos = ref([])
 
-const initState = async () => {
-  const s = await assistantApi.getInitialState()
-  seq = 0 // 让 nid 从头计数，避免与种子 id 冲突
-  messages.value = s.messages
-  briefStats.value = s.brief.stats
-  briefPoints.value = s.brief.points
-  feed.value = s.feed
-  todos.value = s.todos
+const initState = async ({ silent = false } = {}) => {
+  // silent：建完任务后的后台刷新，不该让整页回到骨架屏
+  if (!silent) loading.value = true
+  loadError.value = ''
+  try {
+    const s = await assistantApi.getInitialState()
+    serverMessages.value = s.messages
+    briefStats.value = s.brief.stats
+    watching.value = s.watching
+    todos.value = s.todos
+  } catch (e) {
+    if (!silent) loadError.value = '助理数据加载失败'
+  } finally {
+    loading.value = false
+  }
 }
 initState()
 
-// ===== 卡片动作（P4 转真实跳转/写入）=====
-const actHit = (m, action) => {
-  m.done = action
-  if (action === 'view') pushAi(`「${m.product}」的证据：近 7 天价格快照与本次变化明细。对话引擎接入后，这里会展示完整快照图。`)
-  else if (action === 'archive') pushAi(`已把「${m.product}」存入购物档案的需求池，可随时在档案里继续。`)
-  else pushAi('已忽略这条提醒，之后同类事件仍会正常上报。')
+// ===== 卡片动作 =====
+// 2026-09-23：原先这三句都是"假装做了"的演示话术（说「已存入购物档案」
+// 但实际什么都没写）。现在：忽略 → 真的调 dismiss 接口；
+// 查看 → 跳价格历史/档案页看真东西；转档案 → 跳档案页由用户操作。
+const actHit = async (m, action) => {
+  if (action === 'ignore') {
+    // 卡片 id 形如 msg-log-10（后端由执行日志合成），去掉 msg- 前缀还原成
+    // log-10。忽略集合与事件流共用，见 notify_service.dismissed_ids。
+    // 注意不能按 m.source（=taskId）分流：它恒为真，会让 dismiss 永远走不到。
+    await dismissEvent(String(m.id || '').replace(/^msg-/, ''))
+  } else if (action === 'view') {
+    // 价格证据：跳到监控任务页（价格历史在那里）
+    router.push({ path: '/tasks' })
+  } else {
+    // 转档案：跳购物档案，由用户在档案里确认
+    router.push({ path: '/decisions' })
+  }
 }
 const actDraft = (m, action) => {
-  m.done = action
-  pushAi(action === 'view' ? `「${m.product}」的完整草稿在购物档案的需求池里，去确认后就会进入候选。` : '已稍后处理，稍后会再提醒你。')
+  if (action === 'view') router.push({ path: '/decisions' })
 }
 
-// ===== 输入与发送（回复生成在 assistant_api；P4 换真实对话引擎）=====
+// ===== 输入与发送 =====
 const draft = ref('')
 const scrollEl = ref(null)
-const pushAi = (text) => {
-  messages.value.push({ id: nid(), kind: 'ai', text, time: '刚刚' })
+const inputEl = ref(null)
+
+// U3：textarea 随内容长高（1~6 行封顶），超过就内部滚动
+const autoGrow = () => {
+  const el = inputEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  const line = 22
+  const max = line * 6
+  el.style.height = `${Math.min(el.scrollHeight, max)}px`
+  el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
+}
+
+const scrollToEnd = () => {
   nextTick(() => { scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight, behavior: 'smooth' }) })
+}
+const pushAi = (text) => {
+  localMessages.value.push({ id: nid(), kind: 'ai', text, time: '刚刚' })
+  scrollToEnd()
 }
 const send = async () => {
   const text = draft.value.trim()
-  if (!text) return
-  messages.value.push({ id: nid(), kind: 'user', text, time: '刚刚' })
+  if (!text || sending.value) return
+  localMessages.value.push({ id: nid(), kind: 'user', text, time: '刚刚' })
   draft.value = ''
-  nextTick(() => { scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight, behavior: 'smooth' }) })
-  // 真实 POST /api/assistant/messages 优先，失败降级本地回复（api 层处理）
-  const reply = await assistantApi.sendMessage(text)
-  pushAi(reply)
+  nextTick(autoGrow)
+  scrollToEnd()
+  sending.value = true
+  try {
+    const { text: reply, created } = await assistantApi.sendMessage(text)
+    pushAi(reply)
+    // 建出任务后刷新一次：新任务要立刻出现在「在盯 N 个任务」和情报流里，
+    // 否则用户看到的是建之前的旧数字，像是没生效。
+    if (created) await initState({ silent: true })
+  } finally {
+    sending.value = false
+  }
 }
 
-// ===== 右栏 =====
-const tabs = [
-  { key: 'brief', label: '今日简报' },
-  { key: 'feed', label: '情报流' },
-  { key: 'todo', label: '待办' }
-]
-const infoTab = ref('brief')
+// ===== 右栏（U2：只放左栏没有的维度）=====
+// 简报与情报流已从左栏的重复位置撤掉（简报是左栏第一张卡，情报流与
+// 命中卡同源）。count 用真实数据算，不写死。
+const tabs = computed(() => [
+  { key: 'watching', label: '监控任务', count: watching.value.length },
+  { key: 'todo', label: '待办', count: todos.value.length },
+])
+const infoTab = ref('watching')
 </script>
 
 <style lang="less" scoped>
@@ -244,6 +345,19 @@ const infoTab = ref('brief')
   color: var(--text-strong);
   margin: 0;
 }
+/* 加载 / 错误 / 空三态（U4） */
+.state-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 16px;
+  text-align: center;
+}
+.hint-title { margin: 0; font-size: 0.92rem; font-weight: 600; color: var(--text-strong); }
+.hint-sub { margin: 0; font-size: 0.8rem; color: var(--text-muted); line-height: 1.6; max-width: 320px; }
+.hint-err { margin: 0; font-size: 0.82rem; color: var(--neg); }
+
 .chat-status {
   display: inline-flex;
   align-items: center;
@@ -251,6 +365,8 @@ const infoTab = ref('brief')
   font-size: 0.78rem;
   color: var(--text-muted);
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pos); }
+  /* 没有监控任务时不该假装在跑（U6） */
+  .dot.off { background: var(--text-faint); }
 }
 .chat-demo {
   font-size: 0.72rem;
@@ -290,6 +406,16 @@ const infoTab = ref('brief')
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-bottom-left-radius: 3px;
+}
+/* MdPreview 自带白底与内边距，这里让它融进气泡里（只留气泡自己的边框） */
+.bubble-md {
+  padding: 2px 14px;
+  width: 100%;
+  :deep(.md-editor-preview-wrapper) { padding: 0; background: transparent; }
+  :deep(.md-editor-preview) { background: transparent; font-family: var(--font-body); }
+  :deep(p) { margin: 6px 0; font-size: 0.86rem; line-height: 1.6; }
+  :deep(p:first-child) { margin-top: 8px; }
+  :deep(p:last-child) { margin-bottom: 8px; }
 }
 
 /* 主动消息卡片（白卡 + 排版层级，无彩色容器） */
@@ -350,27 +476,34 @@ const infoTab = ref('brief')
 .chat-input {
   flex-shrink: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-end;   /* 多行时按钮跟底对齐 */
   gap: 10px;
   padding: 12px 24px 16px;
   border-top: 1px solid var(--border);
 }
+/* U3：textarea 多行——随内容长高，1~6 行（高度由 autoGrow 控制），
+   因此这里不写死 height，只定最小高度与内边距。 */
 .input {
   flex: 1;
-  height: 38px;
-  padding: 0 14px;
+  min-height: 38px;
+  max-height: 132px;
+  padding: 9px 14px;
   font-family: var(--font-body);
   font-size: 0.86rem;
+  line-height: 22px;
   color: var(--text);
   background: var(--bg-surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   outline: none;
+  resize: none;
+  overflow-y: hidden;
   transition: border-color 0.15s ease-out;
   &:focus { border-color: var(--accent-500); }
   &::placeholder { color: var(--text-faint); }
+  &:disabled { opacity: 0.6; }
 }
-.send-btn { flex-shrink: 0; }
+.send-btn { flex-shrink: 0; margin-bottom: 2px; }
 
 /* ===== 右：信息区 ===== */
 .info-pane {
@@ -411,41 +544,39 @@ const infoTab = ref('brief')
   padding: 14px 20px 20px;
 }
 
-/* 简报 */
-.brief-stats {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
+/* 右栏 tab 上的计数（U2：用真实条数，不写死） */
+.tab-count {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  vertical-align: 1px;
 }
-.brief-points {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  li { font-size: 0.83rem; line-height: 1.55; color: var(--text); }
-  .pt-pos { &::before { content: '↑'; color: var(--pos); margin-right: 6px; font-family: var(--font-mono); } }
-  .pt-accent { &::before { content: '◆'; color: var(--accent-500); margin-right: 6px; font-size: 0.7rem; } }
-  .pt-warn { &::before { content: '！'; color: var(--warn); margin-right: 6px; font-family: var(--font-mono); } }
-  .pt-muted { &::before { content: '·'; color: var(--text-faint); margin-right: 6px; } }
-}
-.brief-note { margin: 16px 0 0; font-size: 0.74rem; color: var(--text-faint); }
 
-/* 情报流 */
-.feed-row {
+/* 右栏空态（U2）—— 不留白，给一句怎么起步 */
+.info-empty {
+  padding: 24px 4px;
+  text-align: center;
+}
+.info-empty .hint-title { margin: 0 0 4px; }
+
+/* 监控任务 */
+.watch-row {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 9px 0;
+  padding: 10px 0;
   border-bottom: 1px solid var(--border);
   &:last-child { border-bottom: none; }
 }
-.feed-main { flex: 1; min-width: 0; }
-.feed-title { margin: 0; font-size: 0.84rem; font-weight: 600; color: var(--text-strong); }
-.feed-msg { margin: 1px 0 0; font-size: 0.76rem; color: var(--text-muted); line-height: 1.5; }
-.feed-time { font-size: 0.68rem; color: var(--text-faint); flex-shrink: 0; margin-top: 2px; }
+.watch-main { flex: 1; min-width: 0; }
+.watch-title { margin: 0; font-size: 0.84rem; font-weight: 600; color: var(--text-strong); }
+.watch-target { margin: 2px 0 0; font-size: 0.78rem; color: var(--text); line-height: 1.5; }
+.watch-meta { margin: 3px 0 0; font-size: 0.72rem; color: var(--text-faint); }
 
 /* 状态圆点+文字（五态语义，无胶囊容器） */
 .state {
@@ -480,8 +611,26 @@ const infoTab = ref('brief')
 .todo-title { margin: 0; font-size: 0.84rem; font-weight: 600; color: var(--text-strong); }
 .todo-note { margin: 2px 0 0; font-size: 0.76rem; color: var(--text-muted); line-height: 1.5; }
 
+/* U7：窄屏改单列堆叠，而不是把右栏直接 display:none。
+   原先的写法会让「监控任务 / 待办」两个 tab 无声消失 —— 用户既看不到
+   自己在盯什么，也没有任何提示说明它们去哪了。现在改成上下排列，
+   整页可滚动（宽屏时是左右两栏各自内部滚，行高锁死）。 */
 @media (max-width: 1100px) {
-  .assistant-page { grid-template-columns: 1fr; }
-  .info-pane { display: none; }
+  .assistant-page {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(320px, 1fr) auto;
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+  .chat-pane {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    min-height: 320px;
+  }
+  .info-pane {
+    /* 给右栏一个上限，避免任务多时把对话区挤到屏幕外 */
+    max-height: 60vh;
+  }
 }
 </style>

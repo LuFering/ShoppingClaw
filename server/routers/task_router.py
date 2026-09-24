@@ -11,11 +11,39 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from server.utils.auth_middleware import get_required_user
+from src.utils.datetime_utils import utc_now_naive
+from server.utils.user_store import User
 from src.storage.postgres.manager import pg_manager
 from src.storage.postgres.models_business import TaskRecord, TaskExecutionLog, PriceSnapshot
 from src.services.scheduler_service import get_scheduler
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+
+def _uid(user: User) -> str:
+    """取稳定的用户标识。
+
+    与 decisions_router._uid() 保持同一口径（str(users.id)）——
+    主动助理要按用户把「监控任务」和「购物档案」对起来看，
+    两边用户键必须一致，否则关联不上。
+
+    历史问题：本文件原先硬编码 user_id="default"，所有任务都挂在
+    default 名下，与 shopping_decisions 的 str(users.id) 对不上。
+    """
+    return str(getattr(user, "id", None) or getattr(user, "user_id", "anonymous"))
+
+
+async def _reload_task_view(task_id: str) -> dict:
+    """从 DB 重读任务再转 dict。
+
+    调度相关的写入（注册 job、回填 next_run_at）发生在 ORM 对象之外，
+    手里那个对象可能是旧快照 —— 返回前重读一次，保证响应与库一致。
+    """
+    async with pg_manager.get_async_session_context() as session:
+        result = await session.execute(select(TaskRecord).where(TaskRecord.id == task_id))
+        rec = result.scalar_one_or_none()
+    return rec.to_dict() if rec else {}
 
 
 # ═══════════════════════════════════════════
@@ -46,8 +74,9 @@ class TaskUpdate(BaseModel):
 # ═══════════════════════════════════════════
 
 @router.post("")
-async def create_task(body: TaskCreate):
+async def create_task(body: TaskCreate, current_user: User = Depends(get_required_user)):
     """创建定时任务"""
+    uid = _uid(current_user)
     if not body.cron_expression and not body.interval_seconds:
         raise HTTPException(400, "必须指定 cron_expression 或 interval_seconds")
 
@@ -55,11 +84,11 @@ async def create_task(body: TaskCreate):
         raise HTTPException(400, "cron_expression 和 interval_seconds 只能指定一个")
 
     task_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
+    now = utc_now_naive()
 
     task = TaskRecord(
         id=task_id,
-        user_id="default",
+        user_id=uid,
         name=body.name,
         task_type=body.task_type,
         status="active",
@@ -84,7 +113,9 @@ async def create_task(body: TaskCreate):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    return {"success": True, "data": task.to_dict()}
+    # 重读：add_task 会把 APScheduler 的 next_run_time 回填进 task_records，
+    # 而上面那个 task 对象是注册前建的，直接 to_dict() 会返回 next_run_at=None
+    return {"success": True, "data": await _reload_task_view(task_id)}
 
 
 @router.get("")
@@ -92,10 +123,16 @@ async def list_tasks(
     status: Optional[str] = None,
     task_type: Optional[str] = None,
     limit: int = Query(default=50, le=200),
+    current_user: User = Depends(get_required_user),
 ):
-    """查询任务列表"""
+    """查询任务列表（仅当前用户）"""
+    uid = _uid(current_user)
     async with pg_manager.get_async_session_context() as session:
-        stmt = select(TaskRecord).order_by(TaskRecord.created_at.desc())
+        stmt = (
+            select(TaskRecord)
+            .where(TaskRecord.user_id == uid)
+            .order_by(TaskRecord.created_at.desc())
+        )
         if status:
             stmt = stmt.where(TaskRecord.status == status)
         if task_type:
@@ -108,10 +145,13 @@ async def list_tasks(
 
 
 @router.get("/{task_id}")
-async def get_task(task_id: str):
-    """获取单个任务详情"""
+async def get_task(task_id: str, current_user: User = Depends(get_required_user)):
+    """获取单个任务详情（仅限本人任务）"""
+    uid = _uid(current_user)
     async with pg_manager.get_async_session_context() as session:
-        result = await session.execute(select(TaskRecord).where(TaskRecord.id == task_id))
+        result = await session.execute(
+            select(TaskRecord).where(TaskRecord.id == task_id, TaskRecord.user_id == uid)
+        )
         task = result.scalar_one_or_none()
 
     if not task:
@@ -120,10 +160,15 @@ async def get_task(task_id: str):
 
 
 @router.put("/{task_id}")
-async def update_task(task_id: str, body: TaskUpdate):
-    """更新任务"""
+async def update_task(
+    task_id: str, body: TaskUpdate, current_user: User = Depends(get_required_user)
+):
+    """更新任务（仅限本人任务）"""
+    uid = _uid(current_user)
     async with pg_manager.get_async_session_context() as session:
-        result = await session.execute(select(TaskRecord).where(TaskRecord.id == task_id))
+        result = await session.execute(
+            select(TaskRecord).where(TaskRecord.id == task_id, TaskRecord.user_id == uid)
+        )
         task = result.scalar_one_or_none()
 
         if not task:
@@ -135,7 +180,7 @@ async def update_task(task_id: str, body: TaskUpdate):
         for key, value in update_data.items():
             setattr(task, key, value)
 
-        task.updated_at = datetime.now(timezone.utc)
+        task.updated_at = utc_now_naive()
         await session.commit()
 
         # 同步到调度器
@@ -152,21 +197,27 @@ async def update_task(task_id: str, body: TaskUpdate):
             except ValueError as e:
                 raise HTTPException(400, str(e))
 
-    return {"success": True, "data": task.to_dict()}
+    # 同 create_task：重建 job 后 next_run_at 已变，重读一次再返回
+    return {"success": True, "data": await _reload_task_view(task_id)}
 
 
 @router.delete("/{task_id}")
-async def delete_task(task_id: str):
-    """删除任务"""
+async def delete_task(task_id: str, current_user: User = Depends(get_required_user)):
+    """删除任务（仅限本人任务）"""
+    uid = _uid(current_user)
+    async with pg_manager.get_async_session_context() as session:
+        result = await session.execute(
+            select(TaskRecord).where(TaskRecord.id == task_id, TaskRecord.user_id == uid)
+        )
+        task = result.scalar_one_or_none()
+        if not task:
+            raise HTTPException(404, "任务不存在")
+        await session.delete(task)
+        await session.commit()
+
+    # 先确认归属再从调度器摘掉：顺序反过来的话，别人的 task_id 也能被停掉
     scheduler = get_scheduler()
     await scheduler.remove_task(task_id)
-
-    async with pg_manager.get_async_session_context() as session:
-        result = await session.execute(select(TaskRecord).where(TaskRecord.id == task_id))
-        task = result.scalar_one_or_none()
-        if task:
-            await session.delete(task)
-            await session.commit()
 
     return {"success": True, "message": f"任务 {task_id} 已删除"}
 
@@ -176,8 +227,17 @@ async def delete_task(task_id: str):
 # ═══════════════════════════════════════════
 
 @router.post("/{task_id}/trigger")
-async def trigger_task(task_id: str):
-    """手动立即触发一次任务"""
+async def trigger_task(task_id: str, current_user: User = Depends(get_required_user)):
+    """手动立即触发一次任务（仅限本人任务）"""
+    uid = _uid(current_user)
+    # 先校验归属，再交给调度器 —— 否则任何人拿 task_id 就能跑别人的监控
+    async with pg_manager.get_async_session_context() as session:
+        result = await session.execute(
+            select(TaskRecord).where(TaskRecord.id == task_id, TaskRecord.user_id == uid)
+        )
+        if result.scalar_one_or_none() is None:
+            raise HTTPException(404, "任务不存在")
+
     scheduler = get_scheduler()
     try:
         await scheduler.trigger_now(task_id)
@@ -190,9 +250,16 @@ async def trigger_task(task_id: str):
 async def get_task_logs(
     task_id: str,
     limit: int = Query(default=20, le=100),
+    current_user: User = Depends(get_required_user),
 ):
-    """获取任务的执行日志"""
+    """获取任务的执行日志（先校验任务归属）"""
+    uid = _uid(current_user)
     async with pg_manager.get_async_session_context() as session:
+        owned = await session.execute(
+            select(TaskRecord.id).where(TaskRecord.id == task_id, TaskRecord.user_id == uid)
+        )
+        if owned.scalar_one_or_none() is None:
+            raise HTTPException(404, "任务不存在")
         result = await session.execute(
             select(TaskExecutionLog)
             .where(TaskExecutionLog.task_id == task_id)
@@ -216,7 +283,7 @@ async def get_price_history(
 ):
     """获取商品的价格历史趋势"""
     from datetime import timedelta
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since = utc_now_naive() - timedelta(days=days)
 
     async with pg_manager.get_async_session_context() as session:
         result = await session.execute(

@@ -23,6 +23,7 @@ from sqlalchemy import select
 from src.storage.postgres.manager import pg_manager
 from src.storage.postgres.models_business import TaskRecord, TaskExecutionLog, PriceSnapshot
 from src.services.redis_cache import get_redis_cache
+from src.utils.datetime_utils import utc_now_naive
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +95,41 @@ class SchedulerManager:
         for task in tasks:
             try:
                 self._add_job(task)
+                await self._persist_next_run(task.id)
                 count += 1
             except Exception as e:
                 logger.error(f"[Scheduler] 加载任务 {task.id} 失败: {e}")
 
         logger.info(f"[Scheduler] 从 DB 恢复了 {count} 个活跃任务")
+
+    # ═══════════════════════════════════════════
+    # 下次执行时间回填
+    # ═══════════════════════════════════════════
+
+    async def _persist_next_run(self, task_id: str):
+        """把调度器里的 next_run_time 写回 task_records。
+
+        APScheduler 是唯一知道「下次何时跑」的地方，但它只存在内存里；
+        不回填的话前端「下次执行」列永远是 '—'（next_run_at 恒 NULL）。
+
+        job.next_run_time 是 tz-aware（UTC），而列是 TIMESTAMP WITHOUT
+        TIME ZONE，必须去掉 tzinfo —— 否则 asyncpg 抛
+        DataError: can't subtract offset-naive and offset-aware datetimes。
+        """
+        try:
+            job = self.scheduler.get_job(task_id)
+            next_run = getattr(job, "next_run_time", None) if job else None
+            next_run_naive = next_run.replace(tzinfo=None) if next_run else None
+
+            async with pg_manager.get_async_session_context() as session:
+                r = await session.execute(select(TaskRecord).where(TaskRecord.id == task_id))
+                rec = r.scalar_one_or_none()
+                if rec is not None:
+                    rec.next_run_at = next_run_naive
+                    await session.commit()
+        except Exception as e:
+            # 回填失败不影响调度本身 —— 只是界面少一列信息
+            logger.warning(f"[Scheduler] 回填 next_run_at 失败 {task_id}: {e}")
 
     # ═══════════════════════════════════════════
     # 任务 CRUD（调度器层面）
@@ -111,6 +142,7 @@ class SchedulerManager:
             raise ValueError(f"未注册的执行器类型: {task.task_type}")
 
         self._add_job(task)
+        await self._persist_next_run(task.id)
         logger.info(f"[Scheduler] 已添加任务: {task.id} ({task.task_type})")
 
     async def remove_task(self, task_id: str):
@@ -193,7 +225,9 @@ class SchedulerManager:
         """
         lock_key = f"{LOCK_PREFIX}{task_id}"
         cache = get_redis_cache()
-        started_at = datetime.now(timezone.utc)
+        # naive：task_execution_logs.started_at 是 TIMESTAMP WITHOUT TIME ZONE，
+        # 用 tz-aware 会直接 asyncpg DataError（详见 task_router 的同类修复）
+        started_at = utc_now_naive()
 
         # 1. 分布式锁（30s TTL，超时自动释放）
         try:
@@ -244,7 +278,7 @@ class SchedulerManager:
             logger.error(f"[Scheduler] 任务 {task_id} 执行失败: {e}", exc_info=True)
 
         finally:
-            finished_at = datetime.now(timezone.utc)
+            finished_at = utc_now_naive()
             duration_ms = int((finished_at - started_at).total_seconds() * 1000)
 
             # 4. 更新执行日志
@@ -284,6 +318,31 @@ class SchedulerManager:
                     await cache._redis.delete(lock_key)
             except Exception:
                 pass
+
+            # 7. 刷新下次执行时间
+            # 跑完这一次后 APScheduler 已把 next_run_time 推到下一轮，
+            # 不回填的话前端会一直显示上一次算出来的旧值。
+            await self._persist_next_run(task_id)
+
+            # 8. 发通知事件（主动助理 / 首页状态卡的数据来源）
+            # 放在 finally 里是因为**失败也要通知**：用户配了监控却悄悄
+            # 不跑了，比不推更糟。from_task_result 会把 failed 映射成
+            # review 类事件；是否打扰由它内部判定（价格没变就不推）。
+            #
+            # 为什么不用 `if task.notify_enabled`：这一分支里 task 可能
+            # 没绑定（任务被删/暂停时提前 return），而且通知失败绝不能
+            # 影响任务执行结果 —— 独立 try 包住，只记 warning。
+            try:
+                from src.services import notify_service
+
+                _uid = getattr(task_record, "user_id", None) if task_record else None
+                if _uid and final_status != "cancelled":
+                    await notify_service.emit(
+                        str(_uid),
+                        notify_service.from_task_result(task_record, result_data),
+                    )
+            except Exception as notify_err:
+                logger.warning(f"[Scheduler] 发送通知事件失败（忽略）: {notify_err}")
 
     def _get_task_type_from_job(self, task_id: str) -> str:
         """从调度器中查询任务类型（仅用于内部校验）。"""

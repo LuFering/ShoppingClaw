@@ -29,16 +29,19 @@ export const homeApi = {
   async getHomeData() {
     const [sug, ev] = await Promise.allSettled([
       apiGet('/api/chat/home/suggestions', {}, false),
-      // 该端点后端尚未实现，前端固定走 FALLBACK_EVENTS 降级。
-      // 加 silent 避免首页每次加载都往控制台吐一条 404，掩盖真实报错。
-      apiGet('/api/events/recent?limit=8', { silent: true }, false)
+      // 端点已于 2026-09-23 实现（/api/events/recent，见 events_router.py）。
+      // 保留 silent：未登录时这里是 401，属预期降级，不该往控制台刷红。
+      apiGet('/api/events/recent?limit=8', { silent: true }, true)
     ])
     const sugRes = okArr(sug)
     const evRes = okArr(ev)
 
     const prompts =
       Array.isArray(sugRes?.data?.prompts) && sugRes.data.prompts.length ? sugRes.data.prompts : FALLBACK_PROMPTS
-    const events = Array.isArray(evRes?.data) && evRes.data.length ? evRes.data : FALLBACK_EVENTS
+    // 只有**请求失败**才降级为演示数据。请求成功但为空 = 确实还没有事件，
+    // 必须如实显示空 —— 否则新用户会看到「戴森 V12 券明天过期」这类编造内容
+    // （与 decisions_api.js 的教训同源：真实空档案不能补演示种子）。
+    const events = Array.isArray(evRes?.data) ? evRes.data : FALLBACK_EVENTS
 
     const failed = []
     if (!sugRes) failed.push('suggestions')

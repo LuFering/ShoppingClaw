@@ -10,6 +10,7 @@ from sqlalchemy import select
 from src.storage.postgres.manager import pg_manager
 from src.storage.postgres.models_business import TaskRecord, PriceSnapshot
 from src.services.mcp_service import call_stdio_tool_async, MCP_SERVERS
+from src.utils.datetime_utils import utc_now_naive
 
 from src.services.task_executors.common import parse_search_result
 
@@ -114,7 +115,7 @@ async def _save_snapshot(product: dict, platform: str) -> PriceSnapshot:
         coupon_amount=product.get("coupon_amount"),
         stock_status="in_stock",
         shop_name=str(product.get("shop_name", product.get("seller_nick", "")))[:200],
-        snapshot_at=datetime.now(timezone.utc),
+        snapshot_at=utc_now_naive(),
     )
     async with pg_manager.get_async_session_context() as session:
         session.add(snapshot)
@@ -125,7 +126,7 @@ async def _save_snapshot(product: dict, platform: str) -> PriceSnapshot:
 async def _get_price_history(product_id: str, days: int = 7) -> list[PriceSnapshot]:
     """获取商品最近 N 天的价格历史"""
     from datetime import timedelta
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since = utc_now_naive() - timedelta(days=days)
     async with pg_manager.get_async_session_context() as session:
         result = await session.execute(
             select(PriceSnapshot)

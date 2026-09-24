@@ -118,12 +118,12 @@ export const taskApi = {
     if (status) q.set('status', status)
     if (taskType) q.set('task_type', taskType)
     q.set('limit', '200')
-    const res = await apiGet(`/api/tasks${q.toString() ? `?${q}` : ''}`, {}, false)
+    const res = await apiGet(`/api/tasks${q.toString() ? `?${q}` : ''}`, {}, true)
     return (res.data || []).map(toFrontTask)
   },
 
   async getTask(id) {
-    const res = await apiGet(`/api/tasks/${id}`, {}, false)
+    const res = await apiGet(`/api/tasks/${id}`, {}, true)
     return toFrontTask(res.data)
   },
 
@@ -137,7 +137,7 @@ export const taskApi = {
       notify_channels: notifyEnabled ? ['inapp'] : [],
       ...buildSchedule({ freqMode, intervalHours, dailyTime, weekDays })
     }
-    const res = await apiPost('/api/tasks', body, {}, false)
+    const res = await apiPost('/api/tasks', body, {}, true)
     return res.data
   },
 
@@ -149,28 +149,28 @@ export const taskApi = {
       delete body.freqMode; delete body.intervalHours; delete body.dailyTime; delete body.weekDays
       Object.assign(body, s)
     }
-    const res = await apiPut(`/api/tasks/${id}`, body, {}, false)
+    const res = await apiPut(`/api/tasks/${id}`, body, {}, true)
     return res.data
   },
 
   // 启停
   async setEnabled(id, enabled) {
-    const res = await apiPut(`/api/tasks/${id}`, { status: enabled ? 'active' : 'paused' }, {}, false)
+    const res = await apiPut(`/api/tasks/${id}`, { status: enabled ? 'active' : 'paused' }, {}, true)
     return res.data
   },
 
   async deleteTask(id) {
-    await apiDelete(`/api/tasks/${id}`, {}, false)
+    await apiDelete(`/api/tasks/${id}`, {}, true)
   },
 
   // 立即执行（结果异步写入日志）
   async triggerTask(id) {
-    await apiPost(`/api/tasks/${id}/trigger`, {}, {}, false)
+    await apiPost(`/api/tasks/${id}/trigger`, {}, {}, true)
   },
 
   // 单任务执行日志
   async getTaskLogs(taskId, limit = 10) {
-    const res = await apiGet(`/api/tasks/${taskId}/logs?limit=${limit}`, {}, false)
+    const res = await apiGet(`/api/tasks/${taskId}/logs?limit=${limit}`, {}, true)
     return (res.data || []).map((lg) => ({
       id: lg.id,
       time: fmtClock(lg.started_at),
@@ -182,7 +182,7 @@ export const taskApi = {
 
   // 价格历史
   async getPriceHistory(productId, days = 7) {
-    const res = await apiGet(`/api/tasks/price-history/${encodeURIComponent(productId)}?days=${days}`, {}, false)
+    const res = await apiGet(`/api/tasks/price-history/${encodeURIComponent(productId)}?days=${days}`, {}, true)
     return res // { data, trend, total }
   }
 }

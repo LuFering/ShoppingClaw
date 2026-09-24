@@ -6,7 +6,38 @@
 // 注意：三个请求都必须带认证（requiresAuth=true）；未登录或接口异常时降级 localStorage 演示数据。
 import { apiGet, apiPut, apiDelete } from './base'
 import { demoStatus } from './demoStatus'
-import { seedRecords } from './decisions_seed'
+// 演示种子已停用（2026-09-22）：档案必须是真实数据，不再用它填充。
+// 文件保留在 ./decisions_seed，将来若要做「新用户引导态」可显式启用。
+// import { seedRecords } from './decisions_seed'
+
+// ── 提醒归一化 ──────────────────────────────────────────────
+// 历史上有两种形状（实测 DB 里并存）：
+//   · 老：前端种子写的裸字符串   "下单前确认接口供电"
+//   · 新：购后助手 set_reminder 写的对象  {id, text, at, done}
+// 两个消费方（档案页 / 对话里的 ReminderListTool）都按对象读，
+// 裸字符串会渲染成空行。在**读取边界**统一升级，之后所有下游都只需处理对象。
+// 后端 set_reminder 已同步改为写 `at`（原来是 `due`，前端读不到）。
+export const normReminders = (list) => {
+  if (!Array.isArray(list)) return []
+  return list
+    .map((r) => {
+      if (typeof r === 'string') return { id: '', text: r.trim(), at: '', done: false }
+      if (r && typeof r === 'object') {
+        return {
+          id: r.id || '',
+          text: String(r.text || '').trim(),
+          at: r.at || r.due || '',   // 兼容老的 due
+          done: !!r.done
+        }
+      }
+      return null
+    })
+    .filter((r) => r && r.text)
+}
+
+// 整条记录过一遍：reminders 之外原样透传
+const normRecord = (rec) =>
+  rec && typeof rec === 'object' ? { ...rec, reminders: normReminders(rec.reminders) } : rec
 
 const KEY = 'sc_decisions_v1'
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms))
@@ -14,9 +45,11 @@ const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms))
 const loadLocal = () => {
   try {
     const raw = localStorage.getItem(KEY)
-    if (raw) return JSON.parse(raw)
+    if (raw) return JSON.parse(raw).map(normRecord)
   } catch { /* ignore */ }
-  return JSON.parse(JSON.stringify(seedRecords()))
+  // 降级路径也**不**补种子：接口异常时宁可显示空白 + 错误提示，
+  // 也不要把演示数据伪装成用户的真实档案。
+  return []
 }
 
 export const decisionsApi = {
@@ -26,16 +59,12 @@ export const decisionsApi = {
       if (!res?.data) throw new Error('bad shape')
       demoStatus.decisions = false
 
-      // 后端已接通但该用户还没有任何档案：把演示种子写进去作为初始档案
-      // （与 reset() 语义一致：种子就是初始基线，避免首次进入是空白页）
-      if (Array.isArray(res.data) && res.data.length === 0) {
-        const seed = JSON.parse(JSON.stringify(seedRecords()))
-        try {
-          await apiPut('/api/decisions/batch', { records: seed }, {}, true)
-        } catch { /* 写入失败不影响展示 */ }
-        return seed
-      }
-      return res.data
+      // 后端返回空 = 该用户确实还没有档案，如实返回空（空白态）。
+      // ⚠️ 2026-09-22：这里**不要**补种子数据 —— 曾经把演示种子写进后端
+      // 再当真实档案返回，用户看到的是看起来完全真实的假档案
+      // （demoStatus 只在接口异常时才为 true，页面上没有任何提示）。
+      // 真实档案应由对话中的购后助手归档产生，而不是凭空造一批。
+      return Array.isArray(res.data) ? res.data.map(normRecord) : []
     } catch {
       demoStatus.decisions = true
       await delay(100)
@@ -58,7 +87,8 @@ export const decisionsApi = {
   async reset() {
     try { await apiDelete('/api/decisions', {}, true) } catch { /* 后端未实现时静默 */ }
     localStorage.removeItem(KEY)
-    return JSON.parse(JSON.stringify(seedRecords()))
+    // 重置 = 清空，不是「重置成演示数据」
+    return []
   }
 }
 

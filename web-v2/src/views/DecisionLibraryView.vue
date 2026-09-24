@@ -158,7 +158,9 @@
             <section v-if="selected.reminders.length" class="block">
               <h3 class="block-title">温馨提醒</h3>
               <ol class="notes">
-                <li v-for="(rm, i) in selected.reminders" :key="i">{{ rm }}</li>
+                <li v-for="(rm, i) in selected.reminders" :key="i">
+                  {{ rm.text }}<span v-if="rm.at" class="rem-at mono">{{ rm.at }}</span>
+                </li>
               </ol>
             </section>
           </template>
@@ -250,7 +252,7 @@ import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Modal, message, Empty } from 'ant-design-vue'
 import { Plus, X } from 'lucide-vue-next'
-import { decisionsApi } from '@/apis/decisions_api'
+import { decisionsApi, normReminders } from '@/apis/decisions_api'
 import { demoStatus } from '@/apis/demoStatus'
 
 const router = useRouter()
@@ -284,7 +286,7 @@ const mk = (o) => {
     aiRecommend: o.aiRecommend || '', recReason: o.recReason || '', risk: o.risk || '', bestPrice: o.bestPrice || '',
     dealPrice: o.dealPrice || '', purchasedAt: o.purchasedAt || '',
     reviewNote: o.reviewNote || '', dropNote: o.dropNote || '',
-    reminders: o.reminders || [], threadId: o.threadId || null,
+    reminders: normReminders(o.reminders), threadId: o.threadId || null,
     ts, updatedAt: rel(ts)
   }
 }
@@ -795,6 +797,12 @@ const goAsk = () => router.push('/agent')
     color: var(--text);
     line-height: 1.7;
     &::marker { color: var(--text-faint); font-family: var(--font-mono); font-size: 0.76rem; }
+  }
+  /* 提醒时间（后端 at 字段）：靠右弱化，与正文区分 */
+  .rem-at {
+    margin-left: 8px;
+    font-size: 0.76rem;
+    color: var(--text-faint);
   }
 }
 

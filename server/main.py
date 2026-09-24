@@ -27,6 +27,8 @@ from server.routers.models_router import router as models_router
 from server.routers.task_router import router as task_router
 from server.routers.decisions_router import router as decisions_router
 from server.routers.mcp_router import router as mcp_router
+from server.routers.events_router import router as events_router
+from server.routers.assistant_router import router as assistant_router
 from server.middleware.audit import AuditMiddleware
 
 # ── 日志系统：loguru 接管（文件落盘 saves/logs/ + 轮转保留 + 根 logger 桥接 + request_id）──
@@ -225,6 +227,8 @@ app.include_router(models_router, prefix="/api")
 app.include_router(task_router, prefix="/api")
 app.include_router(decisions_router, prefix="/api")
 app.include_router(mcp_router, prefix="/api")
+app.include_router(events_router, prefix="/api")
+app.include_router(assistant_router, prefix="/api")
 
 
 @app.get("/api/system/health")
