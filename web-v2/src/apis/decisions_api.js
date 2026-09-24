@@ -4,7 +4,7 @@
 //   PUT   /api/decisions/batch    body {records:[ShoppingRecord]}（整册同步：前端以整体保存模式工作）
 //   DELETE /api/decisions         （重置为空）
 // 注意：三个请求都必须带认证（requiresAuth=true）；未登录或接口异常时降级 localStorage 演示数据。
-import { apiGet, apiPut, apiDelete } from './base'
+import { apiGet, apiPost, apiPut, apiDelete } from './base'
 import { demoStatus } from './demoStatus'
 // 演示种子已停用（2026-09-22）：档案必须是真实数据，不再用它填充。
 // 文件保留在 ./decisions_seed，将来若要做「新用户引导态」可显式启用。
@@ -35,9 +35,21 @@ export const normReminders = (list) => {
     .filter((r) => r && r.text)
 }
 
-// 整条记录过一遍：reminders 之外原样透传
-const normRecord = (rec) =>
-  rec && typeof rec === 'object' ? { ...rec, reminders: normReminders(rec.reminders) } : rec
+// 整条记录过一遍：reminders 归一 + **把缺失的数组字段补成空数组**。
+//
+// 为什么补：视图里到处直接写 `r.candidates.length` / `r.reminders.length`，
+// 而后端不保证每条记录都带全集字段（Agent 单条归档时只写它知道的键，
+// 手写测试记录更是只有 id/phase/target）。缺一个数组就渲染崩 → 整页
+// 卡在「加载档案…」。补在这里，下游就不用每个字段都写 `|| []`。
+const ARRAY_FIELDS = ['candidates', 'reminders']
+const normRecord = (rec) => {
+  if (!rec || typeof rec !== 'object') return rec
+  const out = { ...rec, reminders: normReminders(rec.reminders) }
+  for (const f of ARRAY_FIELDS) {
+    if (!Array.isArray(out[f])) out[f] = []
+  }
+  return out
+}
 
 const KEY = 'sc_decisions_v1'
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms))
@@ -72,7 +84,46 @@ export const decisionsApi = {
     }
   },
 
-  // 整册同步（页面 deep-watch 全量保存；后端可整册 upsert 或差分，契约按整册最简）
+  // ── 逐条写入 ──────────────────────────────────────────────
+  // 2026-09-25 改：原先只有 saveAll（整册覆盖），后端那条路径是
+  // 「先 DELETE 全部 → 再重写」，与 Agent 的单条归档互相覆盖，
+  // 已经造成过一次真实数据丢失（21 条）。现在单条进单条出。
+  async saveOne(record) {
+    try {
+      const res = await apiPut(
+        `/api/decisions/${encodeURIComponent(record.id)}`,
+        record, {}, true
+      )
+      demoStatus.decisions = false
+      return res?.data || record
+    } catch {
+      return null
+    }
+  },
+
+  async createOne(record) {
+    try {
+      const res = await apiPost('/api/decisions', record, {}, true)
+      demoStatus.decisions = false
+      return res?.data || null
+    } catch {
+      return null
+    }
+  },
+
+  async removeOne(id) {
+    try {
+      await apiDelete(`/api/decisions/${encodeURIComponent(id)}`, {}, true)
+      demoStatus.decisions = false
+      return true
+    } catch {
+      return false
+    }
+  },
+
+  // 批量写入（按 id 增量 upsert）。**不再删除任何东西** ——
+  // 后端已改成「提交里有的写入，没有的保持不动」。
+  // 保留这个方法只为兼容旧调用点；新代码优先用 saveOne/createOne。
   async saveAll(records) {
     try {
       await apiPut('/api/decisions/batch', { records }, {}, true)
@@ -85,7 +136,9 @@ export const decisionsApi = {
   },
 
   async reset() {
-    try { await apiDelete('/api/decisions', {}, true) } catch { /* 后端未实现时静默 */ }
+    // 全清需显式确认 —— 后端在没有 confirm 时会拒绝（400），
+    // 避免一个误调用就清空整册。
+    try { await apiDelete('/api/decisions?confirm=true', {}, true) } catch { /* 失败时静默，本地也清 */ }
     localStorage.removeItem(KEY)
     // 重置 = 清空，不是「重置成演示数据」
     return []

@@ -208,6 +208,11 @@
             danger
             @click="dropRecord(selected)"
           >标记放弃</a-button>
+          <a-button
+            size="small"
+            danger
+            @click="deleteRecord(selected)"
+          >删除</a-button>
         </footer>
       </div>
     </main>
@@ -302,6 +307,7 @@ const initRecords = async () => {
   loadError.value = ''
   try {
     records.value = await decisionsApi.load()
+    resyncSnapshot()
   } catch {
     loadError.value = '档案加载失败'
   } finally {
@@ -309,12 +315,44 @@ const initRecords = async () => {
   }
 }
 
-// 任何记录变更（阶段流转/字段修改）后自动持久化（防抖）
+// 记录变更后**逐条**持久化（防抖）。
+//
+// 2026-09-25 改：原先是 `saveAll(records.value)` —— 把整册提交给一个
+// 「先 DELETE 全部再重写」的端点。那条路径会与 Agent 的单条归档互相覆盖：
+// Agent 归档一条 → 用户打开本页（加载的是旧快照）→ 本页自动保存 →
+// Agent 那条被抹掉。已造成过一次真实数据丢失。
+//
+// 现在只提交**变化的那几条**（按 JSON 快照比对）。没变的永远不碰，
+// 别人写的也就不会被顺手删掉。
+const snapshot = ref({})   // id -> 上次已保存的序列化结果
+
+const resyncSnapshot = () => {
+  const snap = {}
+  for (const r of records.value) {
+    if (r && r.id) snap[r.id] = JSON.stringify(r)
+  }
+  snapshot.value = snap
+}
+
+const dirtyRecords = () => {
+  const snap = snapshot.value
+  return records.value.filter(
+    (r) => r && r.id && snap[r.id] !== JSON.stringify(r)
+  )
+}
+
 let saveTimer = null
 watch(records, () => {
   clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    decisionsApi.saveAll(records.value).catch(() => {})
+  saveTimer = setTimeout(async () => {
+    const dirty = dirtyRecords()
+    if (!dirty.length) return
+    for (const rec of dirty) {
+      const ok = (snapshot.value[rec.id] === undefined)
+        ? await decisionsApi.createOne(rec)      // 新增
+        : await decisionsApi.saveOne(rec)        // 修改
+      if (ok) snapshot.value[rec.id] = JSON.stringify(rec)
+    }
   }, 300)
 }, { deep: true })
 
@@ -355,6 +393,7 @@ const select = (r) => { selectedId.value = r.id }
 
 const snippet = (r) => ({
   need: r.note || r.rawIdea,
+  // candidates 由 decisions_api 的读取边界补成空数组，这里可直接用
   candidate: r.candidates.length ? `候选 ${r.candidates.length} 个${chosenOf(r) ? ` · 主选 ${chosenOf(r).name}` : ''}` : '待添加候选',
   decided: r.aiRecommend ? `选定 ${r.aiRecommend}` : '—',
   using: r.dealPrice ? `已购 ${r.dealPrice}` : '已下单',
@@ -409,6 +448,33 @@ const dropRecord = (r) => {
       r.dropNote = ''
       r.phase = 'dropped'
       touch(r)
+    }
+  })
+}
+
+// 真删除（与「标记放弃」区分）
+//
+// 「标记放弃」是**阶段流转**：记录移入 dropped，随时能筛回来 —— 这是可逆的。
+// 「删除」是**不可逆**的，所以两件事分开：确认文案不同、按钮危险等级不同、
+// 且删除会真的调后端逐条删，而不是只从本地数组里 splice（那样刷新就回来了）。
+const deleteRecord = (r) => {
+  Modal.confirm({
+    title: `彻底删除「${r.target}」？`,
+    content: '这条记录会从档案里永久移除，无法恢复。如果只是想暂时搁置，请用「标记放弃」。',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    async onOk() {
+      const ok = await decisionsApi.removeOne(r.id)
+      if (!ok) {
+        message.error('删除失败，记录仍在档案里')
+        return
+      }
+      delete snapshot.value[r.id]
+      const i = records.value.findIndex((x) => x.id === r.id)
+      if (i >= 0) records.value.splice(i, 1)
+      if (selectedId.value === r.id) selectedId.value = null
+      message.success('已删除')
     }
   })
 }
