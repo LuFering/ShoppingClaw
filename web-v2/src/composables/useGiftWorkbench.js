@@ -41,6 +41,7 @@ export function useGiftWorkbench({ runId } = {}) {
   const understanding = ref({ text: '', from: '' })
   const deliverables = ref(skeletonDeliverables())
   const task = ref({ recipient: '', occasion: '', budget: 0 })
+  const profileHead = ref(null)
 
   let abort = null
   let lastSeq = 0
@@ -152,6 +153,9 @@ export function useGiftWorkbench({ runId } = {}) {
           return { ...base, ...g, fresh: false }
         })
       }
+      if (run.profileHead && Object.keys(run.profileHead).length) {
+        profileHead.value = run.profileHead
+      }
       if (run.understanding?.text) understanding.value = run.understanding
       settled.value = run.status === 'converged'
       subscribe()
@@ -228,6 +232,7 @@ export function useGiftWorkbench({ runId } = {}) {
 
   return {
     task,
+    profileHead,
     steps,
     excluded,
     profile,

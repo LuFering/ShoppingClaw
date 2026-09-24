@@ -104,6 +104,7 @@ const runId = computed(() => String(route.query.run || ''))
 
 const {
   task,
+  profileHead,
   steps,
   excluded,
   profile,
@@ -121,9 +122,6 @@ const {
   reload,
   revise
 } = useGiftWorkbench({ runId })
-
-// 档案抬头：后端给了 profileHead 就用它，否则从 task 兜底
-const profileHead = ref(null)
 
 /** 抬头兜底：后端还没返回时（推演刚开始）也要能显示，不能空着 */
 const head = computed(() => profileHead.value || {
@@ -159,19 +157,9 @@ const onAct = async (g, kind) => {
 const onConfirm = () => say('下单链路待接入 —— 订单已可确认，落库与支付等后端')
 const onRevise = () => say('改一下 —— 回到入口页调整情境后重推')
 
-onMounted(async () => {
-  if (!runId.value) {
-    loading.value = false
-    return
-  }
-  await start()
-  // 快照里的 profileHead 由 loadSnapshot 写入 profile 组，抬头单独取一次
-  try {
-    const { giftApi } = await import('@/apis/gift_api')
-    const run = await giftApi.getRun(runId.value)
-    profileHead.value = run.profileHead || null
-  } catch { /* 抬头取不到就用兜底 */ }
-})
+// 无 runId 时 composable 的 loadSnapshot 会置 loading=false 并给出提示，
+// 所以这里不需要提前 return。
+onMounted(start)
 
 onBeforeUnmount(() => {
   abort()
