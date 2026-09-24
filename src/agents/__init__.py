@@ -54,5 +54,11 @@ agent_manager=AgentManager()
 from src.agents.master_agent.graph import MasterAgent
 agent_manager.register_agent(MasterAgent)
 
+# 独立 agent：有自己的图/技能/阶段，与主智能体并列而非上下级。
+# 显式注册（auto_discover_agent 仍是空实现）—— 注册后自动获得
+# /api/chat/agent 列表与 SSE 对话入口，但它主要走 /api/planning/runs 那套。
+from src.agents.independent.planning.agent import PlanningAgent
+agent_manager.register_agent(PlanningAgent)
+
 agent_manager.init_all_agents()
 __all__=["agent_manager"]

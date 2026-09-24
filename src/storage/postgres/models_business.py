@@ -406,3 +406,111 @@ class MCPServer(Base):
             "heartbeat": self.heartbeat or "—",
             "source": "custom",
         }
+
+
+# ══════════════════════════════════════════════════════════════
+# 采购规划（planning agent）—— 2026-09-24 新增
+# ══════════════════════════════════════════════════════════════
+
+class PlanningRun(Base):
+    """一次采购规划任务实例。
+
+    与 `TaskRecord` 的区别（有意不合并）：
+      · TaskRecord 是**周期性监控**（间隔/cron、下次执行、反复跑）
+      · PlanningRun 是**一次性规划**（有明确的收敛终点，跑完就沉淀成方案）
+    两者的生命周期、调度语义、前端形态都不同，共用一张表会立刻需要
+    「一半字段对另一半为空」的分支。
+
+    与 `conversations` 的区别：工作台是「任务实例」不是「对话线程」，
+    图的推进与用户的拍板都挂在 run 上，不混进通用对话历史。
+    """
+
+    __tablename__ = "planning_runs"
+
+    id = Column(String(64), primary_key=True)                 # 形如 pr-<uuid8>
+    user_id = Column(String(64), nullable=False, index=True)  # 与其它表同口径 str(users.id)
+    # running 跑图中 / awaiting 等用户拍板 / converged 已收敛 / failed 出错
+    status = Column(String(20), nullable=False, default="running", index=True)
+
+    # ── 入口页收敛出的结构化参数 ──
+    scene = Column(String(64), nullable=False, default="")
+    budget = Column(String(64), nullable=False, default="")     # 保留用户原话（「¥6万」），不强行转数字
+    duration = Column(String(64), nullable=False, default="")
+    constraints = Column(JSON, nullable=False, default=list)    # ["有老人", "要静音"]
+
+    subject = Column(String(120), nullable=False, default="")   # 本次要买的主体（如「洗地机」）
+
+    # ── 决策图当前快照 ──
+    # 存快照而非只存事件：工作台刷新要能一次拿全，不该扫全表重放。
+    # 每次图变更由 planning_service 覆盖写入。
+    graph = Column(JSONB, nullable=False, default=dict)         # {nodes: [...], edges: [...]}
+    meta = Column(JSONB, nullable=False, default=dict)          # {totalExpected, subject, scene}
+
+    # ── 当前待确认的问题（右栏浮出的那张卡）──
+    question = Column(JSONB, nullable=True)                     # {text, options: [{key,label,primary}]}
+
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    def to_dict(self) -> dict[str, Any]:
+        """转成前端消费的形状（字段名与 planning_api.js 契约一致）。"""
+        return {
+            "id": self.id,
+            "status": self.status,
+            "scene": self.scene or "",
+            "budget": self.budget or "",
+            "duration": self.duration or "",
+            "constraints": self.constraints or [],
+            "subject": self.subject or "",
+            "graph": self.graph or {"nodes": [], "edges": []},
+            "meta": self.meta or {},
+            "question": self.question,
+            "error": self.error,
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at) if self.updated_at else None,
+        }
+
+
+class PlanningEvent(Base):
+    """采购规划的**只追加**事件流水 —— 执行流与图变更的同一本账。
+
+    为什么与 PlanningRun.graph 分两处（而不是只留事件、或只留快照）：
+      · 快照（run.graph）服务「刷新后一次拿全」——读最新一行即可
+      · 事件（本表）服务「过程可回看」——左栏执行流要按时间顺序展开，
+        且断线后要能从 after_seq 续传
+    只留快照就回放不出过程；只留事件则每次拉图都要扫全表重放。
+    两者由 planning_service 在同一处写入，不会漂。
+
+    kind 取值（刻意收窄，够用即可 —— 不学 chat 的 15 种事件）：
+      phase       阶段推进     payload {phase, label}
+      think       思考         payload {title, detail?}
+      retrieve    检索         payload {title, detail?}
+      call        工具调用     payload {title, detail?}
+      produce     产出         payload {title, detail?}
+      graph       图变更       payload {nodes, edges}   ← 增量，前端合并
+      question    待确认       payload {text, options}
+      deliverable 交付物       payload {id, name, state, meta, progress?}
+      done        结束         payload {status}
+    """
+    __tablename__ = "planning_events"
+
+    __table_args__ = (
+        # 续传按 (run_id, seq) 走，这是唯一的读路径
+        Index("ix_planning_events_run_seq", "run_id", "seq"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)                      # run 内自增，从 1 开始
+    kind = Column(String(20), nullable=False)
+    payload = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, default=utc_now_naive)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seq": self.seq,
+            "kind": self.kind,
+            "payload": self.payload or {},
+            "at": format_utc_datetime(self.created_at),
+        }
