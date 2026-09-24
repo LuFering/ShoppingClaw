@@ -32,10 +32,10 @@
           <div v-if="m.kind === 'brief'" class="msg ai">
             <div class="card-msg">
               <div class="card-head">
-                <span class="card-kind">每日简报</span>
+                <span class="card-kind">今日简报</span>
                 <span class="card-time mono">{{ m.time }}</span>
               </div>
-              <p class="card-title">{{ m.date }} · 今天需要你知道的</p>
+              <p class="card-title">{{ m.date ? m.date + ' · ' : '' }}{{ m.title }}</p>
               <ul class="card-points">
                 <li v-for="(p, i) in m.points" :key="i" :class="'pt-' + p.tone">{{ p.text }}</li>
               </ul>
@@ -173,7 +173,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { Send } from 'lucide-vue-next'
 import { MdPreview } from 'md-editor-v3'
@@ -181,7 +181,10 @@ import 'md-editor-v3/lib/preview.css'
 import { assistantApi } from '@/apis/assistant_api'
 import { apiPost } from '@/apis/base'
 import { demoStatus } from '@/apis/demoStatus'
+import { useUserStore } from '@/stores/user'
 import { doneText, hitLabel } from '@/utils/statusMeta'
+
+const userStore = useUserStore()
 
 const router = useRouter()
 
@@ -233,6 +236,90 @@ const initState = async ({ silent = false } = {}) => {
   }
 }
 initState()
+
+// ===== 实时推送（SSE）=====
+// 后端 GET /api/events/stream 早已实现，但此前**没有任何消费方** ——
+// 页面只在挂载时拉一次 overview，用户开着页面时任务命中了也不会出现，
+// 得手动刷新，与「主动触达」的定位不符。
+//
+// 这里不用 EventSource：它无法携带 Authorization 头（而 /api/events/stream
+// 要求登录）。改用 fetch + ReadableStream 手动解析，与 AgentChatComponent
+// 消费对话流的方式一致。
+// 收到 notify_event 后不做增量合并，直接重拉一次 overview ——
+// 后端注释里写明的预期用法，省得前端维护两套会漂移的状态。
+let sseAbort = null
+let sseRetry = null
+let closing = false
+let backoff = 2000
+
+const stopStream = () => {
+  closing = true
+  if (sseRetry) { clearTimeout(sseRetry); sseRetry = null }
+  try { sseAbort?.abort() } catch { /* ignore */ }
+  sseAbort = null
+}
+
+// 标签页切回前台时补一次：SSE 在后台可能被浏览器挂起，
+// 不补的话用户切回来看到的是过期数据。
+const onVisible = () => {
+  if (document.visibilityState === 'visible') initState({ silent: true })
+}
+
+// 指数退避重连，上限 30s。它是长连接，正常时不会走到这里。
+const scheduleReconnect = () => {
+  if (closing) return
+  if (sseRetry) clearTimeout(sseRetry)
+  sseRetry = setTimeout(() => { startStream() }, backoff)
+  backoff = Math.min(backoff * 2, 30000)
+}
+
+const startStream = async () => {
+  closing = false
+  let headers = { Accept: 'text/event-stream' }
+  try { headers = { ...headers, ...userStore.getAuthHeaders() } } catch { /* 未登录则跳过实时推送 */ }
+
+  let resp
+  try {
+    sseAbort = new AbortController()
+    resp = await fetch('/api/events/stream', { headers, signal: sseAbort.signal })
+  } catch { return scheduleReconnect() }
+  if (!resp.ok || !resp.body) return scheduleReconnect()
+
+  backoff = 2000   // 连上了就重置退避
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      let isNotify = false
+      for (const line of lines) {
+        const t = line.trim()
+        if (t.startsWith('event:')) isNotify = t.slice(6).trim() === 'notify_event'
+        else if (isNotify && t.startsWith('data:')) {
+          // 收到就刷新。不解析 payload —— overview 是唯一真相。
+          initState({ silent: true })
+          isNotify = false
+        }
+      }
+    }
+  } catch { /* abort 或网络中断，走下面的重连 */ }
+  try { reader.cancel() } catch { /* ignore */ }
+  scheduleReconnect()
+}
+
+onMounted(() => {
+  startStream()
+  document.addEventListener('visibilitychange', onVisible)
+})
+onBeforeUnmount(() => {
+  stopStream()
+  document.removeEventListener('visibilitychange', onVisible)
+})
 
 // ===== 卡片动作 =====
 // 2026-09-23：原先这三句都是"假装做了"的演示话术（说「已存入购物档案」

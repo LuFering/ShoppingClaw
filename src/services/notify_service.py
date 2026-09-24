@@ -364,27 +364,3 @@ async def dismiss(user_id: str, event_id: str) -> bool:
     except Exception as e:
         logger.warning(f"[notify] 忽略事件失败: {e}")
         return False
-
-
-async def count_today(user_id: str) -> int:
-    """今天的命中事件数（供简报统计）。永不抛异常。"""
-    try:
-        events = await recent(user_id, limit=MAX_EVENTS)
-        today = datetime.now(timezone.utc).date()
-        n = 0
-        for ev in events:
-            created = ev.get("created_at")
-            if not created:
-                continue
-            try:
-                raw = str(created).replace("Z", "+00:00")
-                dt = datetime.fromisoformat(raw)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt.date() == today:
-                    n += 1
-            except (ValueError, TypeError):
-                continue
-        return n
-    except Exception:
-        return 0

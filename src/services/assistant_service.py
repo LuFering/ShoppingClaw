@@ -49,8 +49,32 @@ LOG_RESULT_MAP = {
 }
 
 
+def _local_day_start() -> tuple[datetime, str]:
+    """(本地日 00:00 对应的 naive UTC 时刻, 本地日期的显示文案)。
+
+    库里存的是 naive UTC，而「今天」对用户来说是**本地日**。
+    直接拿 UTC 日期切边界，会让 UTC+8 的用户在早上 8 点前把前一天的数据
+    算进今天（反之亦然）。
+
+    两个值都要返回：边界是 UTC 时刻（用于比较），显示文案是**本地**日期
+    （用于卡片标题）。只返回前者再 strftime 会打印出 UTC 的日期 ——
+    本地 9/24 早上 8 点前，UTC 边界落在 9/23，标题就会写成 09月23日。
+    """
+    local_now = datetime.now().astimezone()
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc).replace(tzinfo=None), local_now.strftime("%m月%d日")
+
+
+def _is_today(dt: datetime | None, day_start_utc: datetime) -> bool:
+    """该时刻是否落在「今天」（本地日）。"""
+    if not isinstance(dt, datetime):
+        return False
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt >= day_start_utc
+
+
 def _rel_time(dt: datetime | None) -> str:
-    """datetime → 相对文案。库里是 naive UTC。"""
     if not dt:
         return ""
     if dt.tzinfo is None:
@@ -122,6 +146,8 @@ async def build_feed(user_id: str) -> list[dict]:
     except Exception:
         dismissed = set()
 
+    day_start = _local_day_start()[0]
+
     try:
         async with pg_manager.get_async_session_context() as session:
             rows = await session.execute(
@@ -155,6 +181,10 @@ async def build_feed(user_id: str) -> list[dict]:
                     # 原来前端把它写死成 price/stock 二选一，导致券、补货、
                     # 榜单类命中全都显示成「降价提醒」。
                     "hitType": str(task.task_type or ""),
+                    # 供 build_brief 按「本地日」切分统计。放布尔而不是原始
+                    # datetime：后者会被 FastAPI 序列化进响应，白白泄露一个
+                    # 前端用不到的字段。
+                    "today": _is_today(log.started_at, day_start),
                 })
                 if len(out) >= FEED_LIMIT:
                     break
@@ -331,8 +361,18 @@ def _rel_time_short(dt: datetime | None) -> str:
 
 
 async def build_brief(user_id: str, feed: list[dict], todos: list[dict]) -> dict:
-    """每日简报：统计 + 要点。首版纯规则，不调 LLM（方案 §4 P2）。"""
-    hits = sum(1 for f in feed if f.get("result") == "hit")
+    """每日简报：统计 + 要点。纯规则，不调 LLM（方案 §4 P2）。
+
+    **口径修正（2026-09-24）**：原先 `hits` 统计的是 feed 里的命中条数，
+    而 feed 是「最近 20 条执行日志」—— 跨越任意天数。卡片却写着
+    「今天需要你知道的」，等于拿近 N 条冒充「今天」，任务一多就会把
+    昨天的命中算进今天。
+    现在改为按**本地日**切分：只统计今天 00:00 之后开始的执行。
+    """
+    # 边界已在 build_feed 按同一天算好并写进每条的 today 标记，
+    # 这里只需取显示用的本地日期文案。
+    _, today_label = _local_day_start()
+    hits = sum(1 for f in feed if f.get("result") == "hit" and f.get("today"))
     drafts = sum(1 for t in todos if t.get("kind") == "draft")
 
     watching = 0
@@ -349,27 +389,44 @@ async def build_brief(user_id: str, feed: list[dict], todos: list[dict]) -> dict
 
     points: list[dict] = []
 
-    # 命中事件最有信息量，优先展示
-    for f in [x for x in feed if x.get("result") == "hit"][:3]:
+    # 命中事件最有信息量，优先展示（只取今天的）
+    for f in feed:
+        if f.get("result") != "hit" or not f.get("today"):
+            continue
         points.append({"tone": "pos", "text": f"{f.get('product')} — {f.get('change')}"[:70]})
+        if len(points) >= 3:
+            break
 
     # 待办次之
     for t in [x for x in todos if x.get("kind") == "draft"][:2]:
         points.append({"tone": "accent", "text": f"{t.get('text')} — {t.get('note')}"[:70]})
 
-    # 失败要报 —— 静默失败比不通知更糟
-    for f in [x for x in feed if x.get("result") == "fail"][:2]:
+    # 失败要报 —— 静默失败比不通知更糟（同样只报今天的）
+    n_warn = 0
+    for f in feed:
+        if f.get("result") != "fail" or not f.get("today"):
+            continue
         points.append({"tone": "warn", "text": f"{f.get('product')} 执行失败：{f.get('change')}"[:70]})
+        n_warn += 1
+        if n_warn >= 2:
+            break
 
     if not points:
         # 空态也给一句有用的话，而不是留白
         if watching:
-            points.append({"tone": "muted", "text": f"正在盯 {watching} 个任务，暂时没有新动静"})
+            points.append({"tone": "muted", "text": f"正在盯 {watching} 个任务，今天暂时没有新动静"})
         else:
             points.append({"tone": "muted", "text": "还没有监控任务 —— 在对话里说「帮我盯一下 XX 的价格」即可"})
 
     return {
-        "stats": {"hits": hits, "drafts": drafts, "watching": watching},
+        "stats": {
+            "hits": hits,
+            "drafts": drafts,
+            "watching": watching,
+            # 前端标题要用：显示**本地**日期，不是 UTC 边界日
+            "date": today_label,
+            "generated": bool(feed or todos),
+        },
         "points": points[:BRIEF_POINT_LIMIT],
     }
 
@@ -381,12 +438,17 @@ def build_messages(brief: dict, feed: list[dict], todos: list[dict]) -> list[dic
     """
     messages: list[dict] = []
 
-    now = datetime.now(timezone.utc)
+    stats = brief.get("stats") or {}
     messages.append({
         "id": "msg-brief",
         "kind": "brief",
-        "time": _clock(now),
-        "date": "每日简报",
+        # 这个 time 是**卡片合成时刻**（用户打开页面的时间），不是简报
+        # 生成时刻 —— 简报是按需实时算的，没有独立的生成时间点。
+        "time": _clock(datetime.now(timezone.utc)),
+        "date": stats.get("date") or "",
+        # 有数据才叫「今天需要你知道的」；一条数据都没有时如实说明，
+        # 不要用一句空话冒充简报。
+        "title": "今天需要你知道的" if stats.get("generated") else "还没有可汇总的动态",
         "points": brief.get("points") or [],
     })
 
