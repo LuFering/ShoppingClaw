@@ -203,6 +203,11 @@
             v-if="selected.threadId && ['decided', 'using', 'reviewed'].includes(selected.phase)"
             @click="continueAsk(selected)"
           >继续问它</a-button>
+          <!-- 回跳来源推演：与「继续问它」同一思路（都是「这条记录从哪来」），
+               区别是它指向的是工作台的 run 而不是对话线程。 -->
+          <a-button v-if="selected.runId" @click="openRun(selected)">
+            {{ selected.source === 'gift' ? '看送礼过程' : '看规划过程' }}
+          </a-button>
           <a-button
             v-if="!['dropped', 'reviewed'].includes(selected.phase)"
             danger
@@ -546,6 +551,14 @@ const saveReview = () => {
 }
 
 const continueAsk = (r) => router.push(r.threadId ? { path: '/agent', query: { open_thread: r.threadId } } : { path: '/agent' })
+// 跳回记录来源的那次推演。
+// source 决定落在哪个工作台 —— 规划与送礼的工作台路由不同，
+// 且都靠 query 里的 run 取任务实例。
+const openRun = (r) => {
+  const path = r.source === 'gift' ? '/proxy' : '/planning/run'
+  router.push({ path, query: { run: r.runId } })
+}
+
 const goAsk = () => router.push('/agent')
 </script>
 

@@ -13,6 +13,12 @@
           重试
         </button>
         <button
+          class="wb-btn"
+          type="button"
+          :disabled="runStatus !== 'converged' || saving"
+          @click="saveToArchive"
+        >{{ saved ? '已存入档案' : '存入档案' }}</button>
+        <button
           class="wb-btn primary"
           type="button"
           :disabled="!deliverables.length || runStatus !== 'converged'"
@@ -121,6 +127,7 @@
  * 前端只负责替换 —— 合并逻辑在服务端一处，前端不做第二套。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
 import AgentExecStream from '@/components/purchase/AgentExecStream.vue'
 import PurchaseDecisionGraph from '@/components/purchase/PurchaseDecisionGraph.vue'
@@ -343,6 +350,61 @@ const onDownload = async (d) => {
   } catch (e) {
     loadError.value = e?.message || '下载失败'
   }
+}
+
+// 存入档案 —— 把这次规划的结论沉淀成一条可追踪的档案记录。
+//
+// 之前工作台跑完就结束了：结果只能看，落不进档案，也就没有后续
+// （推进阶段 / 设提醒 / 复盘）。而档案页反过来也不知道这条记录
+// 是从哪次推演来的。这里把两头接上：记录带 `runId` 回指本次 run。
+const saved = ref(false)
+const saving = ref(false)
+
+const saveToArchive = async () => {
+  if (saving.value || saved.value) return
+  const selected = graphData.value.nodes.find((n) => n.state === 'selected')
+    || graphData.value.nodes.find((n) => n.type === '候选商品')
+  saving.value = true
+  try {
+    const { decisionsApi } = await import('@/apis/decisions_api')
+    const rec = {
+      id: `pl-${Date.now().toString(36)}`,
+      phase: 'decided',
+      source: 'planning',
+      target: selected?.name || taskLabel.value || '采购规划',
+      category: route.query.scene || '',
+      note: `来自采购规划推演（${graphData.value.nodes.length} 个决策节点）`,
+      rawIdea: '',
+      budget: route.query.budget ? `¥${route.query.budget}` : '',
+      forWhom: '',
+      scenario: route.query.scene || '',
+      aiSummary: briefThesis(),
+      candidates: graphData.value.nodes
+        .filter((n) => n.type === '候选商品')
+        .map((n) => ({ name: n.name, price: Number(n.meta?.price) || 0 })),
+      aiRecommend: selected?.name || '',
+      recReason: selected?.meta?.why || '推演过程中选定的候选',
+      risk: '',
+      bestPrice: selected?.meta?.price ? `¥${selected.meta.price}` : '',
+      dealPrice: '', purchasedAt: '', reviewNote: '', dropNote: '',
+      reminders: [], insights: [],
+      threadId: null,
+      runId: runId.value || null,   // ← 回指本次推演
+      ts: Date.now(),
+      updatedAt: '刚刚'
+    }
+    const ok = await decisionsApi.createOne(rec)
+    if (ok) { saved.value = true; message.success('已存入购物档案') }
+    else message.error('存入失败，请重试')
+  } finally {
+    saving.value = false
+  }
+}
+
+const briefThesis = () => {
+  const n = graphData.value.nodes.length
+  const sel = graphData.value.nodes.find((x) => x.state === 'selected')
+  return sel ? `共 ${n} 个决策节点，选定「${sel.name}」` : `共 ${n} 个决策节点`
 }
 
 const produceAll = () => {

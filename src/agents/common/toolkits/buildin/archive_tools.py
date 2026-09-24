@@ -84,6 +84,10 @@ class SaveToArchiveInput(BaseModel):
     ai_recommend: str = Field("", description="推荐结论")
     rec_reason: str = Field("", description="推荐理由")
     thread_id: str = Field("", description="关联会话 id，便于从档案跳回对话")
+    run_id: str = Field(
+        "",
+        description="关联任务实例 id（规划 / 送礼的 run），便于从档案跳回它的推演过程",
+    )
 
 
 class UpdateRecordPhaseInput(BaseModel):
@@ -144,6 +148,10 @@ def _new_record(payload: dict, user_id: str, thread_id: str = "") -> dict:
         "reminders": [],
         "insights": payload.get("insights") or [],
         "threadId": thread_id or None,
+        # 指回来源任务实例（规划 / 送礼的 run）。档案不只是"记了一笔"，
+        # 用户要能从记录跳回它当初是怎么算出来的 —— 这是「可追溯」在
+        # 跨页面场景下的落点。手工记录留空。
+        "runId": payload.get("run_id") or None,
         "ts": ts,
         "updatedAt": _rel_time(ts),
     }
@@ -170,6 +178,7 @@ async def save_to_archive(
     ai_recommend: str = "",
     rec_reason: str = "",
     thread_id: str = "",
+    run_id: str = "",
 ) -> str:
     """把一条购物需求存入用户的购物档案（决策库）。
 
@@ -199,6 +208,7 @@ async def save_to_archive(
                 "risk": risk,
                 "ai_recommend": ai_recommend,
                 "rec_reason": rec_reason,
+                "run_id": run_id,
             },
             user_id,
             thread_id,

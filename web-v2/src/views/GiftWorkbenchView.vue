@@ -7,13 +7,19 @@
           送给 {{ task.recipient || '—' }} · {{ task.occasion || '—' }} · 预算
           <span class="mono">¥{{ task.budget || '—' }}</span>
         </p>
-        <p class="wb__sub">替你把一件礼物从头想到能下单</p>
+        <p class="wb__sub">推演过程与每处取舍</p>
       </div>
 
       <span class="wb__state" :class="{ 'is-live': running }">
         <i class="wb__dot" />{{ running ? '推演中' : settled ? '已收敛' : '待开始' }}
       </span>
 
+      <button
+        class="wb__again"
+        type="button"
+        :disabled="!settled || saving || saved"
+        @click="saveToArchive"
+      >{{ saved ? '已存入档案' : '存入档案' }}</button>
       <button class="wb__again" type="button" @click="router.push('/proxy/new')">重来</button>
     </header>
 
@@ -90,6 +96,7 @@
  *   · 首屏用 `GET /runs/{id}` 快照恢复（刷新不重放）
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
 import ExploreStream from '@/components/gift/ExploreStream.vue'
 import ProfileCard from '@/components/gift/ProfileCard.vue'
@@ -159,6 +166,54 @@ const onRevise = () => say('改一下 —— 回到入口页调整情境后重�
 
 // 无 runId 时 composable 的 loadSnapshot 会置 loading=false 并给出提示，
 // 所以这里不需要提前 return。
+// 存入档案 —— 把这次送礼的结论沉淀成一条可追踪的档案记录。
+//
+// 送礼与规划的区别在记录形态：送礼的产出一份「礼盒方案 + 寄语」，
+// 所以 target 用收礼人 + 场合，candidates 用方案里的几件东西，
+// aiSummary 用「当前理解」那句（它本来就是这次推演的核心判断）。
+// `runId` 回指本次推演，档案页可据此跳回去看过程。
+const saved = ref(false)
+const saving = ref(false)
+
+const saveToArchive = async () => {
+  if (saving.value || saved.value || !settled.value) return
+  saving.value = true
+  try {
+    const { decisionsApi } = await import('@/apis/decisions_api')
+    const plan = deliverables.value.find((d) => d.key === 'plan')?.data || {}
+    const items = plan.items || []
+    const rec = {
+      id: `gf-${Date.now().toString(36)}`,
+      phase: 'decided',
+      source: 'gift',
+      target: `送给${task.value.recipient || '对方'}的${task.value.occasion || '礼物'}`,
+      category: '送礼',
+      note: plan.thesis || '来自送礼推演',
+      rawIdea: '',
+      budget: task.value.budget ? `¥${task.value.budget}` : '',
+      forWhom: task.value.recipient || '',
+      scenario: task.value.occasion || '',
+      aiSummary: understanding.value.text || plan.thesis || '',
+      candidates: items.map((i) => ({ name: i.name, price: Number(i.price) || 0 })),
+      aiRecommend: plan.title || '',
+      recReason: items.map((i) => `${i.role}：${i.why}`).join('；'),
+      risk: '',
+      bestPrice: items.length ? `¥${items.reduce((s, i) => s + (Number(i.price) || 0), 0)}` : '',
+      dealPrice: '', purchasedAt: '', reviewNote: '', dropNote: '',
+      reminders: [], insights: [],
+      threadId: null,
+      runId: runId.value || null,
+      ts: Date.now(),
+      updatedAt: '刚刚'
+    }
+    const ok = await decisionsApi.createOne(rec)
+    if (ok) { saved.value = true; message.success('已存入购物档案') }
+    else message.error('存入失败，请重试')
+  } finally {
+    saving.value = false
+  }
+}
+
 onMounted(start)
 
 onBeforeUnmount(() => {
