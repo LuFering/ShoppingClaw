@@ -7,5 +7,6 @@ export const demoStatus = reactive({
   home: false,      // 主页欢迎区（文本云 / 事件卡）
   mcp: false,       // MCP 连接
   decisions: false, // 购物档案
-  assistant: false  // 主动助理
+  assistant: false, // 主动助理
+  planning: false   // 采购规划
 })

@@ -52,9 +52,10 @@
           </div>
         </div>
 
-        <button class="pe-submit" type="button" @click="startFromForm">
-          生成采购方案 ›
+        <button class="pe-submit" type="button" :disabled="submitting" @click="startFromForm">
+          {{ submitting ? '正在创建任务…' : '生成采购方案 ›' }}
         </button>
+        <p v-if="submitError" class="pe-err">{{ submitError }}</p>
       </div>
     </section>
 
@@ -93,11 +94,13 @@
  * .page + PageHeader（page.less 开头写明它就是「替代各页漂移的
  * max-width/padding」），与 /agents、/mcps、/tasks 一致。
  */
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ClipboardList } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
-import { ENTRY_FORM, PRESET_PLANS } from '@/data/purchaseDemo'
+import { planningApi } from '@/apis/planning_api'
+// 入口配置（预设方案 / 表单选项）从 data/purchaseDemo.js 拆到 data/planningEntryConfig.js
+import { ENTRY_FORM, PRESET_PLANS } from '@/data/planningEntryConfig'
 
 const router = useRouter()
 
@@ -108,11 +111,15 @@ const picked = ref({
   constraints: ['有老人', '要静音']
 })
 
-// 进行中的任务数：后端接上后来自 GET /api/planning/runs。
-// 现在还没有后端，如实为 0 —— 不写死数字（原先是硬编码的「2 个」）。
+// 进行中的任务数：来自 GET /api/planning/runs。
+// 接口不可用时如实为 0（planningApi 内部会置 demoStatus.planning）。
 const runs = ref([])
 const runningCount = computed(() => runs.value.filter((r) => r.status === 'running').length)
 const awaitingCount = computed(() => runs.value.filter((r) => r.status === 'awaiting').length)
+
+onMounted(async () => {
+  runs.value = await planningApi.listRuns()
+})
 
 const isPicked = (field, opt) => {
   const v = picked.value[field.key]
@@ -130,16 +137,45 @@ const pick = (field, opt) => {
   }
 }
 
-const goWorkbench = (params) => {
-  router.push({
-    path: '/planning/run',
-    query: {
+const submitting = ref(false)
+const submitError = ref('')
+
+/**
+ * 提交 → 建 run → 带 run_id 进工作台。
+ *
+ * 为什么要真建一次再跳：工作台是「任务实例」的视图，它需要一个 id 才能
+ * 拉快照、订阅事件。原先只把参数塞进 query，工作台没有任务可显示。
+ *
+ * 不 await 图跑完 —— 后端 `POST /runs` 立即返回，图的推进由 SSE 带给工作台。
+ */
+const goWorkbench = async (params) => {
+  if (submitting.value) return
+  submitting.value = true
+  submitError.value = ''
+  try {
+    const run = await planningApi.createRun({
       scene: params.scene || '',
-      budget: String(params.budget || ''),
+      // 预算原话可能是「¥6万」，后端只存字符串不做换算；数字则直接给
+      budget: String(params.budget ?? ''),
       duration: params.duration || '',
-      source: params.source || 'form'
-    }
-  })
+      constraints: params.constraints || (params.source === 'form' ? picked.value.constraints : []),
+      // 采购主体：表单没收这个字段，先用场景兜底，后续可在表单里加
+      subject: params.subject || ''
+    })
+    router.push({
+      path: '/planning/run',
+      query: {
+        run: run.id,
+        scene: params.scene || '',
+        budget: String(params.budget || ''),
+        duration: params.duration || ''
+      }
+    })
+  } catch (e) {
+    submitError.value = e?.message || '创建任务失败，请重试'
+  } finally {
+    submitting.value = false
+  }
 }
 
 const startFromForm = () => {
@@ -147,6 +183,7 @@ const startFromForm = () => {
     scene: picked.value.scene,
     budget: picked.value.budget,
     duration: picked.value.when,
+    constraints: picked.value.constraints,
     source: 'form'
   })
 }
@@ -255,7 +292,13 @@ const startFromPreset = (preset) => {
   color: var(--on-accent);
   cursor: pointer;
   transition: background-color 0.15s ease-out;
-  &:hover { background: var(--accent-600); }
+  &:hover:not(:disabled) { background: var(--accent-600); }
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+.pe-err {
+  margin: 8px 0 0;
+  font-size: 0.76rem;
+  color: var(--neg);
 }
 
 /* 预设方案卡：容器用全局 .tile-grid / .tile，这里只调排版。

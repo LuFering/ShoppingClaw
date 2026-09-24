@@ -8,17 +8,16 @@
         <p class="wb-task">{{ taskLabel }}</p>
       </div>
       <div class="wb-actions">
-        <button
-          class="wb-btn"
-          type="button"
-          :disabled="converged"
-          @click="running = !running"
-        >{{ running ? '暂停' : '继续' }}</button>
-        <button class="wb-btn" type="button" @click="resetRun">
-          {{ converged ? '重跑收敛' : '从头开始' }}
-        </button>
         <button class="wb-btn" type="button" @click="router.push('/planning')">回入口</button>
-        <button class="wb-btn primary" type="button" @click="produceAll">生成交付</button>
+        <button v-if="demoStatus.planning" class="wb-btn" type="button" @click="loadSnapshot">
+          重试
+        </button>
+        <button
+          class="wb-btn primary"
+          type="button"
+          :disabled="!deliverables.length || runStatus !== 'converged'"
+          @click="produceAll"
+        >生成交付</button>
       </div>
     </header>
 
@@ -29,27 +28,42 @@
       </section>
 
       <section class="wb-col wb-col--center">
-        <PurchaseDecisionGraph
-          :graph-data="graphData"
-          :meta="graphMeta"
-          :converged="converged"
-          @node-click="onNodeClick"
-          @clear-selection="selectedNode = null"
-        />
-        <div v-if="selectedNode" class="wb-detail">
-          <span class="wb-detail-type" :style="{ color: NODE_TYPE_COLOR[selectedNode.type] }">
-            {{ selectedNode.type }}
-          </span>
-          <span class="wb-detail-name">{{ selectedNode.name }}</span>
-          <span class="wb-detail-state mono">{{ STATE_LABEL[selectedNode.state] || selectedNode.state }}</span>
-          <span v-if="selectedNode.meta?.pruneReason" class="wb-detail-why">
-            排除原因：{{ selectedNode.meta.pruneReason }}
-          </span>
-          <span v-else-if="selectedNode.meta?.price" class="wb-detail-why mono">
-            ¥{{ selectedNode.meta.price }}
-          </span>
-          <button class="wb-detail-close" type="button" @click="selectedNode = null">×</button>
+        <!-- 加载/错误：如实说明，不铺演示数据 -->
+        <div v-if="loading" class="wb-state">
+          <a-spin tip="正在恢复任务…" />
         </div>
+        <div v-else-if="loadError" class="wb-state">
+          <p class="hint-err">{{ loadError }}</p>
+          <a-button size="small" @click="loadSnapshot">重试</a-button>
+        </div>
+        <!-- 空态：还没建任务 / 任务刚建、图还没长出来 -->
+        <div v-else-if="!graphData.nodes.length" class="wb-state">
+          <p class="hint-title">正在规划…</p>
+          <p class="hint-sub">阶段推进中，决策图会逐步长出来。</p>
+        </div>
+        <template v-else>
+          <PurchaseDecisionGraph
+            :graph-data="graphData"
+            :meta="graphMeta"
+            :converged="runStatus === 'converged'"
+            @node-click="onNodeClick"
+            @clear-selection="selectedNode = null"
+          />
+          <div v-if="selectedNode" class="wb-detail">
+            <span class="wb-detail-type" :style="{ color: NODE_TYPE_COLOR[selectedNode.type] }">
+              {{ selectedNode.type }}
+            </span>
+            <span class="wb-detail-name">{{ selectedNode.name }}</span>
+            <span class="wb-detail-state mono">{{ STATE_LABEL[selectedNode.state] || selectedNode.state }}</span>
+            <span v-if="selectedNode.meta?.pruneReason" class="wb-detail-why">
+              排除原因：{{ selectedNode.meta.pruneReason }}
+            </span>
+            <span v-else-if="selectedNode.meta?.price" class="wb-detail-why mono">
+              ¥{{ selectedNode.meta.price }}
+            </span>
+            <button class="wb-detail-close" type="button" @click="selectedNode = null">×</button>
+          </div>
+        </template>
       </section>
 
       <section class="wb-col wb-col--right">
@@ -57,9 +71,21 @@
           :items="deliverables"
           :question="pendingQuestion"
           @answer="onAnswer"
+          @preview="onPreview"
+          @download="onDownload"
         />
       </section>
     </div>
+
+    <!-- 交付物预览：正文由后端按决策图生成 -->
+    <a-modal
+      v-model:open="previewOpen"
+      :title="previewData?.name || '交付物'"
+      width="720px"
+      :footer="null"
+    >
+      <pre class="wb-preview mono">{{ previewData?.content || '' }}</pre>
+    </a-modal>
   </div>
 </template>
 
@@ -73,114 +99,247 @@
  *   右 = 我能拿到什么（待交付 + 待确认）
  * 三者不重复：图里不出现文件，交付区不出现推理，执行流不出现结论。
  *
- * 目前数据是 mock。后端 planning_agent 接上后，把 useRoute 的 query 换成真实任务 id，
- * 三个数据源分别改为 SSE / 图数据接口 / 交付物接口即可。
+ * 数据来源（2026-09-24 接真后端，原先全是 purchaseDemo 的 mock）：
+ *   · 首屏 → GET /api/planning/runs/{id}      快照，刷新即恢复（不重放事件）
+ *   · 增量 → GET /api/planning/runs/{id}/events  SSE，after_seq 续传
+ *   · 拍板 → POST /api/planning/runs/{id}/answer
+ * 三处共用同一本事件账（planning_events），前后端不会漂。
+ *
+ * 图的「渐进长出」由后端驱动：每个阶段跑完发一条 graph 事件（整图），
+ * 前端只负责替换 —— 合并逻辑在服务端一处，前端不做第二套。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AgentExecStream from '@/components/purchase/AgentExecStream.vue'
 import PurchaseDecisionGraph from '@/components/purchase/PurchaseDecisionGraph.vue'
 import DeliverablesPanel from '@/components/purchase/DeliverablesPanel.vue'
+import { planningApi } from '@/apis/planning_api'
+import { demoStatus } from '@/apis/demoStatus'
 import {
-  buildDecisionGraph,
-  DECISION_GRAPH_META,
-  EXEC_STREAM,
-  DELIVERABLES,
-  PENDING_QUESTION,
-  NODE_TYPE_COLOR
-} from '@/data/purchaseDemo'
+  NODE_TYPE_COLOR,
+  STATE_LABEL
+} from '@/utils/planningGraphStyle'
 
 const route = useRoute()
 const router = useRouter()
 
-const STATE_LABEL = {
-  pending: '待探索',
-  active: '探索中',
-  candidate: '候选',
-  selected: '已采纳',
-  pruned: '已排除'
-}
+// ── 任务实例 ──────────────────────────────────────────────
+// run id 优先取 query（入口页建好后带过来）；没有则说明是直接访问
+// /planning/run —— 如实提示回入口，不编一个假任务出来。
+const runId = ref(String(route.query.run || ''))
+const runStatus = ref('running')
+const loading = ref(true)
+const loadError = ref('')
+
+const graphData = ref({ nodes: [], edges: [] })
+const graphMeta = ref({})
+const stream = ref([])
+const deliverables = ref([])
+const pendingQuestion = ref(null)
 
 const taskLabel = computed(() => {
-  const scene = route.query.scene || DECISION_GRAPH_META.scene
+  const parts = []
+  const scene = route.query.scene
+  if (scene) parts.push(scene)
+  // 预算只挂在 query 上做展示：表单给的是原话（「¥6万」），预设给的是数字。
+  // 数字才格式化，字符串原样显示 —— 对「¥6万」做 Number() 会得到 NaN。
   const budget = route.query.budget
-  const parts = [scene]
-  if (budget) parts.push('¥' + Number(budget).toLocaleString('en-US'))
-  return parts.join(' · ')
+  if (budget) {
+    const n = Number(budget)
+    parts.push(Number.isFinite(n) && n > 0 ? '¥' + n.toLocaleString('en-US') : String(budget))
+  }
+  return parts.join(' · ') || '采购规划任务'
 })
 
-const graphMeta = computed(() => ({
-  ...DECISION_GRAPH_META,
-  scene: route.query.scene || DECISION_GRAPH_META.scene
-}))
+// ── 事件 → 界面 ───────────────────────────────────────────
+// 后端只发这 8 类（刻意不学 chat 的 15 种）：
+//   phase / think / retrieve / call / graph / question / deliverable / done
+const applyEvent = (kind, payload) => {
+  switch (kind) {
+    case 'phase':
+      stream.value.push({
+        kind: 'think',
+        title: payload.label || payload.phase,
+        state: 'done',
+        time: nowClock()
+      })
+      break
+    case 'think':
+    case 'retrieve':
+    case 'call':
+    case 'produce':
+      stream.value.push({
+        kind,
+        title: payload.title || '',
+        detail: payload.detail || '',
+        state: 'done',
+        time: nowClock()
+      })
+      break
+    case 'graph':
+      // 整图替换 —— 合并已在服务端做过
+      graphData.value = {
+        nodes: payload.nodes || [],
+        edges: payload.edges || []
+      }
+      break
+    case 'question':
+      pendingQuestion.value = {
+        text: payload.text,
+        options: (payload.options || []).map((o) => ({ ...o }))
+      }
+      runStatus.value = 'awaiting'
+      break
+    case 'deliverable':
+      upsertDeliverable(payload)
+      break
+    case 'done':
+      runStatus.value = payload.status || 'converged'
+      if (payload.status === 'failed') {
+        loadError.value = payload.error || '任务执行失败'
+      }
+      break
+    default:
+      break
+  }
+}
 
-/* ── 收敛演示 ──
- * 默认直接给收敛态（静置，不抖动）；点「重跑」才从 0.3 推到 1，
- * 让用户看到节点逐个点亮。不默认播放，是因为每推一次都要重算力导向布局，
- * 自动播放会让画面持续微抖。 */
-const progress = ref(1)
-const running = ref(false)
-let timer = null
+const upsertDeliverable = (d) => {
+  if (!d?.id) return
+  const i = deliverables.value.findIndex((x) => x.id === d.id)
+  const item = { id: d.id, name: d.name, meta: d.meta, state: d.state, progress: d.progress }
+  if (i >= 0) deliverables.value[i] = { ...deliverables.value[i], ...item }
+  else deliverables.value.push(item)
+}
 
-const graphData = computed(() => buildDecisionGraph(progress.value))
-const converged = computed(() => progress.value >= 1)
+const nowClock = () => {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 
-const tick = () => {
-  if (!running.value || progress.value >= 1) {
-    if (progress.value >= 1) {
-      running.value = false
-      clearInterval(timer)
-      timer = null
-    }
+// ── 载入 ──────────────────────────────────────────────────
+let abort = null
+
+const loadSnapshot = async () => {
+  if (!runId.value) {
+    loading.value = false
+    loadError.value = '缺少任务 ID —— 请从入口页开始一次采购规划。'
     return
   }
-  progress.value = Math.min(1, progress.value + 0.12)
-}
-onMounted(() => {
-  timer = setInterval(tick, 560)
-})
-onBeforeUnmount(() => clearInterval(timer))
-
-const resetRun = () => {
-  progress.value = 0.3
-  running.value = true
-  selectedNode.value = null
-  deliverables.value = DELIVERABLES.map((d) => ({ ...d }))
-  pendingQuestion.value = {
-    ...PENDING_QUESTION,
-    options: PENDING_QUESTION.options.map((o) => ({ ...o }))
+  loading.value = true
+  loadError.value = ''
+  try {
+    const run = await planningApi.getRun(runId.value)
+    runStatus.value = run.status
+    graphData.value = run.graph
+    graphMeta.value = run.meta || {}
+    pendingQuestion.value = run.question
+      ? { text: run.question.text, options: run.question.options || [] }
+      : null
+    // 交付物：快照里没有清单，靠事件补齐；已收敛时用约定的三件套占位
+    if (run.status === 'converged') {
+      for (const d of DELIVERABLE_FALLBACK) upsertDeliverable({ ...d, state: 'ready' })
+    }
+    subscribe()
+  } catch (e) {
+    loadError.value = e?.message || '任务加载失败'
+    demoStatus.planning = true
+  } finally {
+    loading.value = false
   }
 }
 
-/* ── 决策图交互 ── */
+const DELIVERABLE_FALLBACK = [
+  { id: 'd-plan', name: '采购方案.md', meta: '含清单、顺序与依赖' },
+  { id: 'd-compare', name: '候选对比表', meta: '按硬约束逐项横比' },
+  { id: 'd-budget', name: '预算分配表', meta: '按类别拆分预算' }
+]
+
+// 事件流：断线自动重连并带 after_seq 续传（事件落库且 seq 单调，所以能这么做）
+let lastSeq = 0
+let retrying = false
+
+const subscribe = async () => {
+  if (!runId.value) return
+  abort?.abort?.()
+  abort = new AbortController()
+  try {
+    await planningApi.streamEvents(runId.value, {
+      afterSeq: lastSeq,
+      signal: abort.signal,
+      onEvent: (kind, payload, seq) => {
+        if (seq) lastSeq = Math.max(lastSeq, seq)
+        applyEvent(kind, payload)
+      }
+    })
+  } catch (e) {
+    // abort 是主动断开，不重连
+    if (abort?.signal?.aborted) return
+    if (retrying) return
+    retrying = true
+    setTimeout(() => { retrying = false; subscribe() }, 2000)
+    return
+  }
+  // 流自然结束（收敛/失败）后不再重连
+}
+
+// ── 卡片动作 ──────────────────────────────────────────────
 const selectedNode = ref(null)
 const onNodeClick = (node) => { selectedNode.value = node }
 
-/* ── 右栏 ── */
-const deliverables = ref(DELIVERABLES.map((d) => ({ ...d })))
-const pendingQuestion = ref({
-  ...PENDING_QUESTION,
-  options: PENDING_QUESTION.options.map((o) => ({ ...o }))
-})
+const onAnswer = async (key) => {
+  if (!runId.value) return
+  try {
+    const run = await planningApi.answer(runId.value, key)
+    runStatus.value = run.status
+    pendingQuestion.value = run.question
+      ? { text: run.question.text, options: run.question.options || [] }
+      : null
+    // 续跑会产生新事件，重新订阅（带 after_seq，不重放）
+    subscribe()
+  } catch (e) {
+    loadError.value = e?.message || '提交回答失败'
+  }
+}
+
+const previewOpen = ref(false)
+const previewData = ref(null)
+
+const onPreview = async (d) => {
+  if (!runId.value) return
+  try {
+    previewData.value = await planningApi.getDeliverable(runId.value, d.id)
+    previewOpen.value = true
+  } catch (e) {
+    loadError.value = e?.message || '交付物加载失败'
+  }
+}
+
+const onDownload = async (d) => {
+  if (!runId.value) return
+  try {
+    const data = await planningApi.getDeliverable(runId.value, d.id)
+    if (!data?.content) return
+    const blob = new Blob([data.content], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = data.name || 'deliverable.md'
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    loadError.value = e?.message || '下载失败'
+  }
+}
 
 const produceAll = () => {
+  // 收敛后交付物已由后端产出；这里只是把右栏状态对齐
   deliverables.value = deliverables.value.map((d) => ({ ...d, state: 'ready' }))
-  progress.value = 1
 }
 
-const onAnswer = (key) => {
-  const label = pendingQuestion.value.options.find((o) => o.key === key)?.label || key
-  pendingQuestion.value = null
-  stream.value.push({
-    kind: 'think',
-    title: `按你的选择「${label}」调整预算口径`,
-    detail: '已更新决策图的「约束」节点',
-    state: 'done',
-    time: '刚刚'
-  })
-}
-
-const stream = ref(EXEC_STREAM.map((s) => ({ ...s })))
+onMounted(loadSnapshot)
+onBeforeUnmount(() => { try { abort?.abort?.() } catch { /* ignore */ } })
 </script>
 
 <style lang="less" scoped>
@@ -249,11 +408,12 @@ const stream = ref(EXEC_STREAM.map((s) => ({ ...s })))
   cursor: pointer;
   transition: color 0.15s ease-out, border-color 0.15s ease-out, background-color 0.15s ease-out;
   &:hover { color: var(--text); }
+  &:disabled { opacity: 0.45; cursor: not-allowed; }
   &.primary {
     background: var(--accent-solid);
     border-color: var(--accent-solid);
     color: var(--on-accent);
-    &:hover { background: var(--accent-600); }
+    &:hover:not(:disabled) { background: var(--accent-600); }
   }
 }
 
@@ -278,6 +438,20 @@ const stream = ref(EXEC_STREAM.map((s) => ({ ...s })))
     overflow-y: auto;
   }
 }
+
+/* 中栏的加载 / 错误 / 空三态 */
+.wb-state {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+}
+.hint-title { margin: 0; font-size: 0.92rem; font-weight: 600; color: var(--text-strong); }
+.hint-sub { margin: 0; font-size: 0.8rem; color: var(--text-muted); line-height: 1.6; max-width: 320px; }
+.hint-err { margin: 0; font-size: 0.82rem; color: var(--neg); }
 
 /* 节点详情条 */
 .wb-detail {
@@ -329,6 +503,18 @@ const stream = ref(EXEC_STREAM.map((s) => ({ ...s })))
   line-height: 1;
   cursor: pointer;
   &:hover { color: var(--text); background: var(--bg-sunken); }
+}
+
+/* 交付物预览 */
+.wb-preview {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  color: var(--text);
 }
 
 @media (max-width: 1100px) {

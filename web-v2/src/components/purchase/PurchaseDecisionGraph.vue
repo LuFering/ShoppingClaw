@@ -69,19 +69,21 @@
 import { ref, computed } from 'vue'
 import GraphCanvas from '@/components/GraphCanvas.vue'
 import { themeColor } from '@/utils/themeColors'
+// 视觉语义表从 data/purchaseDemo.js 拆到 utils/（2026-09-24）——
+// 那些是设计资产，不是演示数据，后端接上后照旧生效。
 import {
   NODE_TYPE_COLOR,
   RELATION_STYLE,
   NODE_STATE_STYLE,
   SELECTED_RING,
   PRUNED_FILL,
-  CORE_TYPE,
-  DECISION_GRAPH_META
-} from '@/data/purchaseDemo'
+  CORE_TYPE
+} from '@/utils/planningGraphStyle'
 
 const props = defineProps({
   graphData: { type: Object, required: true },
-  meta: { type: Object, default: () => DECISION_GRAPH_META },
+  // 元信息由后端 run.meta 提供；默认给空壳，不再用 demo 常量兜底
+  meta: { type: Object, default: () => ({}) },
   /** 执行完成后收起动效、停止居中 */
   converged: { type: Boolean, default: false }
 })
