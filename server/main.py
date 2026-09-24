@@ -26,6 +26,7 @@ from server.routers.auth_router import auth as auth_router
 from server.routers.models_router import router as models_router
 from server.routers.task_router import router as task_router
 from server.routers.decisions_router import router as decisions_router
+from server.routers.mcp_router import router as mcp_router
 from server.middleware.audit import AuditMiddleware
 
 # ── 日志系统：loguru 接管（文件落盘 saves/logs/ + 轮转保留 + 根 logger 桥接 + request_id）──
@@ -75,6 +76,19 @@ async def lifespan(app: FastAPI):
 
     # Phase 2: 后台加载 ML 模型（不阻塞就绪）
     asyncio.create_task(warmup_models())
+
+    # Phase 2.5: 后台预加载 MCP 子进程（不阻塞就绪）
+    # stdio MCP 冷启动要 ~11s（等进程 8s + initialize 3s），原本由第一次
+    # 真实调用承担，用户在首轮对话里白等。这里提前付掉。
+    # 用 asyncio.to_thread：_ensure_stdio_process 内部是阻塞 IO（含 sleep）。
+    def _warmup_mcp() -> None:
+        try:
+            from src.services.mcp_service import warmup_mcp_servers
+            warmup_mcp_servers()
+        except Exception as exc:
+            logger.warning("[WARN] MCP pre-warm failed (首次调用时会重试): %s", exc)
+
+    asyncio.get_event_loop().run_in_executor(None, _warmup_mcp)
 
     # Phase 3: 启动定时任务调度器
     from src.services.scheduler_service import get_scheduler
@@ -210,6 +224,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(models_router, prefix="/api")
 app.include_router(task_router, prefix="/api")
 app.include_router(decisions_router, prefix="/api")
+app.include_router(mcp_router, prefix="/api")
 
 
 @app.get("/api/system/health")

@@ -360,3 +360,49 @@ class ShoppingDecision(Base):
 
     def to_dict(self) -> dict[str, Any]:
         return self.data or {}
+
+class MCPServer(Base):
+    """MCP 服务器配置（2026-09-22 新增）。
+
+    字段对齐前端 `web-v2/src/apis/mcp_api.js` 已消费的形状。
+    运行态字段（status / tools_count / heartbeat）由 /test 接口刷新，
+    不做后台轮询 —— 避免常驻开销。
+    """
+
+    __tablename__ = "mcp_servers"
+
+    id = Column(String, primary_key=True)  # 形如 mc-<uuid8>
+    name = Column(String, nullable=False, unique=True)  # 唯一名，运行时按它查
+    type = Column(String, nullable=False, default="stdio")  # stdio / http / sse
+    endpoint = Column(String, nullable=False, default="")  # 命令（stdio）或 URL
+    desc = Column(String, nullable=False, default="")
+    enabled = Column(Boolean, nullable=False, default=True)
+    env_json = Column(JSONB, nullable=False, default=dict)  # stdio 子进程环境变量
+    # ── 运行态（/test 刷新）──
+    status = Column(String, nullable=False, default="idle")  # connected/failed/idle/testing
+    tools_count = Column(Integer, nullable=False, default=0)
+    heartbeat = Column(String, nullable=False, default="—")
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    def to_dict(self) -> dict[str, Any]:
+        """转成前端消费的形状（字段名与 mcp_api.js 契约一致）。
+
+        ⚠️ **不回传 env 值**：里面是凭据（TAOBAO_SESSION / API key 等），
+        明文返回给前端等于泄露。只回传键名，让界面能显示「配了哪些变量」，
+        但不暴露值。修改凭据走 PUT（提交新值覆盖）。
+        """
+        env_keys = sorted((self.env_json or {}).keys())
+        return {
+            "id": self.id,
+            "name": self.name,
+            "type": self.type,
+            "endpoint": self.endpoint,
+            "desc": self.desc or "",
+            "enabled": bool(self.enabled),
+            "env_keys": env_keys,
+            "status": self.status or "idle",
+            "tools": self.tools_count or 0,
+            "heartbeat": self.heartbeat or "—",
+            "source": "custom",
+        }

@@ -27,7 +27,7 @@ def filter_tools(
     """多条件过滤工具列表。
 
     Args:
-        category: 按分类过滤（buildin / research / analyst / critic）
+        category: 按分类过滤（buildin / research / analyst / critic / knowledge / risk）
         tags: 按标签过滤
         query: 语义搜索词（当前用关键词匹配，后续可接 embedding）
         exclude: 排除的工具名称集合
@@ -100,18 +100,44 @@ def _match_query(query: str, tool: Any, meta: ToolExtraMetadata) -> bool:
 def filter_by_agent(agent_name: str) -> list[Any]:
     """根据 Agent 名称返回其专用工具集。
 
-    复用 subagents.yaml 中定义的绑定关系。
+    必须与 subagents.yaml 的工具绑定**逐字一致**（契约对齐要求：
+    两处不能只改一处，否则出现配置漂移）。
+
+    2026-09-20：原 researcher / analyst / critic 三个细粒度智能体已合并为
+    `pre_purchase`，memory_manager 改名为 `post_purchase`。
     """
     agent_tool_map: dict[str, list[str]] = {
-        "researcher": ["search_products", "get_product_full_detail",
-                       "get_products_specs_batch", "jd_deep_search",
-                       "jd_product_detail", "jd_product_images",
-                       "jd_product_basic", "jd_product_mobile_detail",
-                       "justone_product_search"],
-        "analyst": ["get_products_specs_extract", "filter_products_by_criteria",
-                    "query_category_knowledge"],
-        "critic": ["query_risk_policy"],
-        "memory_manager": [],
+        "pre_purchase": [
+            # 2026-09-21：JD 自建搜索链路下架（价格接口无授权 + 备用源余额耗尽）
+            "get_products_specs_extract",
+            "filter_products_by_criteria",
+            "query_category_knowledge",
+            "query_risk_policy",
+            "price_calculator",
+            # MCP 数据源（2026-09-21）—— 与 subagents.yaml 逐字一致
+            "taobao_searchMaterial",
+            "taobao_getItemInfo",
+            "taobao_convertLink",
+            "pdd_goods_search",
+            "pdd_goods_detail",
+            "pdd_goods_recommend",
+            "pdd_goods_prom_url",
+        ],
+        "post_purchase": [
+            "get_user_shopping_context",
+            "save_user_preference",
+            "recall_past_decisions",
+            "get_user_profile",
+            # 购物档案工具（2026-09-22）—— 购后助手专属，与 subagents.yaml 一致
+            "save_to_archive",
+            "update_record_phase",
+            "set_reminder",
+            "write_review",
+            # ── 监控任务（2026-09-23 新增）──
+            # 让用户说「盯一下价格」时 Agent 真的能建任务，而不是口头答应。
+            "create_monitor_task",
+            "list_monitor_tasks",
+        ],
     }
 
     tool_names = agent_tool_map.get(agent_name, [])

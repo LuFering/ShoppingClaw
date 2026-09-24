@@ -12,18 +12,13 @@ import { demoStatus } from './demoStatus'
 const SERVERS_KEY = 'sc_mcp_servers_v1'
 const MARKET_KEY = 'sc_mcp_market_v1'
 
-const seedServers = [
-  { id: 'mc-1', name: '京东商城 MCP', source: 'market', desc: '商品搜索 / 价格 / 库存 / 券', type: 'http', endpoint: 'https://mcp.jd.example.com/mcp', status: 'connected', tools: 6, heartbeat: '1分钟前', enabled: true, testing: false },
-  { id: 'mc-2', name: '淘宝联盟 MCP', source: 'market', desc: '联盟商品与佣金', type: 'sse', endpoint: 'https://mcp.tb.example.com/sse', status: 'failed', tools: 4, heartbeat: '昨天', enabled: true, testing: false },
-  { id: 'mc-3', name: '历史价格 MCP', source: 'custom', desc: '价格曲线与比价', type: 'stdio', endpoint: 'npx @shopclaw/price-history', status: 'idle', tools: 3, heartbeat: '—', enabled: false, testing: false }
-]
-const seedMarket = [
-  { id: 'mk-1', name: '京东商城 MCP', installed: true, tools: 6, cap: '商品搜索、价格、库存与券，支持生成加购链接' },
-  { id: 'mk-2', name: '淘宝 / 天猫联盟 MCP', installed: false, tools: 4, cap: '联盟商品检索、佣金率与优惠信息（需联盟权限）' },
-  { id: 'mk-3', name: '历史价格 MCP', installed: false, tools: 3, cap: '历史价格曲线、降价信号与同渠道比价' },
-  { id: 'mk-4', name: '优惠券聚合 MCP', installed: false, tools: 5, cap: '多平台可领券、满减与到期提醒' },
-  { id: 'mk-5', name: '口碑评价 MCP', installed: false, tools: 4, cap: '差评聚类与口碑风险信号，供 critic 子 Agent 取用' }
-]
+// ⚠️ 2026-09-22：种子数据已清空。
+// 这里原本是编造的服务器列表（含 mcp.jd.example.com / mcp.tb.example.com
+// 这类占位域名）和一个不存在的"市场"。后端 /api/mcp/* 现已实现，
+// 降级分支改为返回空列表 —— 后端故障时显示"暂无数据"，
+// 好过让用户以为这些服务器真的存在。
+const seedServers = []
+const seedMarket = []
 
 const load = (key, seed) => {
   try {

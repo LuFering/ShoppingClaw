@@ -1,4 +1,6 @@
+import itertools
 import logging
+import threading
 import shutil
 import subprocess
 import os
@@ -23,9 +25,12 @@ MCP_SERVERS: Dict[str, Dict[str, Any]] = {
     # 淘宝/拼多多导购 MCP — 本地 stdio 子进程
     "taobao_mcp": {
         "type": "stdio",
-        "enabled": False,  # 挂起：依赖 sinataoke_cn.cmd（Windows 批处理），Linux 容器无法启动
+        # 2026-09-21 启用：原挂起理由（sinataoke_cn.cmd 是 Windows 批处理）已不成立——
+        # _ensure_stdio_process 在非 Windows 下会去掉 .cmd 后缀走 shutil.which，
+        # 且容器内已全局安装 sinataoke_cn@2.0.9（Node v20），实测可正常握手与调用。
+        "enabled": True,
         "description": "淘宝联盟 + 多多进宝商品搜索与转链（sinataoke_cn MCP）",
-        "command": "sinataoke_cn.cmd",
+        "command": "sinataoke_cn",
         "env": {
             "ENV_URL": "https://config.sinataoke.cn/api/mcp/secret",
             "ENV_SECRET": "url:mcp.sinataoke.cn",
@@ -36,6 +41,179 @@ MCP_SERVERS: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+# 硬编码配置的**快照**（迁移到 DB 时用；MCP_SERVERS 之后会被 DB 内容覆盖）
+# 用 deepcopy 隔离，避免 DB 加载改动 MCP_SERVERS 时污染这份基线。
+_HARDCODED_MCP_SERVERS: Dict[str, Dict[str, Any]] = json.loads(json.dumps(MCP_SERVERS))
+
+def _db_url() -> str:
+    """取 PostgreSQL 连接串（与 pg_manager 同一套环境变量）。"""
+    url = os.getenv("POSTGRES_URL") or os.getenv("DATABASE_URL") or ""
+    if url:
+        return url
+    user = os.getenv("POSTGRES_USER", "postgres")
+    pwd = os.getenv("POSTGRES_PASSWORD", "postgres")
+    host = os.getenv("POSTGRES_HOST", "postgres")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db = os.getenv("POSTGRES_DB", "shoppingclaw")
+    return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
+
+
+async def _with_own_engine(fn):
+    """在**独立引擎**上执行 fn(session)，用完即 dispose。
+
+    为什么不用 pg_manager：它的共享连接池锁绑定在主 serve loop 上，
+    而本模块的迁移/加载跑在 `run_in_executor` 的线程里（自己的临时 loop），
+    跨循环访问共享池会抛
+    「Future attached to a different loop」。
+    这里开短连接、用完释放 —— 与 RedisCache.sync_get 的思路一致。
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine(_db_url(), pool_pre_ping=True)
+    try:
+        session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await fn(session)
+    finally:
+        await engine.dispose()
+
+
+def migrate_hardcoded_to_db() -> None:
+    """把硬编码的 MCP 配置幂等写进 DB（首次启动时）。
+
+    只写 DB 里**不存在**的条目，不覆盖已有配置 —— 用户在管理页改过的设置
+    不能被启动流程冲掉。失败只记 warning，不影响服务启动。
+    """
+    try:
+        import asyncio
+
+        from sqlalchemy import select
+
+        from src.storage.postgres.models_business import MCPServer
+
+        async def _run(session) -> None:
+            for name, cfg in _HARDCODED_MCP_SERVERS.items():
+                exists = (
+                    await session.execute(
+                        select(MCPServer.id).where(MCPServer.name == name)
+                    )
+                ).scalar_one_or_none()
+                if exists:
+                    continue
+                session.add(
+                    MCPServer(
+                        id=f"mc-{name[:8]}",
+                        name=name,
+                        type=cfg.get("type", "stdio"),
+                        endpoint=cfg.get("command", "") or cfg.get("url", ""),
+                        desc=cfg.get("description", ""),
+                        enabled=bool(cfg.get("enabled", True)),
+                        env_json=cfg.get("env", {}) or {},
+                    )
+                )
+                logger.info(f"[MCP] 已迁移硬编码配置到 DB: {name}")
+            await session.commit()
+
+        # 在同步上下文里跑异步（本函数由 to_thread 调用，无运行中的 loop）
+        asyncio.run(_with_own_engine(_run))
+    except Exception as exc:
+        logger.warning(f"[MCP] 硬编码配置迁移失败（忽略，继续用硬编码）: {exc}")
+
+
+def load_mcp_servers_from_db() -> None:
+    """从 DB 读配置并**合并**进 MCP_SERVERS。
+
+    合并语义：
+      · DB 里 enabled 的条目 → 覆盖同名硬编码（DB 是用户配置的真相）
+      · DB 里没有的硬编码条目 → 保留（兜底，避免迁移失败导致 MCP 全挂）
+      · DB 里 enabled=False 的同名条目 → 从运行表移除（用户禁用了）
+
+    DB 不可用时静默跳过，MCP_SERVERS 保持硬编码内容 —— MCP 服务不因
+    DB 故障而中断。
+    """
+    try:
+        import asyncio
+
+        from sqlalchemy import select
+
+        from src.storage.postgres.models_business import MCPServer
+
+        async def _run(session) -> list[dict]:
+            """取 ORM 的**原始字段**，不用 to_dict()。
+
+            ⚠️ `to_dict()` 是给前端的**脱敏视图**（env 只回传键名），
+            用它来构造运行配置会丢掉凭据 —— 实测导致 MCP 子进程
+            因缺少 ENV_URL / TAOBAO_SESSION 而启动即退出（rc=1）。
+            这里直接读 ORM 的 env_json，拿真实值。
+            """
+            result = await session.execute(select(MCPServer))
+            return [
+                {
+                    "name": r.name,
+                    "type": r.type,
+                    "endpoint": r.endpoint or "",
+                    "desc": r.desc or "",
+                    "enabled": bool(r.enabled),
+                    "env": dict(r.env_json or {}),
+                }
+                for r in result.scalars().all()
+            ]
+
+        rows = asyncio.run(_with_own_engine(_run))
+        if not rows:
+            logger.info("[MCP] DB 中无 MCP 配置，沿用硬编码")
+            return
+
+        loaded = 0
+        for row in rows:
+            name = row["name"]
+            if not row.get("enabled", True):
+                MCP_SERVERS.pop(name, None)
+                continue
+            entry: dict[str, Any] = {
+                "type": row.get("type", "stdio"),
+                "enabled": True,
+                "description": row.get("desc", ""),
+                "env": row.get("env", {}) or {},
+            }
+            if entry["type"] == "stdio":
+                entry["command"] = row.get("endpoint", "")
+            else:
+                entry["url"] = row.get("endpoint", "")
+            MCP_SERVERS[name] = entry
+            loaded += 1
+        logger.info(f"[MCP] 从 DB 加载 {loaded} 条配置")
+    except Exception as exc:
+        logger.warning(f"[MCP] 从 DB 加载配置失败（忽略，沿用硬编码）: {exc}")
+
+
+def warmup_mcp_servers() -> None:
+    """预加载所有启用的 stdio MCP 子进程（应用启动时调用一次）。
+
+    冷启动成本（8s 等进程 + 3s initialize）原本由**第一次真实调用**承担，
+    用户在首轮对话里白等十几秒。这里提前付掉，之后的调用只付网络往返。
+
+    失败不影响主流程：MCP 不可用时工具列表为空，智能体照常工作。
+    """
+    # 2026-09-22：先把硬编码迁移进 DB（幂等），再从 DB 加载（覆盖硬编码）
+    migrate_hardcoded_to_db()
+    load_mcp_servers_from_db()
+
+    for name, cfg in MCP_SERVERS.items():
+        if not cfg.get("enabled", True):
+            continue
+        if cfg.get("type") != "stdio":
+            continue
+        try:
+            proc = _ensure_stdio_process(name, cfg)
+            if proc is None:
+                logger.warning(f"[MCP] 预加载 {name} 失败（首次调用时重试）")
+                continue
+            logger.info(f"[MCP] 预加载完成: {name}")
+        except Exception as exc:
+            logger.warning(f"[MCP] 预加载 {name} 异常（忽略）: {exc}")
+
 
 def get_mcp_serve_names() -> List[str]:
     """
@@ -50,15 +228,101 @@ def get_mcp_serve_names() -> List[str]:
 # 全局缓存：每个 stdio MCP 服务器对应一个持久子进程
 _stdio_processes: Dict[str, subprocess.Popen] = {}
 
+# 子进程启动锁（2026-09-22）。
+# 为什么需要：`_ensure_stdio_process` 的「检查是否已启动 → Popen → 握手」
+# 是一段读-改-写，无锁时并发调用会各起一个子进程、互相干扰 stdin/stdout，
+# 后写的覆盖前一个，前一个成为孤儿并被误判为「启动后立即退出」。
+# 实测：预热（后台线程）与首次对话（请求线程）并发时必现，
+# 而串行的 /test 接口从不出错 —— 这就是竞态的铁证。
+# 锁是**进程级**的：只在真正需要启动时竞争，已启动的走快返回。
+_stdio_start_lock = threading.Lock()
+
+
+def _drain_stderr(proc: subprocess.Popen, server_name: str) -> None:
+    """后台消费子进程 stderr，防止管道缓冲区写满导致子进程阻塞。
+
+    ⚠️ 这是 2026-09-22 定位到的真实根因：
+      `stderr=PIPE` 若无人读取，缓冲区（通常 64KB）写满后
+      子进程的 write 会阻塞 —— MCP 服务卡在写启动日志上，
+      永远处理不到 stdin 的 initialize 请求，表现为握手超时。
+      实测：PIPE → 失败；DEVNULL → 7.1 秒成功。
+
+    这里用独立线程持续读走 stderr 并转写到应用日志，
+    既避免阻塞，又不像 DEVNULL 那样丢失排查线索。
+    """
+    if proc.stderr is None:
+        return
+    try:
+        for line in proc.stderr:
+            text = (line or "").rstrip()
+            if text:
+                logger.debug(f"[MCP:{server_name}] {text[:300]}")
+    except Exception:
+        pass  # 进程退出时读会抛异常，属正常
+
+# initialize 握手的最长等待（秒）。
+# 冷启动（Node 模块首次加载）可能十几秒，热启动 1-2 秒。
+MCP_INIT_TIMEOUT_S = 30
+
+
+def _read_line_with_timeout(
+    proc: subprocess.Popen, *, timeout: float, poll_interval: float = 0.5
+) -> str:
+    """在超时内轮询等待子进程输出一行。
+
+    为什么不用 readline() 直接读：管道上的 readline() 是**阻塞**的，
+    进程不吐字就永久挂住（表现为整条对话流卡死）。
+    这里改成「轮询 + 超时」：每次检查进程是否还活着、有没有数据可读。
+
+    Returns:
+        读到的一行（不含换行）；超时或无数据返回空串。
+    """
+    import select
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return ""  # 进程已退出，不会再吐字
+        try:
+            # select 探可读性（POSIX）；stdout 是管道，有数据时立即返回
+            ready, _, _ = select.select([proc.stdout], [], [], poll_interval)
+            if ready:
+                line = proc.stdout.readline()
+                if line and line.strip():
+                    return line
+        except Exception:
+            # select 不可用（如 Windows）→ 退化为短睡后重试
+            time.sleep(poll_interval)
+    return ""
+
+
 def _ensure_stdio_process(server_name: str, server_config: Dict[str, Any]) -> subprocess.Popen | None:
-    """确保 stdio MCP 子进程已启动并完成初始化，返回可用进程。"""
-    if server_name in _stdio_processes:
-        proc = _stdio_processes[server_name]
-        if proc.poll() is None:
-            return proc  # 还在运行
-        else:
+    """确保 stdio MCP 子进程已启动并完成初始化，返回可用进程。
+
+    并发安全：整段「检查 → 启动 → 握手」持锁执行。
+    无锁时并发调用会各起一个子进程、互相干扰 stdin/stdout
+    （实测：预热与首次对话并发必现「启动后立即退出」，而串行调用从不失败）。
+    """
+    # 快路径：已启动且在运行 → 不取锁直接返回
+    proc = _stdio_processes.get(server_name)
+    if proc is not None and proc.poll() is None:
+        return proc
+
+    with _stdio_start_lock:
+        # 双检：等锁期间可能已被别的线程启动
+        proc = _stdio_processes.get(server_name)
+        if proc is not None and proc.poll() is None:
+            return proc
+        if proc is not None:
             logger.warning(f"[MCP] stdio 进程 {server_name} 已退出，重新启动")
-            del _stdio_processes[server_name]
+            _stdio_processes.pop(server_name, None)
+
+        return _spawn_stdio_process(server_name, server_config)
+
+
+def _spawn_stdio_process(server_name: str, server_config: Dict[str, Any]) -> subprocess.Popen | None:
+    """实际启动子进程并握手（由 _ensure_stdio_process 持锁调用）。"""
 
     command = server_config.get("command", "")
     if not command:
@@ -96,21 +360,44 @@ def _ensure_stdio_process(server_name: str, server_config: Dict[str, Any]) -> su
         logger.error(f"[MCP] 启动 stdio 进程 {server_name} 失败: {exc}")
         return None
 
+    # ⚠️ 必须在等进程就绪**之前**启动 stderr 消费线程：
+    #    服务启动瞬间就会写日志，晚一步就可能已经填满缓冲区。
+    threading.Thread(
+        target=_drain_stderr, args=(proc, server_name), daemon=True
+    ).start()
+
     import time
-    time.sleep(8)  # 等进程完全启动
+    # 2026-09-22：从 8 秒缩到 3 秒 —— 之前留了过长的固定等待，
+    # 而真正需要的是「等 initialize 响应」（见下面的轮询）。
+    time.sleep(3)
     if proc.poll() is not None:
         _, err = proc.communicate(timeout=5)
-        logger.error(f"[MCP] stdio 进程 {server_name} 启动后立即退出: {err[:300]}")
+        logger.error(
+            f"[MCP] stdio 进程 {server_name} 启动后立即退出: {err[:300]}"
+            f"（env 键数={len((server_config.get('env') or {}))}）"
+        )
         return None
 
     # 执行 MCP initialize 握手
+    #
+    # ⚠️ 2026-09-22 修复：原实现是「sleep(3) 后单次 readline()」。
+    #    MCP 服务（sinataoke_cn）**首次**启动要加载 Node 模块，
+    #    3 秒往往还没就绪 → readline() 读到空 → 判定失败。
+    #    实测同一函数连续三次调用：第 1 次失败、第 2/3 次成功
+    #    （第 2 次起 Node require cache 生效，启动变快）。
+    #    现在改为**轮询等待**，冷启动也能等到。
     try:
         proc.stdin.write(json.dumps({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ShoppingClaw","version":"1.0"}},"id":1}) + "\n")
         proc.stdin.flush()
-        time.sleep(3)
-        line = proc.stdout.readline()
+
+        line = _read_line_with_timeout(
+            proc, timeout=MCP_INIT_TIMEOUT_S, poll_interval=0.5
+        )
         if not line.strip():
-            logger.error(f"[MCP] stdio 进程 {server_name} initialize 无响应")
+            logger.error(
+                f"[MCP] stdio 进程 {server_name} initialize 无响应"
+                f"（等待 {MCP_INIT_TIMEOUT_S}s）"
+            )
             proc.terminate()
             return None
         r = json.loads(line)
@@ -173,25 +460,81 @@ def _get_stdio_tool_specs(server_name: str, server_config: Dict[str, Any]) -> Li
         return []
 
 
+# 单次 tools/call 的最大等待（秒）。正常响应 1-2 秒；
+# 设为 20 是为了容忍远程 API 的偶发长尾，同时避免整条流被挂死。
+MCP_CALL_TIMEOUT_S = 20
+
+
+
+# stdio 往返锁 + 自增请求 id。
+#
+# 为什么需要锁：MCP 子进程是**单管道** stdin/stdout，多个调用并发写会交错、
+# 盲读会串包。购前助手会并行发 2-3 个搜索关键词，实测（2026-09-21 22:07:35）
+# 三个并发 searchMaterial 里有两个 `json.loads("")` 失败 —— 就是这里的竞态。
+# 锁把「写请求 + 读响应」这一对操作串行化，代价是并发搜索变成排队，
+# 但换来的是结果正确；相比静默丢结果，这个代价值得。
+_stdio_io_lock = threading.Lock()
+_stdio_req_seq = itertools.count(1000)
+
+
 def _call_stdio_tool(server_name: str, server_config: Dict[str, Any], tool_name: str, arguments: Dict[str, Any]) -> Any:
-    """调用 stdio MCP 工具（同步版本，必须在线程中调用以避免阻塞事件循环）。"""
+    """调用 stdio MCP 工具（同步版本，必须在线程中调用以避免阻塞事件循环）。
+
+    并发安全：持锁完成「写请求 → 读响应」的完整往返，避免请求交错与串包。
+    """
     proc = _ensure_stdio_process(server_name, server_config)
     if proc is None or proc.stdin is None or proc.stdout is None:
         return {"error": "stdio MCP 进程不可用"}
-    try:
-        import time
-        proc.stdin.write(json.dumps({"jsonrpc":"2.0","method":"tools/call","params":{"name":tool_name,"arguments":arguments},"id":100}) + "\n")
-        proc.stdin.flush()
-        time.sleep(5)
-        line = proc.stdout.readline()
-        r = json.loads(line)
-        content = r.get("result", {}).get("content", [{}])
-        if content and isinstance(content, list) and len(content) > 0:
-            return content[0].get("text", json.dumps(r))
-        return json.dumps(r)
-    except Exception as exc:
-        logger.error(f"[MCP] stdio 工具调用 {tool_name} 失败: {exc}")
-        return {"error": str(exc)}
+
+    req_id = next(_stdio_req_seq)
+    with _stdio_io_lock:
+        try:
+            import time
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments},
+                "id": req_id,
+            }) + "\n")
+            proc.stdin.flush()
+
+            # 2026-09-22：去掉 sleep(5) 的固定等待。
+            # 原来无论响应多久都白睡 5 秒 —— 2-3 个并发搜索就是 15 秒纯等待。
+            # 改成「按行读到匹配 id 的响应为止」：响应通常 1-2 秒就回，
+            # 立刻返回；只有异常时才等到 MCP_CALL_TIMEOUT_S 上限。
+            deadline = time.time() + MCP_CALL_TIMEOUT_S
+            r = None
+            for _ in range(3):
+                if proc.stdout in (None,):
+                    break
+                line = proc.stdout.readline()
+                if not line or not line.strip():
+                    # 还没吐字：短睡后重试，直到超时上限
+                    if time.time() >= deadline:
+                        break
+                    time.sleep(0.1)
+                    continue
+                try:
+                    candidate = json.loads(line)
+                except Exception:
+                    continue  # 非 JSON 行（子进程日志等）跳过
+                if candidate.get("id") == req_id:
+                    r = candidate
+                    break
+                logger.warning(f"[MCP] 丢弃孤儿响应 id={candidate.get('id')}（期望 {req_id}）")
+                if time.time() >= deadline:
+                    break
+
+            if r is None:
+                logger.error(f"[MCP] stdio 工具 {tool_name} 未收到匹配响应 (id={req_id})")
+                return {"error": "MCP 未返回匹配的响应"}
+
+            content = r.get("result", {}).get("content", [{}])
+            if content and isinstance(content, list) and len(content) > 0:
+                return content[0].get("text", json.dumps(r))
+            return json.dumps(r)
+        except Exception as exc:
+            logger.error(f"[MCP] stdio 工具调用 {tool_name} 失败: {exc}")
+            return {"error": str(exc)}
 
 
 async def call_stdio_tool_async(

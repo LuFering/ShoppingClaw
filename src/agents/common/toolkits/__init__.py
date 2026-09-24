@@ -34,6 +34,13 @@ def _ensure_tools_loaded():
         return
     # Always load buildin tools first (required for agent core functionality)
     import src.agents.common.toolkits.buildin.tools
+    # 购物档案工具（购后助手专属：归档 / 阶段 / 提醒 / 复盘）
+    # @tool 装饰器在 import 时完成注册，故必须显式导入。
+    import src.agents.common.toolkits.buildin.archive_tools
+    # 编排层工具（主智能体专属：路由目录 / 编排 SOP / 档案查询）
+    import src.agents.common.toolkits.buildin.orchestration_tools
+    # 监控任务工具（购后助手专属：建监控 / 看监控）—— 补「对话说了真的算」
+    import src.agents.common.toolkits.buildin.monitor_tools
     # Optional toolkits: failure should not block buildin tools
     for mod_path, label in [
         ("src.agents.common.toolkits.research", "research"),
