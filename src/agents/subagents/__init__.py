@@ -1,3 +1,3 @@
-from .factory import subagent_factory
+from .factory import create_subagent_from_config
 
-__all__ = ["subagent_factory"]
+__all__ = ["create_subagent_from_config"]

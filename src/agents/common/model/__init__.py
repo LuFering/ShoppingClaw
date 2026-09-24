@@ -11,6 +11,11 @@
   这里把 schema 显式 re-export，让两条链路都真正生效。
 """
 from src.agents.common.model.subagent_schemas import (  # noqa: F401
+    ProductCardSnapshot,
+    TradeoffItem,
+    RejectedItem,
+    PrePurchaseData,
+    PrePurchaseOutput,
     ResearcherData,
     ResearcherOutput,
     DimensionScore,
@@ -27,6 +32,11 @@ from src.agents.common.model.subagent_schemas import (  # noqa: F401
 from src.agents.common.model.product import Product  # noqa: F401
 
 __all__ = [
+    "ProductCardSnapshot",
+    "TradeoffItem",
+    "RejectedItem",
+    "PrePurchaseData",
+    "PrePurchaseOutput",
     "ResearcherData",
     "ResearcherOutput",
     "DimensionScore",

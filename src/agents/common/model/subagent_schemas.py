@@ -1,6 +1,70 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Any
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional, Any, Literal, Union, Dict
 from src.agents.common.model.product import Product
+
+PlatformCode = Literal["jd", "taobao", "pdd"]
+
+
+class ProductCardSnapshot(BaseModel):
+    """商品卡片快照 —— 交付 UI 卡片的最小字段集。
+
+    与 `Product` 的区别（有意为之）：
+      · 不带 `state`。搜索工具 `search_products` 从不返回该字段，
+        强制要求它会让每次校验都失败。
+      · `url` 可空。它只来自 Justone 的 landUrl，官方 API 路径下常缺失。
+        缺失时下发 null，前端回退为不可点击 —— 绝不编造 `#` 或假链接。
+      · 缺少稳定 sku_id 或价格的商品**不允许**进入这里：宁可少出卡，
+        也不能伪造一张完整的卡。
+    """
+    sku_id: str = Field(..., min_length=1, description="商品唯一标识（工具返回的 id 去掉平台前缀，如 jd_123 → 123）")
+    title: str = Field(..., min_length=1, description="商品标题")
+    price: float = Field(..., gt=0, description="到手价（人民币元），必须为正数")
+    platform: PlatformCode = Field(..., description="来源平台编码：jd / taobao / pdd")
+    url: Optional[str] = Field(default=None, description="商品详情页链接；工具未返回时为 null")
+    image_url: Optional[str] = Field(default=None, description="主图 URL")
+    rating: Optional[float] = Field(default=None, ge=0, le=5, description="评分，5 分制")
+    shop_name: Optional[str] = Field(default=None, description="店铺名称")
+
+
+class TradeoffItem(BaseModel):
+    """单款为什么入选 / 为什么不选。"""
+    sku_id: str = Field(..., description="对应的商品唯一标识")
+    verdict: str = Field(..., description="入选 (pick) | 排除 (reject)")
+    reason: str = Field(..., description="一句话说明：为什么选它 / 为什么排除")
+
+
+class RejectedItem(BaseModel):
+    """明确排除项。"""
+    sku_id: Optional[str] = Field(default=None, description="被排除商品标识；无稳定 id 时为 null")
+    title: Optional[str] = Field(default=None, description="被排除商品标题，便于用户理解")
+    reason: str = Field(..., description="排除原因（不满足哪条硬约束）")
+
+
+class PrePurchaseData(BaseModel):
+    """购前助手输出的数据结构化封装。所有字段必须源自工具返回的真实快照。"""
+    picks: List[ProductCardSnapshot] = Field(
+        default_factory=list,
+        description="最终推荐候选，保留完整商品快照。无合适结果时留空，并填 no_recommendation_reason。",
+    )
+    tradeoffs: List[TradeoffItem] = Field(default_factory=list, description="每款入选 / 不选的取舍理由")
+    risks: List[str] = Field(default_factory=list, description="风险或待确认项（售后、正品、长期成本等）")
+    rejected: List[RejectedItem] = Field(default_factory=list, description="被明确排除的商品与原因")
+    no_recommendation_reason: Optional[str] = Field(
+        default=None,
+        description="无合适结果时说明共性缺陷；有 picks 时为 null。",
+    )
+
+
+class PrePurchaseOutput(BaseModel):
+    """购前助手的统一输出协议。只返回此结构的 JSON，不要 Markdown 或解释文字。
+
+    交付路径：本协议只承载结构化候选，**不出卡**。
+    卡片由 runtime 在 task 块内根据 picks 合成，保证字段不被二次抽取。
+    """
+    evidence_type: str = Field(default="presales_recommendation", description="证据类型标签，固定为 presales_recommendation")
+    data: PrePurchaseData
+    summary: str = Field(..., description="一句话核心结论：推了哪几款、关键取舍是什么；无推荐则说明原因")
+
 
 class ResearcherData(BaseModel):
     """Researcher 输出的数据结构化封装。请确保所有数据均源自工具调用结果。"""
@@ -79,7 +143,40 @@ class PreferenceSignal(BaseModel):
 
 class MemoryData(BaseModel):
     """Memory 输出的数据结构化封装"""
-    relevant_preferences: dict = Field(..., description="与当前任务相关的历史偏好摘要（键值对形式）")
+    # 2026-09-22：原为 dict，但模型实际常输出**列表**
+    # （[{'dimension': 'brand_preference', 'value': ...}, ...]），
+    # 严格校验失败会导致整轮结论降级作废。这里放宽为二者皆可，
+    # 再由下面的校验器归一成 dict，下游契约不变。
+    relevant_preferences: Union[Dict[str, Any], List[Any]] = Field(
+        ..., description="与当前任务相关的历史偏好摘要（键值对形式，也接受条目列表）"
+    )
+
+    @field_validator("relevant_preferences")
+    @classmethod
+    def _normalize_preferences(cls, v):
+        """列表形态归一成 {dimension: value} 字典。
+
+        条目里能取到 dimension/value 就按这对建键；取不到时退化用
+        field / key / index 兜底，保证不因单条格式特殊而整轮失败。
+        """
+        if isinstance(v, dict):
+            return v
+        if not isinstance(v, list):
+            return v
+        out: Dict[str, Any] = {}
+        for i, item in enumerate(v):
+            if isinstance(item, dict):
+                key = (
+                    item.get("dimension")
+                    or item.get("field")
+                    or item.get("key")
+                    or item.get("name")
+                    or f"pref_{i}"
+                )
+                out[str(key)] = item.get("value", item)
+            else:
+                out[f"pref_{i}"] = item
+        return out
     preference_insights: Optional[str] = Field(None, description="基于画像的深度洞察：这些偏好如何影响当前的推荐策略")
     new_signals: List[PreferenceSignal] = Field(default_factory=list, description="本轮对话中提取的新增或更新信号")
     profile_updated: bool = Field(default=False, description="是否触发了用户画像的实质性更新")

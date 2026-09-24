@@ -56,6 +56,18 @@ class BaseAgent:
             "configurable": {"thread_id": context.thread_id, "user_id": context.user_id},# 传给 checkpointer，用于恢复对话历史
             "recursion_limit": 100,
         }
+
+        # ═══ 2026-09-23：把 user_id 绑进 contextvar，覆盖整个流 ═══
+        # 为什么需要：用户态工具（find_archive / get_user_shopping_context /
+        # save_to_archive 等）以 user_id 为必填参数，而主智能体不会把它写进
+        # 工具调用（模型不知道该填什么），子智能体的 task description 里也不带。
+        # 原先只在 `task` 内部 set 过 contextvar —— 主智能体**自己**调工具时
+        # 它是空的，于是 `find_archive()` 报 missing 1 required argument。
+        # 这里在流的入口绑定，主/子智能体都覆盖到。
+        # 用 token 在流结束时还原，避免污染同事件循环里的其他请求。
+        from src.agents.common.middleware.user_scope import CURRENT_USER_ID
+
+        _uid_token = CURRENT_USER_ID.set(getattr(context, "user_id", None))
         
         # logging.info(f"[Graph Start] Context: {context.__dict__}")  # 注释掉：避免输出 system_prompt
 
@@ -104,6 +116,12 @@ class BaseAgent:
                 # 兼容单一模式
                 yield chunk, {}
         logging.info(f"[Stream End] graph.astream 迭代完成")
+        # 还原 contextvar（与上面的 set 配对）
+        try:
+            CURRENT_USER_ID.reset(_uid_token)
+        except Exception:
+            pass  # token 失效（跨 context 使用）时忽略，值会在下次 set 时覆盖
+
     async def invoke_messages(self,messages:list[str],input_context=None,**kwargs):
         graph=await self.get_graph()
         context=self.context_schema()

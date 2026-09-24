@@ -86,25 +86,88 @@ class MasterAgent(BaseAgent):
         self.sse_middleware=None  # SSEMonitoringMiddleware 实例，供 chat_stream_service 访问
 
     async def get_tools(self):
-        """获取所有已注册的硬编码工具实例（buildin + MCP 工具）"""
-        from src.agents.common.toolkits.registry import get_all_extra_metadata, ToolExtraMetadata
+        """获取主智能体的工具集 —— **仅编排动作**，不含任何业务/展示工具。
+
+        ══ 2026-09-20 契约对齐 ══
+        原先的实现是「取全部 buildin 类别的工具」，于是 master 拿到了
+        search_products / render_product_card 等业务与展示工具，线上实测表现为：
+        master 连续 3 次 model pass 只为逐个调 render_product_card（占 90s），
+        且卡片字段是从自由文本里二次抽取的，`url` 为 "#"、`platform` 为中文"京东"。
+
+        契约（web-v2/src/agent/mainAgentContracts.js 的 forbidden_tools）要求
+        主智能体不持有任何业务工具。这里改为**显式编排白名单**，与契约形成双重保险：
+          · 业务工具（搜索/详情/规格/筛选）→ 只留在购前助手
+          · 展示工具（render_product_card / format_comparison_table）→ 由 runtime
+            依据购前助手返回的 picks 在 task 块内合成，master 不直接调用
+          · master 只保留：编排动作（task / todo_write / ask_user）+ 文件系统工具
+        """
         import logging
         _logger = logging.getLogger(__name__)
 
         all_tools = get_all_tool_instances()
-        extra_meta = get_all_extra_metadata()
 
-        # 已由 Prompt 注入替代的工具（不应作为 Tool 暴露给 LLM）
-        _deprecated_tool_names = {"ask_user_question"}
+        # ── 主智能体允许持有的工具（编排动作 + 文件系统）──
+        _MASTER_ALLOWED_TOOLS = {
+            "ask_user_question",   # 澄清反问（前端 alias: ask_user）
+            "write_todos",         # 待办下发
+            "read_file", "edit_file", "ls", "grep",   # 文件系统
+            # ── 编排层工具（2026-09-22 新增）──
+            # 让编排卡的「Skill / RAG」两栏有据可依，而不是硬编码常量。
+            # 这三个都是**路由元数据**，不碰商品/订单/支付，
+            # 不违反 forbidden_tools（禁的是搜索/出卡/下单/物流）。
+            "list_subagents",          # 决定该派谁（读 subagents.yaml）
+            "query_orchestration_sop", # 编排方法论（走向量检索）
+            "find_archive",            # 判断有无历史档案（读 DB）
+        }
 
-        # 只保留 buildin 类别的工具，并排除已弃用的工具
+        # ── 显式禁止（与前端契约 forbidden_tools 对齐）──
+        # 列出来是为了防止后续有人往 buildin 里加工具时被白名单意外放过；
+        # 白名单本身已足够，这里是可读的「为什么不给」说明。
+        _MASTER_FORBIDDEN_TOOLS = {
+            # 业务工具
+            "search_products", "get_product_full_detail",
+            "get_products_specs_batch", "get_products_specs_extract",
+            "filter_products_by_criteria", "query_category_knowledge",
+            "query_risk_policy", "price_calculator",
+            # 展示工具
+            "render_product_card", "format_comparison_table",
+            # 用户数据（属购后助手职责）
+            "get_user_profile", "save_user_preference",
+            "recall_past_decisions", "get_user_shopping_context",
+            "track_task_progress",
+            # 已由 Prompt 注入替代
+            "ask_user_question_deprecated",
+        }
+
         tools = [
             tool for tool in all_tools
-            if extra_meta.get(tool.name, ToolExtraMetadata()).category == "buildin"
-            and tool.name not in _deprecated_tool_names
+            if tool.name in _MASTER_ALLOWED_TOOLS
+            and tool.name not in _MASTER_FORBIDDEN_TOOLS
         ]
 
-        # ── 加载 MCP 工具（本地 + 远程）──
+        # ═══ 2026-09-23：给用户态工具补 user_id 注入 ═══
+        # 子智能体那边在 load_subagent 里做过同样的包装；主智能体这边漏了，
+        # 导致 find_archive 这类需要 user_id 的工具调用失败
+        # （实测 TypeError: missing 1 required positional argument: 'user_id'）。
+        # 值由 BaseAgent.stream_messages 在流入口绑定到 contextvar 提供。
+        from src.agents.common.middleware.user_scope import with_user_id
+
+        tools = [with_user_id(t) for t in tools]
+
+        _logger.info(
+            f"[MasterAgent] 编排白名单工具: {sorted(t.name for t in tools)}"
+        )
+
+        # ── 加载 MCP 工具（仅注册，不挂到主智能体）──
+        # ═══ 2026-09-21 编排护栏修复 ═══
+        # 原实现在白名单过滤**之后** `tools.extend(mcp_tools)`，把 26 个 MCP
+        # 工具无差别追加到主智能体上，直接违反本文件上文声明的契约
+        # （_MASTER_FORBIDDEN_TOOLS 与前端 forbidden_tools 都要求主智能体
+        # 不持有任何业务工具）。实测日志：主智能体工具数 = 1 + 26 = 27。
+        #
+        # 现在改为：`adapt_mcp_tools` 仍会构造并**注册**这些工具（注册表是
+        # 子智能体解析工具名的来源），但不并入主智能体的工具集。
+        # 购前助手通过 subagents.yaml 里的工具名从注册表取用。
         try:
             from src.services.mcp_service import get_tools_from_all_servers
             from src.services.mcp_tool_adapter import adapt_mcp_tools
@@ -112,9 +175,10 @@ class MasterAgent(BaseAgent):
             mcp_specs = await get_tools_from_all_servers()
             if mcp_specs:
                 mcp_tools = await adapt_mcp_tools(mcp_specs)
-                tools.extend(mcp_tools)
-                _logger.info(f"[Agent] 加载了 {len(mcp_tools)} 个 MCP 工具: "
-                             f"{[t.name for t in mcp_tools]}")
+                _logger.info(
+                    f"[Agent] MCP 工具已构造并注册 {len(mcp_tools)} 个"
+                    f"（按护栏不下发主智能体，供子智能体取用）"
+                )
         except Exception as exc:
             _logger.warning(f"[Agent] MCP 工具加载失败（不影响核心功能）: {exc}")
 

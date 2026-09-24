@@ -22,6 +22,7 @@ from langgraph.types import Command
 from src.agents.common.backends import BackendProtocol
 from src.agents.common.backends.protocol import BackendFactory
 from src.agents.common.middleware._utils import append_to_system_message
+from src.agents.common.middleware.user_scope import CURRENT_USER_ID
 
 """未编译形态的subagent"""
 class SubAgent(TypedDict):
@@ -136,20 +137,42 @@ _EXCLUDED_STATE_KEYS = {"messages", "todos", "structured_response", "skills_meta
 # SubAgent 输出协议校验 + 证据注入
 # ---------------------------------------------------------------------------
 
+def _resolve_user_id(runtime) -> str | None:
+    """从 runtime 里取出当前会话的 user_id。
+
+    取值顺序：context（MasterContext.user_id，会话级）→ state → config。
+    取不到返回 None —— 此时用户态工具会因缺 user_id 而失败并如实报错，
+    好过编一个假 id 把数据写到别人名下。
+    """
+    for src in (
+        getattr(runtime, "context", None),
+        getattr(runtime, "state", None),
+        (getattr(runtime, "config", None) or {}).get("configurable")
+        if isinstance(getattr(runtime, "config", None), dict)
+        else None,
+    ):
+        if src is None:
+            continue
+        uid = None
+        if isinstance(src, dict):
+            uid = src.get("user_id")
+        else:
+            uid = getattr(src, "user_id", None)
+        if uid:
+            return str(uid)
+    return None
+
+
 def _get_output_schema(subagent_type: str):
     """按 Agent 类型获取对应的 Pydantic 输出协议（懒加载，避免循环依赖）。"""
     try:
         from src.agents.common.model import (
-            ResearcherOutput,
-            AnalystOutput,
-            CriticOutput,
+            PrePurchaseOutput,
             MemoryOutput,
         )
         _SCHEMA_MAP = {
-            "researcher": ResearcherOutput,
-            "analyst": AnalystOutput,
-            "critic": CriticOutput,
-            "memory_manager": MemoryOutput,
+            "pre_purchase": PrePurchaseOutput,
+            "post_purchase": MemoryOutput,
         }
         return _SCHEMA_MAP.get(subagent_type)
     except ImportError:
@@ -159,12 +182,12 @@ def _get_output_schema(subagent_type: str):
 def _enrich_task_description(subagent_type: str, description: str, state: dict) -> str:
     """将 MasterAgent state 中的前置证据注入到 SubAgent 的任务描述中。
 
-    确保下游 Agent（analyst／critic）能接收到上游 Agent 已产出的数据，
-    无需 MasterAgent 在 prompt 中手动传递。
+    当前只有购前助手需要跨轮复用上游已产出的数据（例如用户追问
+    "第一款再细说一下" 时，不必重新搜一遍货）。
     """
     evidence = state.get("evidence", {})
 
-    if subagent_type == "analyst":
+    if subagent_type == "pre_purchase":
         research_data = evidence.get("research_data")
         if research_data and research_data.get("products"):
             products_str = json.dumps(
@@ -172,16 +195,7 @@ def _enrich_task_description(subagent_type: str, description: str, state: dict) 
             )
             description = (
                 f"{description}\n\n"
-                f"【系统注入】以下为 Researcher 已采集的商品数据，请基于此进行分析：\n{products_str}"
-            )
-
-    elif subagent_type == "critic":
-        analysis_report = evidence.get("analysis_report")
-        if analysis_report:
-            report_str = json.dumps(analysis_report, ensure_ascii=False, indent=2)
-            description = (
-                f"{description}\n\n"
-                f"【系统注入】以下为 Analyst 的分析报告，请据此进行风险评估：\n{report_str}"
+                f"【系统注入】以下为本轮已采集的商品数据，请复用，不要重复搜索：\n{products_str}"
             )
 
     return description
@@ -245,20 +259,65 @@ def _validate_output(subagent_type: str, text: str) -> tuple[bool, str | None]:
         validated = schema.model_validate(parsed)
         return True, validated.model_dump_json(ensure_ascii=False)
     except Exception as e:
-        # 宽松校验降级：model_validate 可能因工具返回数据不完整（缺 price/state/url 等）
-        # 而失败。使用 model_construct 跳过验证，让数据流继续
-        try:
-            validated = schema.model_construct(**parsed)
-            logging.warning(
-                f"[SubAgent] {subagent_type} 宽松验证通过（model_construct），"
-                f"跳过严格校验。原始错误: {e}"
-            )
-            return True, validated.model_dump_json(ensure_ascii=False)
-        except Exception:
-            return False, (
-                f"输出验证失败：{e}\n"
-                f"请根据以上错误修正输出，只返回符合 {schema.__name__} 格式的纯 JSON 对象。"
-            )
+        # ═══ 2026-09-20 契约对齐：不再用 model_construct 宽松放行 ═══
+        # 旧行为是「严格校验失败就用 model_construct 跳过验证，让数据流继续」，
+        # 结果是缺 price / url / sku_id 的商品被静默放行，MasterAgent 只能从
+        # 自由文本里二次抽取，最终产出一批字段不实的假卡片（线上实测 url="#",
+        # platform="京东"）。现在改为**如实报错**：把缺失字段回给子智能体，
+        # 让它重试一次；重试仍失败则降级为"数据不足、不出卡"，绝不伪造。
+        logging.warning(
+            f"[SubAgent] {subagent_type} 严格校验失败（不再宽松放行）: {e}"
+        )
+        return False, (
+            f"输出验证失败：{e}\n"
+            f"请检查是否有商品缺少必需的 sku_id / title / price(>0) / platform(jd|taobao|pdd)。\n"
+            f"缺少必需字段的商品请从 picks 中移除，并在 no_recommendation_reason 或 "
+            f"rejected 中说明原因 —— 不要编造字段。\n"
+            f"只返回符合 {schema.__name__} 格式的纯 JSON 对象。"
+        )
+
+
+def _insufficient_data_fallback(subagent_type: str) -> str:
+    """重试耗尽后的降级输出 —— 按**各 Agent 自己的 Schema** 返回合法空结果。
+
+    关键约束：降级载荷必须符合该 Agent 的输出协议。旧行为对所有 Agent 都返回
+    购前形状的 insufficient_data JSON，导致 post_purchase 校验失败时
+    MasterAgent 拿到一段无法通过 MemoryOutput 校验的数据，画像链路静默断裂。
+    post_purchase → 合法空 MemoryOutput（无新信号、不改画像）；
+    pre_purchase（及其它类型）→ 沿用购前的 insufficient_data 形状。
+    """
+    if subagent_type == "post_purchase":
+        return json.dumps(
+            {
+                "evidence_type": "user_preference",
+                "data": {
+                    "relevant_preferences": {},
+                    "preference_insights": None,
+                    "new_signals": [],
+                    "profile_updated": False,
+                    "conflicts_detected": None,
+                },
+                "summary": "本轮数据不足，未能提取新的用户偏好信号。",
+            },
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        {
+            "evidence_type": "insufficient_data",
+            "data": {
+                "picks": [],
+                "tradeoffs": [],
+                "risks": [],
+                "rejected": [],
+                "no_recommendation_reason": (
+                    "本轮未能整理出字段完整（含 sku_id / 价格 / 平台）的可信候选，"
+                    "因数据不足未生成推荐。"
+                ),
+            },
+            "summary": "本轮数据不足，未生成推荐候选。",
+        },
+        ensure_ascii=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +544,16 @@ def _get_subagents_legacy(
             continue
         _tools = agent_.get("tools", list(default_tools))
 
+        # ═══ user_id 自动注入（2026-09-22）═══
+        # 用户态工具（get_user_shopping_context / save_to_archive 等）都以
+        # user_id 为必填参数，但主智能体不会把它写进 task description
+        # （BASE_PROMPT 的「零过程指导原则」禁止指定字段）。这里在构造期
+        # 把这类工具包一层：调用时若未传 user_id，自动从 contextvar 补齐。
+        # 对模型透明 —— 工具签名与 args_schema 均不变。
+        from src.agents.common.middleware.user_scope import with_user_id
+
+        _tools = [with_user_id(t) for t in _tools]
+
         subagent_model = agent_.get("model", default_model)
 
         _middleware = [*default_subagent_middleware, *agent_["middleware"]] if "middleware" in agent_ else [*default_subagent_middleware]
@@ -585,6 +654,12 @@ def _build_task_tool(  # noqa: C901
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
 
+        # ═══ 绑定当前会话的 user_id（2026-09-22）═══
+        # 子智能体的用户态工具从这里取真实用户，而不是靠模型猜。
+        # contextvar 在同步 invoke 与异步 ainvoke 下都有效。
+        _bound_uid = _resolve_user_id(runtime)
+        _uid_token = CURRENT_USER_ID.set(_bound_uid)
+
         # SSE 进度事件：子智能体开始执行
         try:
             writer = get_stream_writer()
@@ -639,6 +714,21 @@ def _build_task_tool(  # noqa: C901
 
         if total_tool_calls > 20:
             logging.warning(f"[SubAgent] {subagent_type} 本轮调用工具{total_tool_calls}次（含{attempt+1}次重试），频率偏高请关注")
+
+        # ═══ 重试耗尽仍不合规：降级为「数据不足」，不带病交付 ═══
+        # 旧行为是把最后一次的校验错误文本当结果返回，MasterAgent 拿到一段报错后
+        # 仍可能据此编卡。现在显式标记降级，让下游知道「本轮没有可信候选」，
+        # 从而只说明情况、不渲染任何商品卡。
+        _final_ok, _final_payload = _validate_output(subagent_type, message_text)
+        if not _final_ok:
+            logging.warning(
+                f"[SubAgent] {subagent_type} 重试 {max_retries} 次后输出仍不合规，"
+                f"降级为数据不足（不出卡）"
+            )
+            message_text = _insufficient_data_fallback(subagent_type)
+        else:
+            message_text = _final_payload
+
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
@@ -671,6 +761,7 @@ def _build_task_tool(  # noqa: C901
 
         try:
             subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
+            _uid_token = CURRENT_USER_ID.set(_resolve_user_id(runtime))
             logging.info(f"\n{'='*50}\n[MASTER AGENT 调度指令]\n目标子智能体: {subagent_type}\n任务描述: {description}\n{'='*50}\n")
 
             # SSE 进度事件：子智能体开始执行
@@ -732,6 +823,21 @@ def _build_task_tool(  # noqa: C901
 
         if total_tool_calls > 20:
             logging.warning(f"[SubAgent] {subagent_type} 本轮调用工具{total_tool_calls}次（含{attempt+1}次重试），频率偏高请关注")
+
+        # ═══ 重试耗尽仍不合规：降级为「数据不足」，不带病交付 ═══
+        # 旧行为是把最后一次的校验错误文本当结果返回，MasterAgent 拿到一段报错后
+        # 仍可能据此编卡。现在显式标记降级，让下游知道「本轮没有可信候选」，
+        # 从而只说明情况、不渲染任何商品卡。
+        _final_ok, _final_payload = _validate_output(subagent_type, message_text)
+        if not _final_ok:
+            logging.warning(
+                f"[SubAgent] {subagent_type} 重试 {max_retries} 次后输出仍不合规，"
+                f"降级为数据不足（不出卡）"
+            )
+            message_text = _insufficient_data_fallback(subagent_type)
+        else:
+            message_text = _final_payload
+
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
