@@ -54,7 +54,15 @@ const router = createRouter({
       component: AppLayout,
       children: [
         {
+          // 入口页：收敛送礼情境（送谁 / 场合 / 预算 / 在意什么）→ 建 run → 跳工作台
+          path: 'new',
+          name: 'GiftEntry',
+          component: () => import('../views/GiftEntryView.vue'),
+          meta: { keepAlive: false, requiresAuth: false }
+        },
+        {
           // 三栏工作台：左 礼物探索流 / 中 人物档案卡 / 右 交付区
+          // ?run=<id> 指定任务实例；没有则如实提示回入口
           path: '',
           name: 'GiftWorkbench',
           component: () => import('../views/GiftWorkbenchView.vue'),

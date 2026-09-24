@@ -8,5 +8,6 @@ export const demoStatus = reactive({
   mcp: false,       // MCP 连接
   decisions: false, // 购物档案
   assistant: false, // 主动助理
-  planning: false   // 采购规划
+  planning: false,  // 采购规划
+  gift: false       // 代购送礼
 })

@@ -3,7 +3,10 @@
     <header class="wb__bar">
       <span class="wb__sig">礼</span>
       <div class="wb__task">
-        <p class="wb__who">送给 {{ task.recipient }} · {{ task.occasion }} · 预算 <span class="mono">¥{{ task.budget }}</span></p>
+        <p class="wb__who">
+          送给 {{ task.recipient || '—' }} · {{ task.occasion || '—' }} · 预算
+          <span class="mono">¥{{ task.budget || '—' }}</span>
+        </p>
         <p class="wb__sub">替你把一件礼物从头想到能下单</p>
       </div>
 
@@ -11,39 +14,57 @@
         <i class="wb__dot" />{{ running ? '推演中' : settled ? '已收敛' : '待开始' }}
       </span>
 
-      <button class="wb__again" type="button" @click="restart">重来</button>
+      <button class="wb__again" type="button" @click="router.push('/proxy/new')">重来</button>
     </header>
 
     <div class="wb__body">
-      <div class="col col--l">
-        <ExploreStream
-          :steps="steps"
-          :excluded="excluded"
-          :stage-key="stageKey"
-          :done-count="doneCount"
-        />
+      <!-- 没有 run id：直接访问 /proxy，如实提示回入口，不编一个假任务 -->
+      <div v-if="!runId" class="wb__blank">
+        <p class="wb__blank-title">还没有开始一次送礼推演</p>
+        <p class="wb__blank-sub">先告诉我是送给谁、什么场合，我再来搭这份礼物。</p>
+        <button class="wb__blank-btn" type="button" @click="router.push('/proxy/new')">
+          去描述这次送礼 →
+        </button>
+      </div>
+      <div v-else-if="loading" class="wb__blank">
+        <a-spin tip="正在加载推演…" />
+      </div>
+      <div v-else-if="loadError" class="wb__blank">
+        <p class="wb__blank-title">{{ loadError }}</p>
+        <button class="wb__blank-btn" type="button" @click="reload">重试</button>
       </div>
 
-      <div class="col col--m">
-        <div class="col__wrap">
-          <ProfileCard
-            :head="PROFILE_HEAD"
-            :task="task"
-            :groups="profile"
-            :understanding="understanding"
-            @act="onAct"
+      <template v-else>
+        <div class="col col--l">
+          <ExploreStream
+            :steps="steps"
+            :excluded="excluded"
+            :stage-key="stageKey"
+            :done-count="doneCount"
           />
         </div>
-      </div>
 
-      <div class="col col--r">
-        <DeliverPanel
-          :items="deliverables"
-          :ready-count="readyCount"
-          @confirm="onConfirm"
-          @revise="onRevise"
-        />
-      </div>
+        <div class="col col--m">
+          <div class="col__wrap">
+            <ProfileCard
+              :head="head"
+              :task="task"
+              :groups="profile"
+              :understanding="understanding"
+              @act="onAct"
+            />
+          </div>
+        </div>
+
+        <div class="col col--r">
+          <DeliverPanel
+            :items="deliverables"
+            :ready-count="readyCount"
+            @confirm="onConfirm"
+            @revise="onRevise"
+          />
+        </div>
+      </template>
     </div>
 
     <Transition name="wb-toast">
@@ -54,20 +75,32 @@
 
 <script setup>
 /**
- * 代购送礼 · v6 三栏工作台
+ * 代购送礼 · 三栏工作台
  *
  * 结构延续采购智能体的三栏工作台，但三栏的**内容与视觉语言完全不同**：
  *   左栏 礼物探索流（时间性）  中栏 人物档案卡（稳定性）  右栏 交付区（结果性）
  *
  * 中栏刻意比左右都宽（≤470）—— 它是任务的情感锚点，不是配图。
  * 三栏各自滚动，页面本身不滚。
+ *
+ * 2026-09-24 接真后端：原先数据来自 `data/giftWorkbenchStream.js` 的模拟流
+ * 与 `data/giftProfile.js` 的硬编码 TASK。现在：
+ *   · task（送谁/场合/预算）来自 run
+ *   · 三栏内容来自 `/api/gift/runs/{id}/events` 的事件流
+ *   · 首屏用 `GET /runs/{id}` 快照恢复（刷新不重放）
  */
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import ExploreStream from '@/components/gift/ExploreStream.vue'
 import ProfileCard from '@/components/gift/ProfileCard.vue'
 import DeliverPanel from '@/components/gift/DeliverPanel.vue'
-import { PROFILE_HEAD } from '@/data/giftProfile'
 import { useGiftWorkbench } from '@/composables/useGiftWorkbench'
+
+const route = useRoute()
+const router = useRouter()
+
+// run id 来自入口页；直接访问时没有 → 如实提示回入口，不编一个假任务
+const runId = computed(() => String(route.query.run || ''))
 
 const {
   task,
@@ -78,12 +111,28 @@ const {
   deliverables,
   running,
   settled,
+  loading,
+  loadError,
   stageKey,
   doneCount,
   readyCount,
   start,
-  abort
-} = useGiftWorkbench({ speed: 1 })
+  abort,
+  reload,
+  revise
+} = useGiftWorkbench({ runId })
+
+// 档案抬头：后端给了 profileHead 就用它，否则从 task 兜底
+const profileHead = ref(null)
+
+/** 抬头兜底：后端还没返回时（推演刚开始）也要能显示，不能空着 */
+const head = computed(() => profileHead.value || {
+  name: task.value?.recipient || '收礼人',
+  initial: (task.value?.recipient || '礼').slice(0, 1),
+  meta: task.value?.occasion || '送礼',
+  sub: `预算 ¥${task.value?.budget || '—'}`,
+  completeness: '档案读取中…'
+})
 
 const toast = ref('')
 let toastTimer = 0
@@ -93,12 +142,13 @@ const say = (text) => {
   toastTimer = setTimeout(() => { toast.value = '' }, 2400)
 }
 
-/** 中栏的信息可追溯：来源要能说出来；改动落到真实实现时再走接口 */
-const onAct = (g, kind) => {
+/** 中栏的信息可追溯：来源要能说出来；「改一下」真的调后端标记待补充 */
+const onAct = async (g, kind) => {
   if (kind === 'source') {
     say(`来源 · ${g.source}`)
   } else if (kind === 'edit') {
-    say(`改「${g.label}」—— 接后端后在这里就地编辑`)
+    await revise(g.key)
+    say(`已把「${g.label}」标记为待补充 —— 补充后我会重新收窄`)
   } else if (kind === 'remove') {
     say(`删「${g.label}」—— 删除会同时影响左栏的依据链`)
   } else {
@@ -107,15 +157,22 @@ const onAct = (g, kind) => {
 }
 
 const onConfirm = () => say('下单链路待接入 —— 订单已可确认，落库与支付等后端')
-const onRevise = () => say('改一下 —— 会回到左栏对应步骤重新推演')
+const onRevise = () => say('改一下 —— 回到入口页调整情境后重推')
 
-const restart = () => {
-  abort()
-  toast.value = ''
-  start()
-}
+onMounted(async () => {
+  if (!runId.value) {
+    loading.value = false
+    return
+  }
+  await start()
+  // 快照里的 profileHead 由 loadSnapshot 写入 profile 组，抬头单独取一次
+  try {
+    const { giftApi } = await import('@/apis/gift_api')
+    const run = await giftApi.getRun(runId.value)
+    profileHead.value = run.profileHead || null
+  } catch { /* 抬头取不到就用兜底 */ }
+})
 
-onMounted(start)
 onBeforeUnmount(() => {
   abort()
   clearTimeout(toastTimer)
@@ -249,6 +306,44 @@ onBeforeUnmount(() => {
   background: var(--bg-surface);
   border-left: 1px solid var(--border);
   padding-top: 12px;
+}
+
+/* ---- 空态 / 加载 / 错误（占满三栏区，居中） ---- */
+.wb__blank {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 40px 24px;
+}
+.wb__blank-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.wb__blank-sub {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.7;
+  color: var(--text-muted);
+  max-width: 340px;
+}
+.wb__blank-btn {
+  margin-top: 4px;
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--gift-accent);
+  background: var(--gift-accent);
+  color: var(--on-accent);
+  cursor: pointer;
+  &:hover { opacity: 0.88; }
 }
 
 /* ---- 提示 ---- */
