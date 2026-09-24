@@ -30,6 +30,7 @@ from server.routers.mcp_router import router as mcp_router
 from server.routers.events_router import router as events_router
 from server.routers.assistant_router import router as assistant_router
 from server.routers.planning_router import router as planning_router
+from server.routers.gift_router import router as gift_router
 from server.middleware.audit import AuditMiddleware
 
 # ── 日志系统：loguru 接管（文件落盘 saves/logs/ + 轮转保留 + 根 logger 桥接 + request_id）──
@@ -231,6 +232,7 @@ app.include_router(mcp_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 app.include_router(assistant_router, prefix="/api")
 app.include_router(planning_router, prefix="/api")
+app.include_router(gift_router, prefix="/api")
 
 
 @app.get("/api/system/health")

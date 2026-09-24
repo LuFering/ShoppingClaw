@@ -514,3 +514,98 @@ class PlanningEvent(Base):
             "payload": self.payload or {},
             "at": format_utc_datetime(self.created_at),
         }
+
+
+# ══════════════════════════════════════════════════════════════
+# 代购送礼（gift agent）—— 2026-09-24 新增
+# ══════════════════════════════════════════════════════════════
+#
+# 与 PlanningRun 刻意不合并：任务性质不同（见 web-v2/.impeccable.md 的分区豁免）。
+#   · planning = **决策收敛**：N 个候选 → 1 个方案，核心产物是决策图
+#   · gift     = **意义建构**：1 个意图 → 一段过程 → 1 份礼物，核心产物是人物档案
+# 共用一张表会立刻需要「一半字段对另一半为空」的分支 —— 图与档案的形态、
+# 生命周期、前端承载方式都不同。
+
+class GiftRun(Base):
+    """一次送礼推演任务实例。"""
+
+    __tablename__ = "gift_runs"
+
+    id = Column(String(64), primary_key=True)                 # 形如 gr-<uuid8>
+    user_id = Column(String(64), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="running", index=True)
+
+    # ── 入口页收敛出的送礼情境 ──
+    recipient = Column(String(64), nullable=False, default="")   # 送给谁
+    occasion = Column(String(64), nullable=False, default="")    # 为了什么
+    budget = Column(Integer, nullable=False, default=0)          # 预算（元）
+    signals = Column(JSON, nullable=False, default=list)         # 用户勾选的在意点 key
+
+    # ── 中栏：人物档案（逐步被写活）──
+    # 每组 {key, label, icon, text, note, state, source, danger}
+    # state 三态是硬要求：confirmed 已确认 / inferred 智能推测 / pending 待确认
+    profile = Column(JSONB, nullable=False, default=list)
+    # 底部「当前理解」{text, from}
+    understanding = Column(JSONB, nullable=False, default=dict)
+    # 档案抬头 {name, initial, meta, sub, completeness}
+    profile_head = Column(JSONB, nullable=False, default=dict)
+
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "status": self.status,
+            "recipient": self.recipient or "",
+            "occasion": self.occasion or "",
+            "budget": int(self.budget or 0),
+            "signals": self.signals or [],
+            "profile": self.profile or [],
+            "understanding": self.understanding or {},
+            "profileHead": self.profile_head or {},
+            "error": self.error,
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at) if self.updated_at else None,
+        }
+
+
+class GiftEvent(Base):
+    """送礼推演的**只追加**事件流水。
+
+    与 PlanningEvent 同样分「快照 + 事件」两处：快照服务刷新恢复，
+    事件服务过程回看 + 断线续传（seq 单调）。
+
+    kind 与前端 `useGiftWorkbench.apply()` 的 `ev.t` **一一对应** ——
+    这是刻意的：前端状态机不改，只把产出源从 mock 换成后端。
+
+      stage        阶段推进     {key}
+      step         步骤状态     {key, status, evidence?, why?}
+      live         实时描述     {key, text, more}
+      excluded     排除候选     {name, why}
+      profile      档案更新     {key, state, text?, note?}
+      understanding 当前理解    {text, from}
+      deliverable  交付物       {key, state, data?}
+      done         结束         {}
+    """
+    __tablename__ = "gift_events"
+
+    __table_args__ = (
+        Index("ix_gift_events_run_seq", "run_id", "seq"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    kind = Column(String(24), nullable=False)
+    payload = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, default=utc_now_naive)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seq": self.seq,
+            "kind": self.kind,
+            "payload": self.payload or {},
+            "at": format_utc_datetime(self.created_at),
+        }

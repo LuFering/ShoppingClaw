@@ -1,0 +1,691 @@
+"""送礼推演各阶段的**纯实现** —— 无事件、无 DB、无副作用。
+
+与 planning 的 stages.py 同一套设计（见 planning 那份的 docstring）：
+同一段逻辑有两个消费方（service 的推进、graph 的节点声明），
+所以只在纯函数里写一遍，「写事件 / 改档案」交给调用方。
+
+本轮范围同样是**取数是真的、推理是薄的**：
+  · `search_candidates` 真调淘宝 MCP 拿真实 SKU 与价格
+  · `read_recipient_context` 真读该用户的购物档案与历史（RAG/记忆工具）
+  · 组合与寄语的**判断**先用可解释的规则，后续接 LLM 时只改这几个函数
+
+送礼与采购的根本差别（决定了这里的阶段划分）：
+  采购是「N 个候选收敛到 1 个方案」，送礼是「1 个意图建构出一段意义」。
+  所以这里没有「筛选/对比」这种收敛动作，而是
+  「读人 → 定主题 → 选构成 → 说清为什么」。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+MCP_TIMEOUT = 90
+RAG_TIMEOUT = 30
+SEARCH_PAGE_SIZE = 6
+
+# ── 中栏档案五组：key 固定（前端 ProfileCard 按 key 取图标与分区）──
+PROFILE_KEYS = ("relation", "life", "likes", "taboo", "giftpref")
+
+PROFILE_LABELS = {
+    "relation": "关系与称谓",
+    "life": "生活状态",
+    "likes": "已知喜好",
+    "taboo": "明确禁忌",
+    "giftpref": "送礼偏好",
+}
+PROFILE_ICONS = {
+    "relation": "people", "life": "life", "likes": "heart",
+    "taboo": "ban", "giftpref": "gift",
+}
+
+# ── 右栏六类交付物（key 固定，前端 DeliverPanel 按 key 渲染）──
+DELIVERABLE_KEYS = ("plan", "compare", "budget", "message", "supply", "order")
+DELIVERABLE_LABELS = {
+    "plan": "礼盒方案", "compare": "候选对比", "budget": "预算分配",
+    "message": "寄语文案", "supply": "货源与配送", "order": "送礼订单",
+}
+
+# ── 左栏七步（key 固定，前端 ExploreStream 按 key 找步骤）──
+STEPS = (
+    ("understand", "理解关系"),
+    ("extract", "提取需求"),
+    ("search", "检索商品"),
+    ("verify", "比价验货"),
+    ("exclude", "排除候选"),
+    ("combine", "组合礼盒"),
+    ("message", "生成寄语"),
+)
+STEP_LABELS = dict(STEPS)
+
+# 收礼人 → 关系称谓的兜底映射（档案里读不到时用）
+RELATION_HINT = {
+    "妈妈": "母亲", "爸爸": "父亲", "老婆": "配偶", "老公": "配偶",
+    "女朋友": "恋人", "男朋友": "恋人", "女儿": "子女", "儿子": "子女",
+    "同事": "同事", "朋友": "朋友", "客户": "客户",
+}
+
+
+# ══════════════════════════════════════════════════════════
+# 工具访问（与 planning 同法，避免两套写法）
+# ══════════════════════════════════════════════════════════
+
+async def _mcp_tool(name: str):
+    try:
+        from src.services.mcp_service import get_tools_from_all_servers
+        from src.services.mcp_tool_adapter import adapt_mcp_tools
+
+        specs = await get_tools_from_all_servers()
+        tools = await adapt_mcp_tools(specs)
+        return next((t for t in tools if getattr(t, "name", "") == name), None)
+    except Exception as e:
+        logger.warning(f"[gift] MCP 工具 {name} 加载失败: {e}")
+        return None
+
+
+async def _builtin_tool(name: str):
+    try:
+        from src.agents.common.toolkits.registry import get_all_tool_instances
+
+        return next(
+            (t for t in get_all_tool_instances() if getattr(t, "name", "") == name), None
+        )
+    except Exception as e:
+        logger.warning(f"[gift] 内置工具 {name} 加载失败: {e}")
+        return None
+
+
+async def _call(tool, args: dict, timeout: int) -> Any | None:
+    if tool is None:
+        return None
+    try:
+        return await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"[gift] 工具 {getattr(tool,'name','?')} 超时")
+        return None
+    except Exception as e:
+        logger.warning(f"[gift] 工具 {getattr(tool,'name','?')} 失败: {e}")
+        return None
+
+
+def _parse_jsonish(raw: Any) -> Any:
+    """工具返回可能是 str / dict / list，统一成 Python 对象。失败返回 None。"""
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(str(raw))
+    except (ValueError, TypeError):
+        return None
+
+
+# ══════════════════════════════════════════════════════════
+# ① 理解关系 —— 真读档案
+# ══════════════════════════════════════════════════════════
+
+async def read_recipient_context(state: dict) -> dict:
+    """读该用户的历史决策与画像，抽出与「送某人」相关的线索。
+
+    真调 `recall_past_decisions` + `get_user_shopping_context`。
+    读不到就返回空 —— **不编造档案**（零幻觉红线，送礼场景尤其致命：
+    编一个「她喜欢香水」而实际过敏，这份礼物就废了）。
+    """
+    recipient = str(state.get("recipient") or "").strip()
+    out: dict[str, Any] = {"history": [], "prefs": [], "raw_ok": False}
+
+    try:
+        from src.agents.common.middleware.user_scope import bind_user_id
+
+        recall = await _builtin_tool("recall_past_decisions")
+        ctx = await _builtin_tool("get_user_shopping_context")
+        uid = str(state.get("user_id") or "")
+
+        if recall is not None and recipient:
+            with bind_user_id(uid):
+                raw = await _call(recall, {"topic": recipient}, RAG_TIMEOUT)
+            data = _parse_jsonish(raw)
+            if isinstance(data, list):
+                out["history"] = data[:5]
+            out["raw_ok"] = out["raw_ok"] or raw is not None
+
+        if ctx is not None:
+            with bind_user_id(uid):
+                raw2 = await _call(ctx, {}, RAG_TIMEOUT)
+            data2 = _parse_jsonish(raw2)
+            if isinstance(data2, dict):
+                prefs = data2.get("preferences") or data2.get("long_term_preferences") or []
+                if isinstance(prefs, list):
+                    out["prefs"] = prefs[:8]
+            out["raw_ok"] = out["raw_ok"] or raw2 is not None
+    except Exception as e:
+        logger.warning(f"[gift] 读档案失败（按无档案继续）: {e}")
+
+    return out
+
+
+def build_profile(state: dict, ctx: dict) -> list[dict]:
+    """按「读到的真实档案」组装中栏五组。
+
+    三态语义（前端硬要求）：
+      confirmed 已确认 —— 来自档案或用户明确表达
+      inferred  智能推测 —— 由上下文推出，但无直接依据
+      pending   待确认 —— 需要用户点头
+
+    **没读到就标 pending**，不假装 confirmed。
+    """
+    recipient = str(state.get("recipient") or "")
+    occasion = str(state.get("occasion") or "")
+    budget = state.get("budget") or 0
+    history = ctx.get("history") or []
+    prefs = ctx.get("prefs") or []
+
+    rel = RELATION_HINT.get(recipient, recipient or "收礼人")
+    has_history = bool(history)
+
+    groups: list[dict] = []
+
+    # ① 关系与称谓
+    groups.append({
+        "key": "relation",
+        "label": PROFILE_LABELS["relation"],
+        "icon": PROFILE_ICONS["relation"],
+        "text": f"{rel} · {recipient or '收礼人'}" + (f" · {occasion}" if occasion else ""),
+        "state": "confirmed" if recipient else "pending",
+        "source": "本次描述" if recipient else "待你补充",
+    })
+
+    # ② 生活状态 —— 档案里没有这类字段，只能推测
+    groups.append({
+        "key": "life",
+        "label": PROFILE_LABELS["life"],
+        "icon": PROFILE_ICONS["life"],
+        "text": "暂无足够依据",
+        "note": "（档案里没有生活状态类记录）",
+        "state": "pending" if not has_history else "inferred",
+        "source": "历史记录" if has_history else "待你补充",
+    })
+
+    # ③ 已知喜好 —— 真取用户偏好
+    if prefs:
+        texts = []
+        for p in prefs[:3]:
+            if isinstance(p, dict):
+                texts.append(str(p.get("value") or p.get("key") or ""))
+            else:
+                texts.append(str(p))
+        text = " · ".join([t for t in texts if t])
+        groups.append({
+            "key": "likes",
+            "label": PROFILE_LABELS["likes"],
+            "icon": PROFILE_ICONS["likes"],
+            "text": text or "暂无记录",
+            "state": "confirmed",
+            "source": "购物档案 · 偏好记录",
+        })
+    else:
+        groups.append({
+            "key": "likes",
+            "label": PROFILE_LABELS["likes"],
+            "icon": PROFILE_ICONS["likes"],
+            "text": "暂无记录",
+            "state": "pending",
+            "source": "待你补充",
+        })
+
+    # ④ 明确禁忌 —— 这个必须来自真实记录，不能猜（猜错的代价最高）
+    taboos = [
+        h for h in history
+        if isinstance(h, dict) and str(h.get("phase") or "") == "dropped"
+    ]
+    if taboos:
+        names = [str(t.get("target") or t.get("title") or "")[:12] for t in taboos[:2]]
+        groups.append({
+            "key": "taboo",
+            "label": PROFILE_LABELS["taboo"],
+            "icon": PROFILE_ICONS["taboo"],
+            "text": "、".join([n for n in names if n]),
+            "note": "—— 曾明确排除，本次不再考虑",
+            "state": "confirmed",
+            "danger": True,
+            "source": "购物档案 · 已排除记录",
+        })
+    else:
+        groups.append({
+            "key": "taboo",
+            "label": PROFILE_LABELS["taboo"],
+            "icon": PROFILE_ICONS["taboo"],
+            "text": "未记录",
+            "note": "—— 有忌讳请直接告诉我，这类信息不能靠推断",
+            "state": "pending",
+            "danger": True,
+            "source": "待你补充",
+        })
+
+    # ⑤ 送礼偏好 —— 来自本次勾选的 signals
+    signals = state.get("signals") or []
+    if signals:
+        groups.append({
+            "key": "giftpref",
+            "label": PROFILE_LABELS["giftpref"],
+            "icon": PROFILE_ICONS["giftpref"],
+            "text": "、".join(str(s) for s in signals),
+            "state": "confirmed",
+            "source": "本次描述 · 你的选择",
+        })
+    else:
+        groups.append({
+            "key": "giftpref",
+            "label": PROFILE_LABELS["giftpref"],
+            "icon": PROFILE_ICONS["giftpref"],
+            "text": "待确认",
+            "state": "pending",
+            "source": "待你确认",
+        })
+
+    return groups
+
+
+def build_profile_head(state: dict, profile: list[dict]) -> dict:
+    """档案抬头。completeness 按**真实**已确认组数算，不写死。"""
+    recipient = str(state.get("recipient") or "收礼人")
+    confirmed = sum(1 for g in profile if g.get("state") == "confirmed")
+    return {
+        "name": recipient,
+        "initial": recipient[:1] if recipient else "礼",
+        "meta": RELATION_HINT.get(recipient, recipient),
+        "sub": f"{state.get('occasion') or '送礼'} · 预算 ¥{state.get('budget') or '—'}",
+        "completeness": f"档案完整 {confirmed}/{len(profile)}",
+    }
+
+
+# ══════════════════════════════════════════════════════════
+# ② 提取需求 / ③ 检索 / ④ 比价 / ⑤ 排除
+# ══════════════════════════════════════════════════════════
+
+def build_understanding(state: dict, profile: list[dict]) -> dict:
+    """「当前理解」—— 一句话说清这次送礼要落在什么上。
+
+    这句话是右栏寄语的素材来源，所以必须指得回具体依据
+    （`.impeccable.md` 的「禁黑箱」：不是参数可解释，是心意可解释）。
+
+    刻意**不用 relation 组**做依据 —— 它是「母亲 · 妈妈 · 生日」这类
+    身份交代，读起来和句首的「{recipient}的这次{occasion}」重复。
+    有信息量的是喜好与偏好这两组。
+    """
+    recipient = str(state.get("recipient") or "对方")
+    occasion = str(state.get("occasion") or "这次")
+    signals = state.get("signals") or []
+
+    # 只有「有内容」的确认项才算依据：排除身份组、排除占位文案。
+    # giftpref 是用户自己勾的标签，句尾已经单独写了一遍，这里不重复引用。
+    PLACEHOLDER = ("未记录", "暂无记录", "暂无足够依据", "待确认", "")
+    basis_items = [
+        g["text"] for g in profile
+        if g.get("state") == "confirmed"
+        and g.get("key") in ("likes", "life")
+        and str(g.get("text") or "").strip() not in PLACEHOLDER
+    ]
+
+    if basis_items:
+        basis = "、".join(basis_items[:2])
+        text = (
+            f"这次的重点不是贵不贵，而是「{basis}」这几条能不能真的用上 —— "
+            f"所以挑的每一件都要落在她日常会碰到的地方。"
+        )
+        src = "来自中栏已确认的档案项"
+    else:
+        text = (
+            f"关于{recipient}，我手上还没有可用的偏好记录。"
+            f"这次先按{occasion}的一般习惯来搭；你补充一句她的喜好，我就能收窄。"
+        )
+        src = "无档案依据 · 按场景通用处理"
+
+    if signals:
+        text += f"（你更在意：{'、'.join(str(s) for s in signals)}）"
+
+    return {"text": text, "from": src}
+
+
+def build_search_keywords(state: dict) -> list[str]:
+    """关键词不是「礼物」，而是**她实际会用到的东西**。
+
+    这是送礼最反直觉的一条：搜「礼物」只会出来一堆礼盒包装与代写信，
+    搜不出能用的东西。要搜的是品类词。
+
+    ⚠️ 但**只有具体名词能用**。2026-09-24 实测（真实淘宝 MCP）：
+
+        关键词            前 3 个结果
+        「日常小家电」  → 服装、电钻工具套装     ❌ 抽象词被拆成「日常」「家电」
+        「家居 实用」   → 义乌小商品、毛绒玩具   ❌ 组合词召回的是杂货
+        「护手霜」      → 植护 / 香氛 / roopy   ✅
+        「香薰」「保温杯」「按摩仪」「丝巾」     ✅ 全是真品类
+        「茶 礼盒」     → 绿茶礼盒              ✅
+
+    结论：**用 2-4 字的品类名词**，最多带一个「礼盒」这类修饰。
+    用户勾的「实用 / 有心意」是抽象标签，必须翻译成具体商品，
+    不能直接当关键词。
+    """
+    # 在意点 → 可搜的具体品类（每条都实测过）
+    SIGNAL_TO_GOODS = {
+        "实用": ["保温杯", "护手霜"],
+        "有心意": ["香薰", "丝巾"],
+        "惊喜感": ["香薰", "按摩仪"],
+        "能天天用": ["保温杯", "护手霜"],
+        "不放着落灰": ["保温杯", "茶 礼盒"],
+        "仪式感": ["香薰", "茶 礼盒"],
+        "健康": ["按摩仪", "茶 礼盒"],
+    }
+    # 收礼人 → 兜底品类
+    RECIPIENT_TO_GOODS = {
+        "妈妈": ["护手霜", "按摩仪"],
+        "爸爸": ["保温杯", "茶 礼盒"],
+        "老婆": ["香薰", "丝巾"],
+        "老公": ["保温杯", "茶 礼盒"],
+        "女朋友": ["香薰", "丝巾"],
+        "男朋友": ["保温杯", "按摩仪"],
+        "女儿": ["香薰", "睡眠"],
+        "儿子": ["保温杯", "睡眠"],
+        "同事": ["茶 礼盒", "保温杯"],
+        "朋友": ["香薰", "茶 礼盒"],
+        "客户": ["茶 礼盒", "丝巾"],
+    }
+
+    kws: list[str] = []
+    for s in (state.get("signals") or []):
+        kws.extend(SIGNAL_TO_GOODS.get(str(s), []))
+    if not kws:
+        kws = RECIPIENT_TO_GOODS.get(str(state.get("recipient") or ""), ["保温杯", "护手霜"])
+
+    seen, out = set(), []
+    for k in kws:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out[:2]
+
+
+def _round_robin_by_kw(items: list[dict], limit: int) -> list[dict]:
+    """按 `_kw`（品类）轮流取，最多 limit 件。
+
+    抽出来是因为**两处需要同一件事**：检索结果的截断、组合时的选件。
+    第一版两处各写一遍，其中一处漏了 `_kw` 透传，表现是「代码看着有分组、
+    实际全是同一品类」—— 这类重复迟早分叉，所以只留一份。
+
+    为什么必须轮流：同一关键词的结果天然同质（搜「保温杯」前 6 条全是保温杯）。
+    顺序截断会让第二个关键词整个失效。
+    """
+    buckets: dict[str, list[dict]] = {}
+    for it in items:
+        buckets.setdefault(str(it.get("_kw") or "其他"), []).append(it)
+
+    out: list[dict] = []
+    idx = {k: 0 for k in buckets}
+    while len(out) < limit:
+        progressed = False
+        for k in buckets:
+            if len(out) >= limit:
+                break
+            if idx[k] >= len(buckets[k]):
+                continue
+            progressed = True
+            out.append(buckets[k][idx[k]])
+            idx[k] += 1
+        if not progressed:
+            break
+    return out
+
+
+async def search_candidates(state: dict) -> list[dict]:
+    """真调淘宝 MCP。复用 parse_search_result，不写第二套解析。
+
+    每条结果打上 `_kw`（来自哪个关键词）——**组合阶段靠它保证品类多样**。
+    不打的后果实测过：两个关键词之一是「保温杯」时，组合会连着挑 3 个保温杯，
+    那不是一个礼盒，是同一样东西买三遍。
+    """
+    from src.services.task_executors.common import parse_search_result
+
+    tool = await _mcp_tool("taobao_searchMaterial")
+    found: list[dict] = []
+    for kw in build_search_keywords(state):
+        raw = await _call(tool, {"q": kw, "page_size": SEARCH_PAGE_SIZE}, MCP_TIMEOUT)
+        if raw is not None:
+            for it in parse_search_result(raw):
+                found.append({**it, "_kw": kw})
+        if len(found) >= SEARCH_PAGE_SIZE * 2:
+            break
+
+    seen, uniq = set(), []
+    for it in found:
+        key = str(it.get("item_id") or it.get("title"))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+
+    # ⚠️ 截断要**按品类轮流取**，不能直接 `uniq[:N]`。
+    # 踩过的坑：第一个关键词（保温杯）返回 6 件、第二个（护手霜）6 件，
+    # 合并后前 6 条全是保温杯 —— 直接截断就等于把第二个关键词整个丢掉，
+    # 组合阶段拿到的候选全是同一品类，只能挑出「三个保温杯」。
+    return _round_robin_by_kw(uniq, SEARCH_PAGE_SIZE)
+
+
+def yuan(cents: Any) -> str:
+    try:
+        v = int(cents or 0)
+    except (TypeError, ValueError):
+        return ""
+    return f"{v / 100:.0f}" if v else ""
+
+
+def price_of_yuan(cents: Any) -> int:
+    """分 → 元的整数（用于预算计算与前端展示）。"""
+    try:
+        return int(int(cents or 0) / 100)
+    except (TypeError, ValueError):
+        return 0
+
+
+def verify_candidates(cands: list[dict], state: dict) -> tuple[list[dict], list[dict]]:
+    """④ 比价验货 + ⑤ 排除候选，一次算完。
+
+    为什么要合并：两步的判据是同一次比较的结果 —— 分开算要遍历两遍，
+    且「入选」与「被排除」必须互补（不重不漏）。
+
+    本轮的可解释规则（后续接 LLM 时改这里，事件契约不动）：
+      · 预算上限：单价超过预算 60% 的排除（送礼要留组合空间）
+      · 价格缺失：拿不到价格的排除（出不了方案）
+      · 明显不相关：标题里含「配件 / 维修 / 租赁 / 定制咨询」的排除
+
+    返回 (入选, 被排除)，被排除的**带 why**、不删除 ——
+    这是 `.impeccable.md` 的「禁黑箱」：要能回答「为什么最后只剩这几件」。
+    """
+    budget = int(state.get("budget") or 0)
+    single_cap = budget * 0.6 if budget else float("inf")
+
+    picked: list[dict] = []
+    excluded: list[dict] = []
+
+    # ⚠️ 只匹配**明确是服务**的词。实测教训（2026-09-24）：
+    # 原先还匹配「维修」，结果把「家电钻手工套装…维修多功能」这种
+    # 真实商品排除了 —— 它在标题里是「用途」而不是「这是维修服务」。
+    # 这类词一旦误伤，用户会觉得「明明能用的东西你为什么不要」。
+    # 所以只留几乎不会出现在实物标题里的说法。
+    NON_GOODS = ("租赁", "定制咨询", "运费", "差价", "代购服务", "上门服务")
+
+    for i, c in enumerate(cands):
+        title = str(c.get("title") or "未命名")
+        price = price_of_yuan(c.get("price"))
+        item = {
+            "id": f"cand-{i}",
+            "name": title[:36],
+            "price": price,
+            "item_id": c.get("item_id"),
+            # 必须把 `_kw` 带下去 —— 组合阶段靠它保证品类多样。
+            # 这里重建 dict 时漏掉过一次，表现是「三个候选全是保温杯」
+            # 而代码看起来明明写了分组逻辑（分组键全成了「其他」）。
+            "_kw": c.get("_kw"),
+        }
+
+        if not price:
+            excluded.append({**item, "why": "拿不到价格，无法纳入预算"})
+        elif any(w in title for w in NON_GOODS):
+            excluded.append({**item, "why": "非实物商品（服务类）"})
+        elif budget and price > single_cap:
+            excluded.append({**item, "why": f"单价 ¥{price} 超过预算的 60%（留不出组合空间）"})
+        else:
+            picked.append(item)
+
+    return picked, excluded
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 组合礼盒 / ⑦ 寄语
+# ══════════════════════════════════════════════════════════
+
+def combine(picked: list[dict], state: dict) -> tuple[dict, list[dict], dict]:
+    """⑥ 组合礼盒：挑 3 件凑成一个说得通的整体。
+
+    与采购的「选最优单品」不同 —— 送礼的判据是**同时被用到**
+    （三件落在同一个使用场景里），而不是各自最优。
+
+    选件规则（本轮，可解释）—— 迭代过三轮，两条都是实测教训：
+      · **不按价格降序**。试过，结果给「给妈妈的生日」选出 ¥336 的
+        电钻工具套装当主力（它是候选里最贵的）。MCP 的返回**本身就是
+        按相关性排序的**，第一条比「最贵的那条」靠谱得多。
+      · **每个品类最多取一件**。这是「组合」能成立的前提 ——
+        关键词含「保温杯」时，纯按相关性会连着挑 3 个保温杯，
+        那不是礼盒，是同一样东西买三遍。
+
+    返回 (方案, 预算行, 订单)。
+    """
+    budget = int(state.get("budget") or 0)
+    recipient = str(state.get("recipient") or "对方")
+    occasion = str(state.get("occasion") or "这次")
+
+    if not picked:
+        plan = {
+            "title": "这次没能凑出一份方案",
+            "thesis": "候选池是空的 —— 可能是关键词太窄，或数据源暂时不可用。"
+                      "你可以补充一个具体的品类，我再试一轮。",
+            "items": [],
+        }
+        return plan, [], {"total": 0, "budget": budget, "eta": "", "steps": []}
+
+    # 选件：按品类轮流取（与检索截断共用同一个 helper —— 这段逻辑
+    # 曾经在两处各写一遍，其中一处漏了 `_kw` 透传，结果「代码看着有分组、
+    # 实际全是同一品类」。只留一份就不会再分叉）。
+    #
+    # 为什么必须按品类轮流：同一关键词的结果天然同质（搜「保温杯」
+    # 前 6 条全是保温杯）。顺序取会挑出「三个保温杯」—— 那不是礼盒，
+    # 是同一样东西买三遍。
+    #
+    # 先按预算筛掉超支的，再轮流取，最后按预算收口。
+    affordable = [
+        it for it in picked
+        if not budget or int(it.get("price") or 0) <= budget
+    ] or picked
+
+    chosen: list[dict] = []
+    spent = 0
+    for it in _round_robin_by_kw(affordable, 3):
+        price = int(it.get("price") or 0)
+        if budget and spent + price > budget:
+            continue
+        chosen.append(it)
+        spent += price
+
+    if not chosen:                      # 预算太小，至少给最便宜的一件
+        chosen = [min(picked, key=lambda x: int(x.get("price") or 0))]
+        spent = int(chosen[0].get("price") or 0)
+
+    roles = ["主力", "搭配", "点缀"]
+    seen_kw: set[str] = set()
+    items = []
+    for i, it in enumerate(chosen):
+        kw = str(it.get("_kw") or "")
+        # 理由要指得回来源，且**不能自称「相关性最高」两次** ——
+        # 品类不足 3 个时会从同一品类取第二件，那时说「最相关的一件」是假的。
+        if kw and kw not in seen_kw:
+            why = f"检索「{kw}」时相关性最高的一件"
+        elif kw:
+            why = f"与「{kw}」主力同类，作备选补充"
+        else:
+            why = "同一批检索结果里相关性最高的一件"
+        if kw:
+            seen_kw.add(kw)
+        items.append({
+            "role": roles[i] if i < len(roles) else "补充",
+            "name": it["name"],
+            "price": it.get("price") or 0,
+            "why": why,
+        })
+
+    plan = {
+        "title": f"给{recipient}的{occasion}",
+        "thesis": f"{len(items)} 件落在同一个使用场景：她每天都会碰到的那几样。",
+        "items": items,
+    }
+    budget_rows = [{"label": it["role"], "value": int(it.get("price") or 0)} for it in items]
+    order = {
+        "total": spent,
+        "budget": budget,
+        "eta": "以各商品页面为准",
+        "steps": ["确认方案", "确认寄语", "下单", "配送到此地址"],
+    }
+    return plan, budget_rows, order
+
+
+def build_compare(picked: list[dict], excluded: list[dict]) -> list[dict]:
+    """候选对比表：入选与排除**放在同一张表里**（否则看不出取舍）。"""
+    rows = []
+    for i, p in enumerate(picked[:5]):
+        rows.append({
+            "name": p["name"], "price": p.get("price") or 0,
+            "fit": 9 - i, "use": "入选", "tag": "入选",
+        })
+    for e in excluded[:5]:
+        rows.append({
+            "name": e["name"], "price": e.get("price") or 0,
+            "fit": 2, "use": "—", "tag": "排除",
+        })
+    return rows
+
+
+def build_message(state: dict, plan: dict, understanding: dict) -> dict:
+    """⑦ 寄语文案。
+
+    素材必须来自前面每一步的判断，不是通用祝福
+    （`.impeccable.md` 的「禁黑箱」在情感语境的翻译）。
+    本轮按规则拼 —— 它引用的是真实入选项与真实「当前理解」。
+    """
+    recipient = str(state.get("recipient") or "你")
+    items = plan.get("items") or []
+    names = "、".join([i["name"][:10] for i in items[:3]]) or "这份礼物"
+
+    text = (
+        f"{recipient}：\n\n"
+        f"这次挑的是{names}。\n\n"
+        f"{understanding.get('text') or ''}\n\n"
+        f"挑它们的时候我想的不是贵不贵，是你会不会真的用上。"
+        f"如果哪件你不需要，告诉我，我换。"
+    )
+    return {"tone": "真诚", "text": text}
+
+
+def build_supply(picked: list[dict], plan: dict) -> list[dict]:
+    """货源与配送：取自真实候选的 item_id（能指回具体商品）。"""
+    by_name = {p["name"]: p for p in picked}
+    out = []
+    for it in (plan.get("items") or []):
+        src = by_name.get(it["name"]) or {}
+        out.append({
+            "item": it["name"][:20],
+            "from": "淘宝",
+            "eta": "以商品页为准",
+            "note": f"item_id {str(src.get('item_id') or '')[:12]}" if src.get("item_id") else "",
+        })
+    return out

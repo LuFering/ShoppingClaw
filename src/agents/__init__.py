@@ -60,5 +60,9 @@ agent_manager.register_agent(MasterAgent)
 from src.agents.independent.planning.agent import PlanningAgent
 agent_manager.register_agent(PlanningAgent)
 
+# 送礼智能体：与 planning 并列的独立 agent，同一套注册方式。
+from src.agents.independent.gift.agent import GiftAgent
+agent_manager.register_agent(GiftAgent)
+
 agent_manager.init_all_agents()
 __all__=["agent_manager"]
