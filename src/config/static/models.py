@@ -78,6 +78,22 @@ DEFAULT_CHAT_MODEL_PROVIDERS:dict[str,ChatModelProvider]={
                 "google/gemma-4-31b-it:free",
                 "poolside/laguna-s-2.1:free",
             ],
-    )
+    ),
+    "BigModel":ChatModelProvider(
+            name="BigModel",
+            url="https://docs.bigmodel.cn/cn",
+            base_url="https://open.bigmodel.cn/api/paas/v4/",
+            default="glm-5.3-flash",
+            env="BIG_MODEL_API_KEY",
+            models=["glm-5.3-flash","glm-4.7","glm-4.6v","glm-4.5-air"],
+    ),
+   "TingFeng-Model":ChatModelProvider(
+            name="TingFeng-Model",
+            url="https://freeapi.tingfengai.art/",
+            base_url="https://freeapi.tingfengai.art/v1",
+            default="deepseek-v4-flash",
+            env="TINGFENG_KEY",
+            models=["deepseek-v4-flash"],
+    ), 
 }
 
