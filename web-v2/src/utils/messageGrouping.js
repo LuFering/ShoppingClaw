@@ -15,6 +15,49 @@ import MessageProcessor from '@/utils/messageProcessor'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 import { collapseConversationProcess } from '@/utils/conversationProcessGrouping'
 
+/**
+ * 把工具异常转成用户能懂的短句。
+ *
+ * 为什么需要：后端在工具失败时会把异常串作为 output 下发，
+ * 直接展示会暴露 Python 堆栈 / SQL 语句（实测界面上出现过
+ * `TypeError: find_archive() missing 1 required positional argument`）。
+ *
+ * 技术细节不丢 —— 仍保留在 tool_call_result.content 里，
+ * 展开工具详情可以看到完整信息；模型侧也是通过那条链路拿到细节。
+ */
+const friendlyError = (raw) => {
+  const text = String(raw || '').trim()
+  if (!text) return '执行失败'
+
+  // 常见异常归类
+  if (/missing \d+ required positional argument|unexpected keyword argument/i.test(text)) {
+    return '工具参数不匹配，请稍后重试'
+  }
+  if (/operator does not exist|asyncpg|sqlalchemy/i.test(text)) {
+    return '数据查询失败，请稍后重试'
+  }
+  if (/timeout|timed out|超时/i.test(text)) {
+    return '执行超时，请稍后重试'
+  }
+  if (/connection|network|unreachable|refused/i.test(text)) {
+    return '网络连接异常，请稍后重试'
+  }
+  if (/not found|不存在|未找到/i.test(text)) {
+    return '未找到相关数据'
+  }
+  if (/permission|forbidden|权限/i.test(text)) {
+    return '没有权限执行该操作'
+  }
+
+  // 无法归类：若像技术异常（含类名/括号/冒号堆栈特征）则给通用文案，
+  // 避免把内部细节抖出来；否则原样返回（可能是业务层的友好提示）。
+  const looksTechnical = /^[A-Z][A-Za-z]+Error|Traceback|File "|\bat \w+\./.test(text)
+  if (looksTechnical) return '执行失败，请稍后重试'
+
+  // 业务文案（如「查询失败: 未找到用户」）：截断过长内容即可
+  return text.length > 60 ? text.slice(0, 60) + '…' : text
+}
+
 /** SC 流式工具对象 → Yuxi 工具调用契约。 */
 export const toYuxiToolCall = (toolCall) => {
   if (!toolCall) return null
@@ -34,9 +77,10 @@ export const toYuxiToolCall = (toolCall) => {
           }
         }
       : {}),
-    ...(status === 'error' && rawOutput ? { error_message: String(rawOutput) } : {}),
-    // 后端 tool_error 事件携带的失败原因优先于上面的兜底
-    ...(toolCall.error_message ? { error_message: String(toolCall.error_message) } : {}),
+    // 失败时**不**透出原始 output（可能含 Python 堆栈），转成友好文案
+    ...(status === 'error' && rawOutput ? { error_message: friendlyError(rawOutput) } : {}),
+    // 后端 tool_error 事件携带的失败原因优先于上面的兜底（同样友好化）
+    ...(toolCall.error_message ? { error_message: friendlyError(toolCall.error_message) } : {}),
     ...(toolCall.display_label ? { display_label: toolCall.display_label } : {}),
     // 子智能体执行轨迹（调用工具 / 检索 RAG / 使用 Skill）必须透传到消息级 tool_calls。
     // 左侧对话里的子智能体卡片由 TaskTool 渲染，读的是消息级 toolCall.subagent_run；

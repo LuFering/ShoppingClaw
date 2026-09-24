@@ -37,8 +37,15 @@
       <div class="tool-calls-collapse-inner">
         <div class="tool-calls-panel">
           <div v-for="entry in displayEntries" :key="entry.key" class="tool-call-container">
+            <!-- 主智能体执行状态：编排轨迹（skill / rag / mcp / dispatch）。
+                 编排卡本身已隐藏，这里把它的状态挪进组内，避免那一栏空着。 -->
+            <OrchestrateStatusBlock
+              v-if="entry.type === 'tool' && isOrchestrate(entry.toolCall)"
+              :tool-call="entry.toolCall"
+              :is-active="isActive"
+            />
             <ReasoningBlockComponent
-              v-if="entry.type === 'reasoning'"
+              v-else-if="entry.type === 'reasoning'"
               :content="entry.content"
               :is-active="isActive && entry === displayEntries[displayEntries.length - 1]"
             />
@@ -61,6 +68,7 @@ import { ChevronDown, Atom } from 'lucide-vue-next'
 import { storeToRefs } from 'pinia'
 import { useAgentStore } from '@/stores/agent'
 import ReasoningBlockComponent from '@/components/ReasoningBlockComponent.vue'
+import OrchestrateStatusBlock from '@/components/ToolCallingResult/tools/OrchestrateStatusBlock.vue'
 import { ToolCallRenderer } from '@/components/ToolCallingResult'
 import {
   getToolCallId,
@@ -101,6 +109,12 @@ const displayEntries = computed(() =>
         toolCall
       }))
 )
+/** orchestrate 是隐藏卡，但其状态要作为「主智能体执行状态」渲染在组内。 */
+const isOrchestrate = (toolCall) => {
+  const id = toolCall?.name || toolCall?.function?.name || ''
+  return id === 'orchestrate' && Boolean(toolCall?.orchestration)
+}
+
 const hasReasoning = computed(() =>
   displayEntries.value.some((entry) => entry.type === 'reasoning')
 )
@@ -108,22 +122,22 @@ const hasReasoning = computed(() =>
 // 否则应保持逐行平铺（对标 Yuxi：summary 标题行 + 逐条明细同时可见）。
 // 旧实现是 `length > 0`，等于只要有工具就整体收成一条卡片，
 // 视觉上变成一个个重型折叠块，和「正文/工具交错」的轻量时间线相悖。
-const COLLAPSE_THRESHOLD = 5
-const shouldCollapseToolCalls = computed(
-  () => hasReasoning.value || displayEntries.value.length > COLLAPSE_THRESHOLD
-)
-const areToolCallsExpanded = ref(true)
+const COLLAPSE_THRESHOLD = 0
+// 一切工具组都可折叠 —— 对齐 Yuxi：`shouldCollapseToolCalls = displayEntries.length > 0`，
+// 即只要有内容就收成一个摘要行，而不是只在「工具超过 N 个」时才折叠。
+const shouldCollapseToolCalls = computed(() => displayEntries.value.length > COLLAPSE_THRESHOLD)
+
+// 初始折叠 —— 对齐 Yuxi（`areToolCallsExpanded = ref(false)`）。
+// 历史记录打开时是干净的摘要行；流式过程中由下面的 watch 自动展开。
+const areToolCallsExpanded = ref(false)
 
 watch(
-  [() => normalizedToolCalls.value.length, () => props.isActive],
-  ([, isActive]) => {
-    // 活跃时强制展开。
-    // 非活跃时**不再自动收起**：旧实现在「活跃→非活跃」和初始化时都强制置 false，
-    // 导致对话一结束「已调用 N 个工具」就自动折叠成一行摘要，刚看到的过程被收走。
-    // 现在保持用户当前状态（初始为展开），收起与否完全交给用户点击。
-    if (isActive) {
-      areToolCallsExpanded.value = true
-    }
+  () => props.isActive,
+  (isActive) => {
+    // 严格对齐 Yuxi 的 ToolCallsGroupComponent：
+    //   活跃（正在流式）→ 展开，让用户看见正在发生的调用
+    //   转为非活跃（本轮跑完 / 视线移到下一段）→ 收起
+    areToolCallsExpanded.value = Boolean(isActive)
   },
   { immediate: true }
 )

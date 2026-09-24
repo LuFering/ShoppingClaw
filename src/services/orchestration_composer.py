@@ -256,9 +256,15 @@ class SubagentRun:
     planned_tools: list[dict[str, Any]] = field(default_factory=list)
 
     def build(self) -> dict[str, Any]:
+        # ⚠️ 字段对齐前端契约（mock 阶段 TaskTool.vue 的真实消费字段）：
+        #   TaskTool 第一行读 `subagentRun.subagent_name`；mock 则靠
+        #   `arguments.subagent`（label）兜底。二者任一缺失都会让卡片回退成
+        #   「调用子智能体」这种工具名，所以这里两个都给上，与 mock 完全等价。
+        _label = display_name(self.slug)
         return {
             "slug": self.slug,
-            "display_name": display_name(self.slug),
+            "subagent_name": _label,
+            "display_name": _label,
             "task": self.task,
             "status": self.status,
             "call_id": self.call_id,
@@ -274,13 +280,55 @@ class SubagentRun:
                 item["done"] = True
                 return
 
-    def add_tool(self, name: str, detail: str = "") -> None:
-        """记录一个已执行完的工具，并把同名 plannedTool 标 done。"""
-        self.tools.append({"name": name, "detail": detail, "done": True})
-        for p in self.planned_tools:
-            if p.get("name") == name:
-                p["done"] = True
-                break
+    def add_tool(
+        self,
+        name: str,
+        detail: str = "",
+        *,
+        duration_ms: int | None = None,
+        status: str = "done",
+        call_id: str = "",
+    ) -> None:
+        """记录一个子智能体内部真实执行过的工具，并把同名 plannedTool 标 done。
+
+        同一 `call_id` 重复上报时**原地更新**，不重复追加 —— sse_monitor 会对
+        同一个调用先发 tool_start 再发 tool_complete，两次都 append 的话
+        卡片上就会同名出现两行。
+        """
+        target = None
+        if call_id:
+            for t in self.tools:
+                if t.get("call_id") == call_id:
+                    target = t
+                    break
+        if target is None:
+            for t in self.tools:
+                if t.get("name") == name and not t.get("done"):
+                    target = t
+                    break
+
+        if target is not None:
+            if detail:
+                target["detail"] = detail
+            target["done"] = status != "running"
+            target["status"] = status
+            if duration_ms is not None:
+                target["duration_ms"] = duration_ms
+            if call_id:
+                target["call_id"] = call_id
+        else:
+            item = {"name": name, "detail": detail, "done": status != "running", "status": status}
+            if duration_ms is not None:
+                item["duration_ms"] = duration_ms
+            if call_id:
+                item["call_id"] = call_id
+            self.tools.append(item)
+
+        if status != "running":
+            for p in self.planned_tools:
+                if p.get("name") == name:
+                    p["done"] = True
+                    break
 
     def plan_tool(self, name: str, detail: str = "") -> None:
         self.planned_tools.append({"name": name, "detail": detail, "done": False})
@@ -484,7 +532,11 @@ class Orchestrator:
         return _tool_chunk(
             tool_call_id=call_id,
             function=TOOL_TASK,
-            args={"subagent_type": run.slug, "description": run.task},
+            args={
+                "subagent_type": run.slug,
+                "subagent": display_name(run.slug),
+                "description": run.task,
+            },
             status="calling",
             message_id=self.narrator.current(),
             extra={"subagent_run": run.build()},
@@ -496,19 +548,23 @@ class Orchestrator:
         return {
             "status": "thinking_process",
             "event": "tool_result",
-            "tool_call": {
-                "tool_call_id": call_id,
-                "function": TOOL_TASK,
-                "name": TOOL_TASK,
-                "args": {"subagent_type": run.slug, "description": run.task},
-                "content": json.dumps(
-                    {"type": "subagent_run", "subagent_run": final}, ensure_ascii=False
-                ),
-                "status": "completed",
-                "duration_ms": duration_ms,
-                "message_id": self.narrator.current(),
-                "subagent_run": final,
-            },
+                "tool_call": {
+                    "tool_call_id": call_id,
+                    "function": TOOL_TASK,
+                    "name": TOOL_TASK,
+                    "args": {
+                        "subagent_type": run.slug,
+                        "subagent": display_name(run.slug),
+                        "description": run.task,
+                    },
+                    "content": json.dumps(
+                        {"type": "subagent_run", "subagent_run": final}, ensure_ascii=False
+                    ),
+                    "status": "completed",
+                    "duration_ms": duration_ms,
+                    "message_id": self.narrator.current(),
+                    "subagent_run": final,
+                },
         }
 
     # ── subagent_drill ───────────────────────────────────────────────
@@ -526,7 +582,7 @@ class Orchestrator:
         """
         return {
             "status": "subagent_drill",
-            "slug": display_name(slug),
+            "slug": slug,
             "action": action,
             "description": description,
             "message_id": self.narrator.current(),
@@ -554,6 +610,7 @@ def fill_from_subagent_directory(
     *,
     available_slugs: Iterable[str],
     selected: Iterable[tuple[str, str]] = (),
+    tool_calls: Iterable[str] = (),
 ) -> OrchestrationTrace:
     """用「注册中心里的真实子智能体」填 skills / rag / dispatch。
 
@@ -568,22 +625,73 @@ def fill_from_subagent_directory(
     所以这里不写任何「要不要派」的判断。`selected` 为空是异常情形，
     仍给出中性描述而不是辩解式文案。
     """
-    trace.skills = [
-        {"id": "dispatch_orchestration", "name": "派遣编排", "detail": "决定派谁、串行还是并行"},
-    ]
-    trace.rag = [
-        {
-            "id": "subagent_directory",
-            "collection": "agent",
-            "name": "子智能体目录",
-            "detail": f"可派遣：{', '.join(available_slugs)}",
-        },
-        {"id": "user_profile", "collection": "user", "name": "用户长期画像", "detail": "偏好 / 忌讳 / 尺码 / 预算 / 收货地"},
-        {"id": "archive_index", "collection": "archive", "name": "购物档案索引", "detail": "决定复用还是新建档案"},
-    ]
+    # ═══ 三栏按**真实调用事实**填充（2026-09-22 重写）═══
+    # 此前这里是硬编码常量，其中两个 MCP 服务在项目里根本不存在。
+    # 现在：调用过什么就显示什么，没调用就是空 —— 宁可显示「本轮未检索」，
+    # 也不展示没发生的事。
+    _calls = {str(c) for c in tool_calls}
+
+    # ═══ 三栏的语义分工（2026-09-22 厘清）═══
+    #   skills = 用了什么**编排手艺**（方法论层）
+    #   rag    = 查了什么**资料**（数据层）
+    #   mcp    = 调了什么**外部服务**
+    # 三者不重复 —— 一次工具调用只归其中一栏。
+
+    # Skill：本轮采用的编排手艺。调 SOP 检索 = 用了「派遣编排」这门手艺。
+    if "query_orchestration_sop" in _calls:
+        trace.skills.append(
+            {
+                "id": "dispatch_orchestration",
+                "name": "派遣编排",
+                "detail": "按场景方法论决定派谁、串行还是并行",
+            }
+        )
+
+    # RAG：本轮检索过的资料（向量库 + 直读配置）
+    if "query_orchestration_sop" in _calls:
+        trace.rag.append(
+            {
+                "id": "orchestration_sop",
+                "collection": "orchestration_sop",
+                "name": "编排 SOP",
+                "detail": "送礼 / 对比 / 复盘 / 澄清的编排模板",
+            }
+        )
+    if "list_subagents" in _calls:
+        trace.rag.append(
+            {
+                "id": "subagent_directory",
+                "collection": "config",
+                "name": "子智能体目录",
+                "detail": f"直读配置，可派遣：{', '.join(available_slugs)}",
+            }
+        )
+    if "find_archive" in _calls:
+        trace.rag.append(
+            {
+                "id": "archive_index",
+                "collection": "shopping_decisions",
+                "name": "购物档案索引",
+                "detail": "判断走复盘还是重新选",
+            }
+        )
+
+    # MCP：本轮真实调用过的 MCP 工具
+    # ⚠️ 2026-09-22 删除了 sc.subagent-registry / sc.session-memory 两条 ——
+    #    它们**在项目里不存在**，是前端 mock 时代契约文档里的虚构服务。
+    _MCP_TOOLS = {
+        "taobao_searchMaterial": ("taobao_mcp", "淘宝商品搜索"),
+        "taobao_getItemInfo": ("taobao_mcp", "淘宝商品详情"),
+        "taobao_convertLink": ("taobao_mcp", "淘宝转链"),
+        "pdd_goods_search": ("taobao_mcp", "拼多多商品搜索"),
+        "pdd_goods_detail": ("taobao_mcp", "拼多多商品详情"),
+        "pdd_goods_recommend": ("taobao_mcp", "拼多多商品推荐"),
+        "pdd_goods_prom_url": ("taobao_mcp", "拼多多转链"),
+    }
     trace.mcp = [
-        {"id": "subagent-registry", "server": "sc.subagent-registry", "method": "list", "name": "子智能体注册中心", "detail": "可派遣的子智能体与健康状态"},
-        {"id": "session-memory", "server": "sc.session-memory", "method": "recall", "name": "会话记忆", "detail": "取回本轮上下文与档案绑定"},
+        {"id": server, "server": server, "name": name, "detail": f"已调用 {tool_name}"}
+        for tool_name, (server, name) in _MCP_TOOLS.items()
+        if tool_name in _calls
     ]
 
     selected = list(selected)

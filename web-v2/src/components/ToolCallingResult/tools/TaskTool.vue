@@ -71,7 +71,41 @@
 
     <template #result="{ resultContent }">
       <div class="task-result">
+        <!-- 结构化结果（子智能体输出协议）走摘要，避免把原始 JSON 甩给用户 -->
+        <div v-if="parsedOutput" class="out-summary">
+          <p v-if="parsedOutput.summary" class="out-lead">{{ parsedOutput.summary }}</p>
+
+          <ul v-if="outRows.length" class="out-list">
+            <li v-for="(r, i) in outRows" :key="`or-${i}`">
+              <span class="out-key">{{ r.key }}</span>
+              <span class="out-val">{{ r.val }}</span>
+            </li>
+          </ul>
+
+          <div v-if="outTradeoffs.length" class="out-block">
+            <span class="out-label">取舍</span>
+            <ul class="out-list out-list--compact">
+              <li v-for="(t, i) in outTradeoffs" :key="`ot-${i}`">
+                <span class="out-val">{{ t }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="outRisks.length" class="out-block">
+            <span class="out-label">风险提示</span>
+            <ul class="out-list out-list--compact">
+              <li v-for="(r, i) in outRisks" :key="`ork-${i}`">
+                <span class="out-val">{{ r }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <p v-if="noPickReason" class="out-none">未出推荐：{{ noPickReason }}</p>
+        </div>
+
+        <!-- 非结构化结果（自由文本 / markdown）沿用原渲染 -->
         <MdPreview
+          v-else
           :modelValue="String(resultContent)"
           :theme="theme"
           previewTheme="github"
@@ -90,6 +124,72 @@ import { MdPreview } from 'md-editor-v3'
 import 'md-editor-v3/lib/preview.css'
 import { useThemeStore } from '@/stores/theme'
 import { parseToolCallArgs, getToolCallDisplayStatus, getToolName } from '../toolRegistry'
+
+/** 结果原文 —— 与 BaseToolCall 的 resultContent 取值口径一致。 */
+const toolResultContent = computed(
+  () =>
+    props.toolCall.tool_call_result?.content ??
+    props.toolCall.result ??
+    props.toolCall.output ??
+    props.toolCall.result_preview ??
+    null
+)
+
+/** 尝试把结果解析成子智能体输出协议；失败返回 null（走 markdown 回退）。 */
+const parsedOutput = computed(() => {
+  const raw = toolResultContent.value
+  if (!raw || typeof raw !== 'string') return null
+  const t = raw.trim()
+  if (!t.startsWith('{')) return null
+  try {
+    const obj = JSON.parse(t)
+    return obj && typeof obj === 'object' ? obj : null
+  } catch {
+    return null
+  }
+})
+
+const outData = computed(() => {
+  const o = parsedOutput.value
+  if (!o) return {}
+  return o.data && typeof o.data === 'object' ? o.data : {}
+})
+
+const outRows = computed(() => {
+  const d = outData.value
+  const rows = []
+  if (Array.isArray(d.picks) && d.picks.length) {
+    rows.push({ key: '推荐候选', val: `${d.picks.length} 款` })
+  }
+  if (Array.isArray(d.rejected) && d.rejected.length) {
+    rows.push({ key: '已排除', val: `${d.rejected.length} 项` })
+  }
+  return rows
+})
+
+const outTradeoffs = computed(() => {
+  const d = outData.value
+  if (!Array.isArray(d.tradeoffs)) return []
+  return d.tradeoffs
+    .map((t) => {
+      const reason = String((t && t.reason) || '').trim()
+      return reason.length > 60 ? `${reason.slice(0, 60)}…` : reason
+    })
+    .filter(Boolean)
+})
+
+const outRisks = computed(() => {
+  const d = outData.value
+  if (!Array.isArray(d.risks)) return []
+  return d.risks.map((r) => String(r || '').trim()).filter(Boolean)
+})
+
+const noPickReason = computed(() => {
+  const d = outData.value
+  const picks = Array.isArray(d.picks) ? d.picks : []
+  if (picks.length) return ''
+  return String(d.no_recommendation_reason || '').trim()
+})
 
 const props = defineProps({
   toolCall: {

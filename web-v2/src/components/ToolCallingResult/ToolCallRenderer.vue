@@ -53,8 +53,10 @@ import ComparisonTableTool from './tools/ComparisonTableTool.vue'
 import ReminderListTool from './tools/ReminderListTool.vue'
 import ReviewCardTool from './tools/ReviewCardTool.vue'
 
-// 主智能体编排（编排层执行状态：Skill / RAG / MCP / 派遣决策）
-import OrchestrateTool from './tools/OrchestrateTool.vue'
+// 主智能体编排卡已于 2026-09-21 下线渲染（见 toolRegistry 的 HIDDEN_TOOL_CALL_IDS）。
+// 组件文件保留在 ./tools/OrchestrateTool.vue，后续接入真实编排数据时可恢复：
+// 把 'orchestrate' 从 HIDDEN_TOOL_CALL_IDS 移除，并恢复下面两行。
+// import OrchestrateTool from './tools/OrchestrateTool.vue'
 
 import { getToolCallId, isHiddenToolCall } from './toolRegistry'
 
@@ -148,8 +150,7 @@ const TOOL_RENDERERS = {
   set_reminder: ReminderListTool,
   write_review: ReviewCardTool,
 
-  // ── 主智能体编排（编排层自己的执行状态）─────────────────
-  orchestrate: OrchestrateTool,
+  // ── 主智能体编排卡已下线（2026-09-21），见上方 import 处的说明 ──
 
   // ── 主智能体反问澄清（契约里叫 ask_user，渲染复用 Yuxi 的提问组件）──
   ask_user: AskUserQuestionTool,

@@ -130,7 +130,7 @@ export const TOOL_NAME_MAP = {
   search_file: '搜索知识库文件',
   search_file_content: '搜索文件内容',
   write_todos: '更新任务清单',
-  task: '调用子智能体',
+  task: '派遣子智能体',
   subagent_start: '启动子智能体',
   subagent_status: '查询子智能体',
   subagent_events: '查看子智能体事件',
@@ -180,11 +180,48 @@ export const TOOL_NAME_MAP = {
   query_category_knowledge: '查询品类知识',
   taobao_getItemInfo: '获取淘宝商品详情',
   taobao_searchMaterial: '搜索淘宝素材',
+  taobao_convertLink: '生成淘宝链接',
+  pdd_goods_detail: '获取拼多多商品详情',
+  pdd_goods_recommend: '推荐拼多多商品',
+  pdd_goods_prom_url: '生成拼多多链接',
   get_user_profile: '读取用户画像',
-  get_user_shopping_context: '读取购物上下文'
+  get_user_shopping_context: '读取购物上下文',
+
+  // ── 编排层工具（2026-09-22 新增）──
+  // 主智能体在派遣前调用，决定「派谁、怎么派、有没有档案」。
+  // 缺了映射会直接透出英文 id（实测：折叠行显示「调用: orchestrate」）。
+  orchestrate: '主智能体编排',
+  list_subagents: '查看子智能体目录',
+  query_orchestration_sop: '检索编排方法论',
+  find_archive: '查购物档案',
+
+  // ── 购物档案工具（购后助手专属）──
+  save_to_archive: '存入购物档案',
+  update_record_phase: '推进档案阶段',
+  set_reminder: '设置提醒',
+  write_review: '写入使用复盘',
+  save_user_preference: '保存用户偏好',
+  recall_past_decisions: '检索历史决策'
 }
 
 // Keep intentionally hidden tool calls centralized so group summaries and renderers stay consistent.
+//
+// 2026-09-22：orchestrate 从隐藏名单移出。
+//
+// 演进过程：
+//   · 2026-09-21 曾隐藏它 —— 当时 skills/rag/mcp 三栏是后端硬编码常量，
+//     其中两个 MCP 服务在项目里根本不存在，展示出来等于编造活动报告。
+//   · 2026-09-22 后端已接真实数据：三栏由三个编排工具
+//     （list_subagents / query_orchestration_sop / find_archive）
+//     的真实调用填充，没调用就是空数组。数据不再虚假，可以展示。
+//
+// ⚠️ 必须移出而非仅改渲染：`normalizeToolCalls` 默认 includeHidden=false
+//    会把隐藏项过滤掉 —— 留在名单里的话，已建好的 OrchestrateStatusBlock
+//    永远不会被渲染。
+//
+// 展示方式：不走独立大卡片，由 ToolCallsGroupComponent 用
+// OrchestrateStatusBlock 渲染成**工具组内的一行**「主智能体执行状态」。
+
 export const HIDDEN_TOOL_CALL_IDS = ['present_artifacts']
 
 export const getToolCallId = (toolCall) => toolCall?.name || toolCall?.function?.name || ''

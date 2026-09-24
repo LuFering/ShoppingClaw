@@ -104,6 +104,46 @@ def _truncate(value, limit: int = 3000):
     return value if len(text) <= limit else text[:limit] + f"... ({len(value)} chars total)"
 
 
+# 结构化工具的结果上限。这些工具返回的是 JSON（子智能体输出协议），
+# 按 3000 硬砍会直接把 JSON 砍碎 —— 实测 task 的 PrePurchaseOutput 是
+# 3022 字符，在 3000 处断掉后 json.loads 失败，tradeoffs / risks / rejected
+# （都排在 picks 之后）全部丢失。宁可让单个事件大一点，也不能交残缺数据。
+_STRUCTURED_TOOL_LIMIT = 30000
+_STRUCTURED_TOOLS = {TOOL_TASK}
+
+
+def _lead_snippet(text: str, limit: int = 72) -> str:
+    """从 tradeoffs.reason 里取一段适合摆在卡片前的解说。
+
+    reason 的典型写法是「结论词。细节铺开」：
+
+        综合首选。漫步者官方旗舰店、蓝牙5.4 芯片、可折叠收纳、超长续航，
+        降噪深度与舒适度在 400 元档均衡且品牌售后体系成熟，1500 元预算下无压力。
+
+    注意「结论词」那句（"综合首选。"）信息量最低，所以**不能**按句末标点切，
+    否则正好丢掉全部细节。改为按长度截到第一个自然停顿点（逗号/顿号/分号），
+    取一段 30-72 字的可读解说。
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if len(t) <= limit:
+        return t
+
+    # 在 limit 附近找最近的停顿点，避免把词切断
+    head = t[:limit]
+    for punct in ("，", "、", "；", "。", ",", ";", " "):
+        idx = head.rfind(punct)
+        if idx >= 20:  # 至少留 20 字，太短就退回硬截
+            return head[: idx + 1]
+    return head.rstrip() + "…"
+
+
+def _tool_output_limit(tool_name: str) -> int:
+    """按工具类型决定结果截断上限。"""
+    return _STRUCTURED_TOOL_LIMIT if tool_name in _STRUCTURED_TOOLS else 3000
+
+
 def _slug_from_task_args(raw_args) -> str:
     """从 `task` 工具调用的 args 里取子智能体 slug。
 
@@ -459,6 +499,10 @@ async def stream_agent_chat(
     # 要按 id 反查并下发终态 subagent_run。放在后面虽然靠闭包延迟解析
     # 也能跑，但那是在依赖「调用晚于定义」的隐式顺序，太脆。
     _subagent_runs: dict[str, object] = {}
+    # 子智能体的 middleware 事件可能先于 task tool_start 到达；先缓存，
+    # 等真实 task_run 建立后再回填，避免实时卡片永远没有内部轨迹。
+    _pending_subagent_events: list[dict] = []
+    _pending_subagent_progress: dict[str, dict] = {}
 
     def emit_plan_from_state(agent_state: dict) -> bytes | None:
         steps = _todos_to_plan_steps(agent_state.get("todos") if isinstance(agent_state, dict) else None)
@@ -486,13 +530,17 @@ async def stream_agent_chat(
                 args = json.loads(args) if args.strip().startswith(("{", "[")) else {"input": args}
             except Exception:
                 args = {"input": args}
+        # ═══ 2026-09-22：args 补全后会重发本事件，此时**保留首次的 started_at** ═══
+        # 否则 duration_ms 会从「args 补全那一刻」重新计时，严重低估真实耗时。
+        _prev = active_tool_calls.get(tool_call_id)
         active_tool_calls[tool_call_id] = {
             "tool_call_id": tool_call_id,
             "function": function,
-            "args": args,
-            "started_at": asyncio.get_event_loop().time(),
+            # 用最新的 args（补全后的那份），首次时即为当前值
+            "args": args or (_prev or {}).get("args", {}),
+            "started_at": (_prev or {}).get("started_at") or asyncio.get_event_loop().time(),
             # 记录该工具调用所属的 AI 消息 id，供完成事件复用
-            "message_id": message_id,
+            "message_id": message_id or (_prev or {}).get("message_id"),
         }
         emitted_tool_call_ids.add(tool_call_id)
         meta_info = _tool_meta(function)
@@ -516,12 +564,12 @@ async def stream_agent_chat(
         # 同理 orchestration 字段由 _synthesize_orchestration 单独走。
         if subagent_run is not None:
             _tool_call_payload["subagent_run"] = subagent_run
-        return make_chunk(
-            status="thinking_process",
-            event="tool_call",
-            tool_call=_tool_call_payload,
-            meta=meta,
-        )
+        return _emit_thinking_payload({
+            "status": "thinking_process",
+            "event": "tool_call",
+            "tool_call": _tool_call_payload,
+            "meta": meta,
+        })
 
     def emit_tool_result(tool_msg: ToolMessage) -> bytes:
         tool_call_id = str(getattr(tool_msg, "tool_call_id", "") or uuid.uuid4())
@@ -532,23 +580,14 @@ async def stream_agent_chat(
         if started_at:
             duration_ms = int((asyncio.get_event_loop().time() - started_at) * 1000)
         meta_info = _tool_meta(function)
-        # 记录完成的工具调用（持久化用）
-        _completed_tool_calls.append({
-            "id": tool_call_id,
-            "name": function,
-            "args": cached.get("args", {}),
-            "status": "completed",
-            "duration_ms": duration_ms,
-            "icon": meta_info.get("icon"),
-            "category": meta_info.get("category"),
-        })
+        # 记录完成的工具调用（持久化在 _emit_thinking_payload 中按 id 合并）
         _done_payload = {
             "tool_call_id": tool_call_id,
             "function": function,
             "name": function,
             "args": cached.get("args", {}),
-            "content": _truncate(getattr(tool_msg, "content", ""), 3000),
-            "output": _truncate(getattr(tool_msg, "content", ""), 3000),
+            "content": _truncate(getattr(tool_msg, "content", ""), _tool_output_limit(function)),
+            "output": _truncate(getattr(tool_msg, "content", ""), _tool_output_limit(function)),
             "status": "completed",
             "duration_ms": duration_ms,
             "tool_meta": meta_info,
@@ -556,6 +595,9 @@ async def stream_agent_chat(
             # 完成事件沿用 start 时记录的 message_id，保证同一工具
             # 的 start/complete 归属同一条 AI 消息
             "message_id": cached.get("message_id"),
+            "tool_meta": meta_info,
+            "icon": meta_info.get("icon"),
+            "category": meta_info.get("category"),
         }
         # ═══ task 完成：把终态 subagent_run 一起下发 ═══
         # 否则 subagent_run 永远停在 start 时那份「running」快照，
@@ -564,12 +606,12 @@ async def stream_agent_chat(
             _final_run = _subagent_runs.get(tool_call_id)
             if _final_run is not None:
                 _done_payload["subagent_run"] = _final_run.build()  # type: ignore[attr-defined]
-        return make_chunk(
-            status="thinking_process",
-            event="tool_result",
-            tool_call=_done_payload,
-            meta=meta,
-        )
+        return _emit_thinking_payload({
+            "status": "thinking_process",
+            "event": "tool_result",
+            "tool_call": _done_payload,
+            "meta": meta,
+        })
 
     try:  # 外层 try: 包裹整个业务逻辑,捕获异常
         conv_repo = None
@@ -654,29 +696,188 @@ async def stream_agent_chat(
         # 思考过程持久化：累积整个流式过程中的思考数据
         _thinking_chunks: list[str] = []  # 推理文本片段
         _completed_tool_calls: list[dict] = []  # 工具调用完成记录
+        agent_state: dict = {}
 
         def _collect_thinking_event(evt: dict) -> None:
-            """把自定义 thinking_process 事件同步进持久化缓冲（修复过程组历史丢失）。"""
-            etype = evt.get("event")
-            if etype == "thinking":
-                c = evt.get("content")
-                if c:
-                    _thinking_chunks.append(str(c))
-            elif etype == "tool_call":
-                tc = evt.get("tool_call") or {}
-                tcid = str(tc.get("tool_call_id") or "")
-                if tcid and any(x.get("id") == tcid for x in _completed_tool_calls):
-                    return
-                _completed_tool_calls.append({
-                    "id": tcid or str(uuid.uuid4()),
-                    "name": tc.get("function") or tc.get("name") or "unknown",
-                    "args": tc.get("args") or {},
-                    "status": tc.get("status") or "completed",
-                    "duration_ms": tc.get("duration_ms"),
-                    "icon": tc.get("icon"),
-                    "category": tc.get("category"),
-                })
-        # ═══ 编排合成器：维护气泡边界 + 合成 orchestrate/task 卡 ═══
+            """收集思考/工具事件，按 tool_call_id 原地合并成可落库快照。"""
+            raw_type = evt.get("event") or evt.get("type") or ""
+            raw_type = getattr(raw_type, "value", raw_type)
+            event_type = str(raw_type).lower()
+            if "." in event_type:
+                event_type = event_type.rsplit(".", 1)[-1]
+
+            if event_type in ("thinking", "reasoning"):
+                content = evt.get("content")
+                if content:
+                    _thinking_chunks.append(str(content))
+                return
+
+            if event_type not in (
+                "tool_call",
+                "tool_result",
+                "tool_start",
+                "tool_complete",
+                "tool_error",
+                "tool_failed",
+            ):
+                return
+
+            tool = dict(evt.get("tool_call") or {})
+            if not tool:
+                tool = {
+                    "tool_call_id": evt.get("tool_call_id") or evt.get("call_id") or evt.get("id"),
+                    "function": evt.get("tool_name") or evt.get("function") or evt.get("name"),
+                    "name": evt.get("tool_name") or evt.get("function") or evt.get("name"),
+                    "args": evt.get("arguments") or evt.get("args") or {},
+                    "status": evt.get("status"),
+                    "duration_ms": evt.get("duration_ms"),
+                    "output": evt.get("result_content") or evt.get("output") or evt.get("result_preview"),
+                    "subagent_run": evt.get("subagent_run"),
+                    "orchestration": evt.get("orchestration"),
+                    "message_id": evt.get("message_id"),
+                }
+
+            tool_call_id = str(
+                tool.get("tool_call_id") or tool.get("id") or evt.get("tool_call_id") or evt.get("call_id") or ""
+            )
+            name = tool.get("function") or tool.get("name") or evt.get("tool_name") or "unknown"
+            snapshot = {
+                "id": tool_call_id or str(uuid.uuid4()),
+                "tool_call_id": tool_call_id,
+                "name": name,
+                "function": name,
+                "args": tool.get("args") or tool.get("arguments") or {},
+                "status": tool.get("status") or evt.get("status") or ("completed" if event_type in ("tool_result", "tool_complete") else "calling"),
+                "duration_ms": tool.get("duration_ms") if tool.get("duration_ms") is not None else evt.get("duration_ms"),
+                "output": tool.get("output") if tool.get("output") is not None else tool.get("content"),
+                "result_preview": tool.get("result_preview") or evt.get("result_preview"),
+                "message_id": tool.get("message_id") or evt.get("message_id"),
+                "subagent_run": tool.get("subagent_run") or evt.get("subagent_run"),
+                "orchestration": tool.get("orchestration") or evt.get("orchestration"),
+                "drill": tool.get("drill") or evt.get("drill"),
+                "tool_meta": tool.get("tool_meta") or evt.get("tool_meta"),
+                "icon": tool.get("icon") or evt.get("icon"),
+                "category": tool.get("category") or evt.get("category"),
+            }
+            existing = next(
+                (
+                    item
+                    for item in _completed_tool_calls
+                    if tool_call_id and str(item.get("id") or item.get("tool_call_id") or "") == tool_call_id
+                ),
+                None,
+            )
+            if existing is None:
+                _completed_tool_calls.append(snapshot)
+                return
+
+            for key, value in snapshot.items():
+                if value is not None and value != "":
+                    existing[key] = value
+
+        def _emit_thinking_payload(payload: dict) -> bytes:
+            """Collect a thinking payload before writing it to the replay buffer."""
+            if payload.get("status") == "thinking_process" and payload.get("event"):
+                _collect_thinking_event(payload)
+            return make_chunk(**payload)
+        # 已落盘的 tool_call_id —— 防止流内 flush 与收尾 flush 重复写同一条
+        _persisted_tc_ids: set[str] = set()
+
+        async def _flush_thinking_by_bubble(*, repo=None, live: bool = False) -> None:
+            """把思考/工具事件**按气泡切分**落盘，保持与实时流一致的顺序。
+
+            与 _save_thinking_snapshot 的区别：后者把整轮打包成一条、追加在末尾，
+            导致刷新后过程全堆在最底端；这里按 toolCalls[].message_id（气泡 id）
+            分组，一个气泡写一条，组间顺序 = 首次出现顺序。
+
+            这样前端 messageGrouping 的 seed=message_id 才能正常工作
+            （其设计本就是「同 message_id 归并、不同 message_id 切开」）。
+            """
+            groups: dict[str, list[dict]] = {}
+            for item in _completed_tool_calls:
+                cid = str(item.get("id") or item.get("tool_call_id") or "")
+                if cid and cid in _persisted_tc_ids:
+                    continue
+                bid = str(item.get("message_id") or "") or "round-1-s0"
+                groups.setdefault(bid, []).append(dict(item))
+
+            if not groups:
+                return
+
+            target_repo = repo or conv_repo
+            # 推理文本只随**第一组**落盘，避免每组重复写一遍
+            pending_reasoning = [c for c in _thinking_chunks if c]
+            first = True
+
+            for bid, items in groups.items():
+                msg = {
+                    "role": "system",
+                    "type": "thinking",
+                    "content": "",
+                    "message_id": bid,
+                    "thinkingProcess": {
+                        "steps": (
+                            [{"type": "thinking", "content": c} for c in pending_reasoning]
+                            if first
+                            else []
+                        ),
+                        "planSteps": _todos_to_plan_steps(agent_state.get("todos")) or [],
+                        "toolCalls": items,
+                        "live": live,
+                    },
+                    "timestamp": _now_iso(),
+                }
+                first = False
+                if target_repo:
+                    try:
+                        await target_repo.add_message(thread_id, msg)
+                    except Exception as exc:
+                        logging.warning(f"保存思考过程到 PostgreSQL 失败: {exc}")
+                try:
+                    await _store_bridge.add_message(thread_id, msg)
+                except Exception as exc:
+                    logging.warning(f"保存思考过程到桥接存储失败（忽略）: {exc}")
+
+                for item in items:
+                    cid = str(item.get("id") or item.get("tool_call_id") or "")
+                    if cid:
+                        _persisted_tc_ids.add(cid)
+
+        async def _save_thinking_snapshot(*, repo=None, live: bool = False) -> None:
+            """保存当前思考快照 —— 保留给异常/断流路径（流内未 flush 时兜底）。
+
+            正常收尾走 _flush_thinking_by_bubble（按气泡切分）；本函数只在
+            断流等异常路径下被调用，此时顺序已无法保证，但至少不丢数据。
+            """
+            _pending = [
+                item for item in _completed_tool_calls
+                if str(item.get("id") or item.get("tool_call_id") or "") not in _persisted_tc_ids
+            ]
+            if not (_thinking_chunks or _pending):
+                return
+            thinking_msg = {
+                "role": "system",
+                "type": "thinking",
+                "content": "",
+                "thinkingProcess": {
+                    "steps": [{"type": "thinking", "content": c} for c in _thinking_chunks],
+                    "planSteps": _todos_to_plan_steps(agent_state.get("todos")) or [],
+                    "toolCalls": _pending,
+                    "live": live,
+                },
+                "timestamp": _now_iso(),
+            }
+            target_repo = repo or conv_repo
+            if target_repo:
+                try:
+                    await target_repo.add_message(thread_id, thinking_msg)
+                except Exception as exc:
+                    logging.warning(f"保存思考过程到 PostgreSQL 失败: {exc}")
+            try:
+                await _store_bridge.add_message(thread_id, thinking_msg)
+            except Exception as exc:
+                logging.warning(f"保存思考过程到桥接存储失败（忽略）: {exc}")
+
         # 契约规则：一个气泡 = 一段前置文本 + 它引出的那个状态块（tool_start）。
         # 只有「即将发 tool_start」时才推进气泡 id，纯文本段一律复用当前 id。
         # 这条规则与 Yuxi 的 _stream_message_id（同 run 共享 id）等价，但把
@@ -701,28 +902,274 @@ async def stream_agent_chat(
         _ORCH_OWNED_TOOLS = {TOOL_ORCHESTRATE, TOOL_TASK}
 
         def _tool_bubble(tool_name: str, llm_message_id: str | None) -> str | None:
-            """决定一个工具事件该挂哪个气泡。"""
-            if tool_name in _ORCH_OWNED_TOOLS:
+            """决定一个工具事件该挂哪个气泡。
+
+            对齐 mock 的气泡契约（见 agentStreamMock.js 的 makeNarrator / runSubAgent）：
+              一个气泡 = 一段前置文本 + 它引出的那个状态块。
+            - orchestrate 卡与开篇正文共用 round-1-s1（不推进），
+              保证「文本先行 → 编排卡」作为同一段叙述呈现，不被切成两个气泡。
+            - task / 业务工具各自推进到新气泡（round-1-s2 / s3 / …），
+              让「状态前导文本 + 该状态块」自然成对、呈现交错节奏，
+              不再把所有卡片堆进同一个气泡、也不再让开篇正文漂在一个
+              LangChain run-id 气泡里与编排卡脱节（这正是「顺序被破坏」的根因）。
+            """
+            if tool_name == TOOL_ORCHESTRATE:
                 return orchestrator.bubble()
-            return llm_message_id or orchestrator.bubble()
+            return orchestrator.advance()
 
         # 真实 tool_call_id -> SubagentRun。task 完成时按它反查是谁跑完了。
         # （已在函数作用域顶部声明，这里不再重复定义，避免遮蔽。）
 
         # 子智能体「打算用哪些工具」的静态声明。
-        # 来源：subagents.yaml 里的工具清单。子智能体实现尚未落地时，
-        # 这份计划让卡片先有内容可渲染（plannedTools 先亮，tools 后补）。
+        # 来源：subagents.yaml 里的工具清单，必须与其逐字一致。
         _SUBAGENT_PLANNED_TOOLS: dict[str, list[str]] = {
-            "researcher": ["search_products", "get_product_full_detail", "get_products_specs_batch"],
-            "analyst": ["get_products_specs_extract", "filter_products_by_criteria", "query_category_knowledge"],
-            "critic": ["query_risk_policy"],
-            "memory_manager": [],
-            "pre_purchase": ["search_products", "get_product_full_detail"],
-            "post_purchase": [],
+            "pre_purchase": [
+                # 2026-09-21：JD 自建搜索链路下架（价格接口无授权 + 备用源余额耗尽）
+                "get_products_specs_extract",
+                "filter_products_by_criteria",
+                "query_category_knowledge",
+                "query_risk_policy",
+                "price_calculator",
+                # MCP 数据源（2026-09-21）—— 与 subagents.yaml 逐字一致
+                "taobao_searchMaterial",
+                "taobao_getItemInfo",
+                "taobao_convertLink",
+                "pdd_goods_search",
+                "pdd_goods_detail",
+                "pdd_goods_recommend",
+                "pdd_goods_prom_url",
+            ],
+            "post_purchase": [
+                "get_user_shopping_context",
+                "save_user_preference",
+                "recall_past_decisions",
+                "get_user_profile",
+                "save_to_archive",
+                "update_record_phase",
+                "set_reminder",
+                "write_review",
+            ],
         }
 
         def _planned_tools_for(slug: str) -> list[str]:
             return list(_SUBAGENT_PLANNED_TOOLS.get(slug) or [])
+
+        # ═══ 子智能体内部工具事件 → task 卡执行轨迹 ═══
+        def _event_kind(event: dict) -> str:
+            raw = event.get("type") or event.get("event") or ""
+            raw = getattr(raw, "value", raw)
+            value = str(raw).lower()
+            return value.rsplit(".", 1)[-1] if "." in value else value
+
+        def _find_subagent_run_for_event(event: dict):
+            """按显式父调用 id / slug / 唯一运行中任务归属内部工具。"""
+            candidate_ids = (
+                "parent_tool_call_id",
+                "parent_call_id",
+                "parent_task_call_id",
+                "task_call_id",
+                "subagent_call_id",
+                "subagent_tool_call_id",
+                "parent_run_id",
+                "parent_id",
+            )
+            for key in candidate_ids:
+                candidate = str(event.get(key) or "")
+                if candidate and candidate in _subagent_runs:
+                    return _subagent_runs[candidate]
+
+            nested = event.get("metadata") or event.get("meta") or {}
+            if isinstance(nested, dict):
+                for key in candidate_ids:
+                    candidate = str(nested.get(key) or "")
+                    if candidate and candidate in _subagent_runs:
+                        return _subagent_runs[candidate]
+
+            slug = str(
+                event.get("subagent_slug")
+                or event.get("subagent_type")
+                or event.get("agent_slug")
+                or ""
+            )
+            if slug:
+                for run in reversed(list(_subagent_runs.values())):
+                    if getattr(run, "slug", "") == slug and getattr(run, "status", "") == "running":
+                        return run
+
+            running = [
+                run for run in _subagent_runs.values()
+                if getattr(run, "status", "") == "running"
+            ]
+            return running[0] if len(running) == 1 else None
+
+        def _middleware_legacy_payload(event: dict, kind: str) -> dict:
+            """Convert a middleware event into the legacy shape used for persistence/upsert."""
+            is_complete = kind in ("tool_complete", "tool_error", "tool_failed")
+            status = event.get("status")
+            if not status:
+                status = "failed" if kind in ("tool_error", "tool_failed") else "completed" if is_complete else "calling"
+            tool_call = {
+                "tool_call_id": str(event.get("tool_call_id") or event.get("call_id") or event.get("id") or ""),
+                "function": event.get("tool_name") or event.get("function") or event.get("name") or "unknown",
+                "name": event.get("tool_name") or event.get("function") or event.get("name") or "unknown",
+                "args": event.get("arguments") or event.get("args") or {},
+                "status": status,
+                "duration_ms": event.get("duration_ms"),
+                "output": event.get("result_content") or event.get("output") or event.get("result_preview"),
+                "result_preview": event.get("result_preview"),
+                "message_id": event.get("message_id"),
+                "subagent_run": event.get("subagent_run"),
+                "orchestration": event.get("orchestration"),
+            }
+            return {
+                "status": "thinking_process",
+                "event": "tool_result" if is_complete else "tool_call",
+                "tool_call": tool_call,
+            }
+
+        def _task_run_update_payload(run) -> dict:
+            call_id = str(getattr(run, "call_id", "") or "")
+            cached = active_tool_calls.get(call_id, {})
+            args = cached.get("args") or {
+                "subagent_type": getattr(run, "slug", ""),
+                "subagent": display_name(getattr(run, "slug", "")),
+                "description": getattr(run, "task", ""),
+            }
+            return {
+                "status": "thinking_process",
+                "event": "tool_call",
+                "tool_call": {
+                    "tool_call_id": call_id,
+                    "function": TOOL_TASK,
+                    "name": TOOL_TASK,
+                    "args": args,
+                    "status": "calling",
+                    "message_id": cached.get("message_id") or orchestrator.bubble(),
+                    "subagent_run": run.build(),
+                },
+            }
+
+        def _apply_middleware_event_to_run(run, event: dict) -> None:
+            """把一条 middleware 工具事件写入指定 task 的执行轨迹。"""
+            kind = _event_kind(event)
+            nested_tool = event.get("tool_call") or {}
+            tool_name = str(
+                event.get("tool_name")
+                or event.get("function")
+                or event.get("name")
+                or nested_tool.get("function")
+                or nested_tool.get("name")
+                or "unknown"
+            )
+            raw_status = str(event.get("status") or "").lower()
+            if kind in ("tool_error", "tool_failed") or raw_status in ("failed", "error"):
+                run_status = "failed"
+            elif kind == "tool_complete" or raw_status in ("completed", "complete", "done", "success"):
+                run_status = "completed"
+            else:
+                run_status = "running"
+            child_call_id = str(
+                event.get("tool_call_id")
+                or event.get("call_id")
+                or event.get("id")
+                or ""
+            )
+            child_detail = str(
+                event.get("detail")
+                or event.get("description")
+                or event.get("result_preview")
+                or ""
+            )
+            run.add_tool(
+                tool_name,
+                child_detail,
+                duration_ms=event.get("duration_ms"),
+                status=run_status,
+                call_id=child_call_id,
+            )
+
+        def _flush_pending_subagent_events(run) -> None:
+            """task 卡建立后，回放此前尚未归属的 child tool 事件。"""
+            slug = str(getattr(run, "slug", "") or "")
+
+            # ═══ 2026-09-22：回填真实 slug ═══
+            # task 卡建立时 slug 常为空（真实的 subagent_type 来自
+            # subagent_progress 事件，而它可能早于 run 建立到达，
+            # 此时只被塞进 _pending_subagent_progress、slug 本身丢失）。
+            # 这里把 pending 里记录的真实 slug 写回 run，否则卡片
+            # 永远显示通用名「子智能体」——实测派给购后助手却显示成
+            # 「购前助手」，就是硬编码回退 + 这里没回填共同造成的。
+            if not slug:
+                for _p_slug, _p_ev in _pending_subagent_progress.items():
+                    _cand = str(
+                        _p_ev.get("subagent_type") or _p_ev.get("subagent_slug") or ""
+                    )
+                    if _cand:
+                        run.slug = _cand
+                        for _t in _planned_tools_for(_cand):
+                            if not any(p.get("name") == _t for p in run.planned_tools):
+                                run.plan_tool(_t)
+                        slug = _cand
+                        logging.info(f"[SubAgent] 回填 task 卡 slug: {_cand}")
+                        break
+
+            if slug not in _pending_subagent_progress:
+                return
+            for event in list(_pending_subagent_events):
+                _apply_middleware_event_to_run(run, event)
+            _pending_subagent_events.clear()
+            progress = _pending_subagent_progress.pop(slug, None)
+            if progress:
+                progress_event = str(progress.get("event") or "").lower()
+                if progress_event == "completed":
+                    run.status = "completed"
+                else:
+                    run.status = "running"
+
+        def _apply_subagent_progress_event(event: dict):
+            """把 task middleware 的 started/retry/completed 事件映射到 task 卡。"""
+            slug = str(event.get("subagent_type") or event.get("subagent_slug") or "")
+            run = _find_subagent_run_for_event(event)
+            if run is None:
+                if slug:
+                    _pending_subagent_progress[slug] = dict(event)
+                return None
+
+            # ═══ 2026-09-22：回填真实 slug ═══
+            # 这是 slug 进入 run 的**唯一机会** —— task 卡先于本事件建立，
+            # 所以 run 总是能找到，`run is None` 那条 pending 分支永不触发。
+            # 此前 slug 被取到后直接丢弃，导致卡片只能显示通用名
+            # （实测派给购后助手却显示「购前助手」，是硬编码回退 + 这里丢弃
+            #   共同造成的）。
+            # ⚠️ 只改 slug + 用 plan_tool() 追加计划工具：
+            #    planned_tools 是 list[dict]（plan_tool 构造），
+            #    不能直接赋 _planned_tools_for() 的 list[str]，
+            #    否则 build() 里的 dict(x) 会抛
+            #    「dictionary update sequence element #0 has length 1」。
+            if slug and not getattr(run, "slug", ""):
+                try:
+                    run.slug = slug
+                    for _t in _planned_tools_for(slug):
+                        if not any(p.get("name") == _t for p in run.planned_tools):
+                            run.plan_tool(_t)
+                    logging.info(f"[SubAgent] 回填 task 卡 slug: {slug}")
+                except Exception as _e_fill:
+                    logging.warning(f"回填 slug 失败（忽略）: {_e_fill}")
+
+            progress_event = str(event.get("event") or "").lower()
+            if progress_event == "completed":
+                run.status = "completed"
+            else:
+                run.status = "running"
+            return _task_run_update_payload(run)
+
+        def _flush_pending_events_as_top_level() -> None:
+            """未匹配到 task 的事件仍保留在历史工具列表，避免主工具丢失。"""
+            for event in _pending_subagent_events:
+                kind = _event_kind(event)
+                if kind in ("tool_start", "tool_complete", "tool_error", "tool_failed"):
+                    _collect_thinking_event(_middleware_legacy_payload(event, kind))
+            _pending_subagent_events.clear()
 
         async def _synthesize_orchestration(*, tool_chunk, orchestrator, make_chunk, all_tool_names):
             """合成 orchestrate 卡的渐进显形。
@@ -747,41 +1194,59 @@ async def stream_agent_chat(
                         args = json.loads(args)
                     except Exception:
                         args = {}
-                subagent_slug = str(args.get("subagent_type") or args.get("slug") or "researcher")
+                subagent_slug = str(args.get("subagent_type") or args.get("slug") or "pre_purchase")
                 task_desc = str(args.get("description") or args.get("task") or "")
             except Exception:
-                subagent_slug, task_desc = "researcher", ""
+                subagent_slug, task_desc = "pre_purchase", ""
 
             # ── 从真实执行事实推导轨迹（不含意图/置信度）──
             trace = new_trace()
+            # ★ 修正：原先这里 `from src.agents.subagents import load_subagent_slugs`，
+            #   该符号从未存在（subagents/__init__.py 只导出 subagent_factory），
+            #   ImportError 被 except 静默吞掉 → 永远走硬编码 fallback，
+            #   编排卡上显示的「可派遣」列表与实际 YAML 长期不符。
+            #   改为直接读 subagents.yaml 的真实 key。
             try:
-                from src.agents.subagents import load_subagent_slugs  # type: ignore
-                available = await load_subagent_slugs()
-            except Exception:
-                # subagents.yaml 的 key —— 与后端实际配置一致
-                available = ["researcher", "analyst", "critic", "memory_manager"]
+                import yaml as _yaml
+                from pathlib import Path as _Path
+                _cfg_path = _Path(__file__).resolve().parent.parent / "agents" / "subagents" / "subagents.yaml"
+                with open(_cfg_path, encoding="utf-8") as _f:
+                    available = list(_yaml.safe_load(_f).keys())
+            except Exception as _e_cfg:
+                logging.warning(f"[Orchestration] 读取 subagents.yaml 失败，用默认 slug: {_e_cfg}")
+                available = ["pre_purchase", "post_purchase"]
 
             fill_from_subagent_directory(
                 trace,
                 available_slugs=available,
                 selected=[(subagent_slug, task_desc)],
+                # ═══ 2026-09-22：传入**真实调用过的**工具名 ═══
+                # 编排卡的 skills / rag / mcp 三栏据此填充。
+                # 时序说明：这里记录的是「派遣决策**之前**」主智能体调用过的工具
+                # （如 list_subagents / query_orchestration_sop）——
+                # 这正是编排卡该展示的内容：它是「派遣的依据」，
+                # 而不是派遣之后子智能体内部干了什么（那属于 task 卡）。
+                tool_calls=all_tool_names,
             )
             # 把「本轮已出现的工具」作为 Skill 的佐证补进去
-            for name in all_tool_names[-3:]:
-                trace.skills.append(
-                    {"id": f"tool_{name}", "name": name, "detail": "本轮已调用"}
-                )
+            # ⚠️ 2026-09-22：删除了这里「用原始工具名追加 skills」的逻辑。
+            #    它是 2026-09-18 的临时补丁（当时 skills 是硬编码的一条，
+            #    靠这段把真实工具名补进去）。现在 fill_from_subagent_directory
+            #    已按**真实调用**填充三栏，这里再追加会导致：
+            #      · 中文名与工具名混排（如同时出现「派遣编排」和
+            #        「query_orchestration_sop」）
+            #      · 同一件事被记两次
 
             # ── 渐进显形：同 id 连发 5 档 ──
             orchestrator.begin_orchestration()
             for n in range(1, len(ORCHESTRATION_REVEAL_STEPS) + 1):
                 payload = orchestrator.reveal_step(trace, n)
-                yield make_chunk(**payload)
+                yield _emit_thinking_payload(payload)
                 # 让前端有时间逐档渲染；过密会合并成一帧、看不出渐进
                 await asyncio.sleep(0.12)
 
             # ── 收尾 ──
-            yield make_chunk(**orchestrator.complete_orchestration(trace))
+            yield _emit_thinking_payload(orchestrator.complete_orchestration(trace))
 
         def _emit_composed(payload: dict) -> bytes:
             """把合成出的旧风格 chunk 经统一出口下发（走 make_chunk 才进回放缓冲）。"""
@@ -795,17 +1260,66 @@ async def stream_agent_chat(
             if sse_middleware is not None:
                 middleware_events = sse_middleware.drain_events()
                 if middleware_events:
-                    names = [e.get("tool_name", e.get("type", "?")) for e in middleware_events]
+                    names = [
+                        e.get("tool_name", e.get("type", "?")) if isinstance(e, dict) else "?"
+                        for e in middleware_events
+                    ]
                     print(f"[SSE-DRAIN] drained {len(middleware_events)} events: {names}", flush=True)
                 for event in middleware_events:
-                    # ★ 补 message_id —— sse_monitor 自身不发这个字段。
-                    # 没有它，前端会把工具卡挂到 __local__ 兜底条目，
-                    # 工具卡就不跟随气泡了（见后端落地对照表 v2 风险 R1）。
-                    # 沿用「当前气泡」而非新开，保证「正文 → 工具」同属一条。
-                    if not event.get("message_id"):
-                        event["message_id"] = orchestrator.bubble()
-                    await session_manager.emit(thread_id, event)
-                    yield format_sse_event(event["type"], event).encode("utf-8") + b"\n"
+                    if not isinstance(event, dict):
+                        continue
+                    kind = _event_kind(event)
+                    nested_tool = event.get("tool_call") or {}
+                    tool_name = str(
+                        event.get("tool_name")
+                        or event.get("function")
+                        or event.get("name")
+                        or nested_tool.get("function")
+                        or nested_tool.get("name")
+                        or ""
+                    )
+                    owning_run = None
+                    suppress_child_event = False
+                    if kind in ("tool_start", "tool_complete", "tool_error", "tool_failed") and tool_name != TOOL_TASK:
+                        owning_run = _find_subagent_run_for_event(event)
+                        if owning_run is not None:
+                            _apply_middleware_event_to_run(owning_run, event)
+                            # 子工具只进入父 task 的 subagent_run.tools，不能再作为顶层工具块渲染。
+                            suppress_child_event = True
+                        elif _orch_synthesized:
+                            # 已经进入 task 编排阶段，但真实 task_run 还未建立；先缓存并抑制顶层事件。
+                            _pending_subagent_events.append(dict(event))
+                            suppress_child_event = True
+                        else:
+                            # 尚未进入编排阶段，按主智能体工具正常透传。
+                            _collect_thinking_event(_middleware_legacy_payload(event, kind))
+                    elif kind in ("tool_start", "tool_complete", "tool_error", "tool_failed"):
+                        # task 自身的监控事件补上最新的子智能体快照，避免只落下空壳卡。
+                        event_call_id = str(
+                            event.get("tool_call_id")
+                            or event.get("call_id")
+                            or event.get("id")
+                            or ""
+                        )
+                        task_run = _subagent_runs.get(event_call_id)
+                        if task_run is not None:
+                            event["subagent_run"] = task_run.build()
+                        _collect_thinking_event(_middleware_legacy_payload(event, kind))
+
+                    if not suppress_child_event:
+                        # ★ 补 message_id —— sse_monitor 自身不发这个字段。
+                        # 没有它，前端会把工具卡挂到 __local__ 兜底条目，
+                        # 工具卡就不跟随气泡了（见后端落地对照表 v2 风险 R1）。
+                        # 沿用「当前气泡」而非新开，保证「正文 → 工具」同属一条。
+                        if not event.get("message_id"):
+                            event["message_id"] = orchestrator.bubble()
+                        await session_manager.emit(thread_id, event)
+                        yield format_sse_event(event["type"], event).encode("utf-8") + b"\n"
+
+                    # 子智能体内部工具每有一条真实轨迹，就用同一个 task_call_id
+                    # 重发一次 task 卡，让前端的 subagent_run.tools 增量长出来。
+                    if owning_run is not None:
+                        yield _emit_thinking_payload(_task_run_update_payload(owning_run))
             
             msg = None
             metadata = {}
@@ -857,7 +1371,20 @@ async def stream_agent_chat(
                 for tool_chunk in getattr(msg, "tool_call_chunks", None) or []:
                     tool_call_id = tool_chunk.get("id")
                     tool_name = tool_chunk.get("name")
-                    if tool_call_id and tool_name and str(tool_call_id) not in emitted_tool_call_ids:
+                    # ═══ 2026-09-22：args 未就绪时不要标记"已发送" ═══
+                    # tool_call_chunks 是增量流：首个 chunk 常常只有 name、
+                    # args 还是空的。若此时就计入 emitted_tool_call_ids，
+                    # 后续补全 args 的 chunk 会被全部跳过 —— task 的
+                    # subagent_type 就永远取不到，卡片只能回退成默认名。
+                    _tc_args_ready = bool(tool_chunk.get("args"))
+                    if (
+                        tool_call_id
+                        and tool_name
+                        and (
+                            (str(tool_call_id) not in emitted_tool_call_ids)
+                            or _tc_args_ready
+                        )
+                    ):
                         # ═══ 合成 orchestrate 卡（契约层虚构的编排动作，registry 里没有）═══
                         # 时机：第一次看见 `task` 工具调用 = 派遣决策已定。
                         # 在它之前把编排轨迹显形出来，用户先看到「为什么派、派谁」，
@@ -883,18 +1410,37 @@ async def stream_agent_chat(
                                 _tc_args = tool_chunk.get("args") or {}
                                 if isinstance(_tc_args, str):
                                     _tc_args = json.loads(_tc_args) if _tc_args.strip().startswith("{") else {}
+                                # 取不到就不猜：宁可显示通用名，也不要显示错的
+                                # （实测踩坑：硬编码回退成 "pre_purchase"，
+                                #   导致派给购后助手的卡片显示成"购前助手"）
                                 _t_slug = str(
                                     _tc_args.get("subagent_type")
                                     or _tc_args.get("slug")
-                                    or "researcher"
+                                    or ""
                                 )
                                 _t_desc = str(
                                     _tc_args.get("description") or _tc_args.get("task") or ""
                                 )
                             except Exception:
-                                _t_slug, _t_desc = "researcher", ""
+                                _t_slug, _t_desc = "", ""
                             _t_call_id = str(tool_call_id)
                             _run = _subagent_runs.get(_t_call_id)
+                            if _run is not None and _t_slug and not getattr(_run, "slug", ""):
+                                # ═══ 2026-09-22：回填真实 slug ═══
+                                # 首次 chunk 的 args 常不全，run 以空 slug 建立；
+                                # args 补全后要把它写回去，否则卡片永远显示通用名。
+                                try:
+                                    # display_name 不是字段，由 build() 依 slug
+                                    # 动态计算，所以只改 slug 即可。
+                                    _run.slug = _t_slug
+                                    _run.planned_tools = _planned_tools_for(_t_slug)
+                                    if _t_desc:
+                                        _run.task = _t_desc
+                                    logging.info(
+                                        f"[SubAgent] 回填 task 卡片 slug: {_t_slug}"
+                                    )
+                                except Exception as _e_fill:
+                                    logging.warning(f"回填 slug 失败（忽略）: {_e_fill}")
                             if _run is None:
                                 _, _run, _ = orchestrator.start_task(
                                     slug=_t_slug,
@@ -906,6 +1452,7 @@ async def stream_agent_chat(
                                 #   若 subagent_run.call_id 仍是自造 id，卡片挂不上。
                                 orchestrator.rebind_task_call_id(_run, _t_call_id)
                                 _subagent_runs[_t_call_id] = _run
+                            _flush_pending_subagent_events(_run)
                             _sub_run_payload = _run.build()
 
                         yield emit_tool_call(
@@ -937,7 +1484,7 @@ async def stream_agent_chat(
                             if _expand_slug:
                                 yield make_chunk(
                                     status="subagent_drill",
-                                    slug=display_name(_expand_slug),
+                                    slug=_expand_slug,
                                     action="expand",
                                     description="",
                                     message_id=orchestrator.bubble(),
@@ -958,16 +1505,17 @@ async def stream_agent_chat(
                 #     return
 
                 ## 流式返回给前端
-                # message_id 取 LangChain 的 run id（AIMessageChunk.id）：
-                # 同一轮 LLM 调用的所有增量 chunk 共享同一 id，不同轮次则不同。
-                # 前端据此把「正文 + 该轮产生的工具调用」归为同一条消息，
-                # 从而按 正文->工具->正文 的顺序自然切段（对标 Yuxi message_id）。
+                # message_id 复用「当前编排气泡」（orchestrator.bubble()），
+                # 与紧随其后的 orchestrate / task 状态块同属一条叙述。
+                # 不再用 LangChain run id 当气泡：那样会让开篇正文被切到独立气泡，
+                # 与编排卡 / 子智能体卡脱节，破坏「文本先行 → 状态块」的顺序
+                # （mock 阶段开篇正文与编排卡共用 round-1-s1，正是此意）。
                 yield make_chunk(
                     content=content,
                     msg=msg.model_dump(),
                     metadata=metadata,
                     status="loading",
-                    message_id=getattr(msg, "id", None),
+                    message_id=orchestrator.bubble(),
                 )
             else:
                 # 处理非 Chunk 类型的消息（如完整的 AIMessage, ToolMessage 或 updates 字典）
@@ -985,9 +1533,28 @@ async def stream_agent_chat(
                 if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
                     for tool_call in msg.tool_calls:
                         tool_call_id = str(tool_call.get("id") or "")
-                        if tool_call_id and tool_call_id in emitted_tool_call_ids:
-                            continue
                         _tc_name = tool_call.get("name") or tool_call.get("function") or ""
+                        # ═══ 2026-09-22：task 允许「补齐 slug」的二次下发 ═══
+                        # 流式 chunk 先建立卡片时 args 常不全，slug 取不到；
+                        # 完整的 AIMessage 带着 subagent_type 随后到达。
+                        # 若在这里因去重而 continue，卡片就永远停在通用名。
+                        _slug_now = ""
+                        if _tc_name == TOOL_TASK:
+                            try:
+                                _a = tool_call.get("args") or {}
+                                if isinstance(_a, str):
+                                    _a = json.loads(_a) if _a.strip().startswith("{") else {}
+                                _slug_now = str(
+                                    (_a or {}).get("subagent_type")
+                                    or (_a or {}).get("slug")
+                                    or ""
+                                )
+                            except Exception:
+                                _slug_now = ""
+                        if tool_call_id and tool_call_id in emitted_tool_call_ids:
+                            # 已发过：只有 task 且这次拿到了真实 slug 才重发
+                            if not (_tc_name == TOOL_TASK and _slug_now):
+                                continue
                         yield emit_tool_call(
                             tool_call,
                             message_id=_tool_bubble(_tc_name, getattr(msg, "id", None)),
@@ -1020,11 +1587,213 @@ async def stream_agent_chat(
                         if _slug:
                             yield make_chunk(
                                 status="subagent_drill",
-                                slug=display_name(_slug),
+                                slug=_slug,
                                 action="collapse",
                                 description="",
                                 message_id=orchestrator.bubble(),
                             )
+                        # 任务状态块已结束，后续正文必须进入新气泡，
+                        # 否则同一 AI 消息同时带 content + tool_calls，分组器会把 task 组放到正文之后。
+                        orchestrator.advance()
+                    # ═══ 购前助手交付卡片（契约对齐 2026-09-20）═══
+                    # 设计：购前助手**只输出结构化 picks**，不出卡。
+                    # runtime 在这里把 picks 映射成 render_product_card 事件，
+                    # 落在外层 task(pre_purchase) 的执行块内。
+                    #
+                    # 为什么这么做（对照表 §5.4 第一步）：
+                    #   1. 不给子智能体增加三次出卡 model pass（master 侧因此省 ~90s）
+                    #   2. 字段映射集中在一处，杜绝从自由文本里二次抽取
+                    #   3. 卡片天然落在 task 块内，前端顺序稳定
+                    #   4. runtime 仍只翻译执行事实，不做意图判断
+                    if _done_tool_name == TOOL_TASK and _done_call_id and _done_run is not None:
+                        _pp_slug = getattr(_done_run, "slug", "") or ""
+                        if _pp_slug == "pre_purchase":
+                            try:
+                                _pp_raw = getattr(msg, "content", "")
+                                _pp_obj = json.loads(_pp_raw) if isinstance(_pp_raw, str) else _pp_raw
+                                # 兼容 {"data": {...}} 包裹与裸 PrePurchaseData
+                                _pp_data = (_pp_obj or {}).get("data") if isinstance(_pp_obj, dict) else None
+                                _pp_picks = (_pp_data or {}).get("picks") or []
+                                # ═══ 逐卡前导文本（2026-09-22）═══
+                                # 用 tradeoffs 里该款的 reason 作为卡片前的解说，
+                                # 得到「正文 → 卡 → 正文 → 卡」的错落节奏，
+                                # 而不是 N 张卡连续爆发。
+                                _pp_tradeoffs = (_pp_data or {}).get("tradeoffs") or []
+                                _reason_by_sku: dict[str, str] = {}
+                                for _t in _pp_tradeoffs:
+                                    if not isinstance(_t, dict):
+                                        continue
+                                    _t_sku = str(_t.get("sku_id") or "").strip()
+                                    _t_reason = str(_t.get("reason") or "").strip()
+                                    if _t_sku and _t_reason:
+                                        _reason_by_sku[_t_sku] = _t_reason
+                                for _p in _pp_picks:
+                                    if not isinstance(_p, dict):
+                                        continue
+                                    # 卡片最小字段校验：缺 sku_id / price / platform 就不出卡。
+                                    # 宁可少出卡，也不能伪造一张完整卡（契约红线）。
+                                    _sku = str(_p.get("sku_id") or "").strip()
+                                    try:
+                                        _price = float(_p.get("price"))
+                                    except (TypeError, ValueError):
+                                        _price = 0.0
+                                    _plat = str(_p.get("platform") or "").strip()
+                                    if not _sku or _price <= 0 or _plat not in ("jd", "taobao", "pdd"):
+                                        logging.warning(
+                                            f"[CardSynthesis] 跳过字段不完整的候选: "
+                                            f"sku_id={_sku!r} price={_price!r} platform={_plat!r}"
+                                        )
+                                        continue
+                                    _card_json = json.dumps(
+                                        {
+                                            "type": "product_card",
+                                            "data": {
+                                                "sku_id": _sku,
+                                                "title": _p.get("title") or "未知商品",
+                                                "price": _price,
+                                                "platform": _plat,
+                                                # url 缺失即 null，前端回退为不可点击
+                                                "url": _p.get("url") or None,
+                                                "image_url": _p.get("image_url") or None,
+                                                "rating": _p.get("rating"),
+                                                "shop_name": _p.get("shop_name"),
+                                            },
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                    _card_call_id = f"card-{uuid.uuid4().hex[:10]}"
+                                    # ═══ 卡片前导：先推进气泡，让这段解说独立成一条 ═══
+                                    # 推进后「前导文本」与「卡片」分属不同 message_id，
+                                    # 前端据此切出交替结构（与 Yuxi 的 seed=message_id 同源）。
+                                    _lead_text = _reason_by_sku.get(_sku, "")
+                                    if _lead_text:
+                                        # ★ 先落已累积的正文，再发前导。
+                                        #   否则前导会排到正文①前面（实测踩到）：
+                                        #   正文此时仍在 accumulated_content 里未落盘，
+                                        #   而前导直接 add_message，顺序就反了。
+                                        if accumulated_content:
+                                            _prev = "".join(accumulated_content)
+                                            if _prev.strip():
+                                                _prev_msg = {
+                                                    "role": "assistant",
+                                                    "type": "ai",
+                                                    "content": _prev,
+                                                    "timestamp": _now_iso(),
+                                                }
+                                                try:
+                                                    await _store_bridge.add_message(thread_id, _prev_msg)
+                                                except Exception as _e_pl:
+                                                    logging.warning(f"前导前正文镜像失败（忽略）: {_e_pl}")
+                                                if conv_repo:
+                                                    try:
+                                                        await conv_repo.add_message(thread_id, _prev_msg)
+                                                    except Exception:
+                                                        pass
+                                            accumulated_content.clear()
+                                            _pg_full_text.clear()
+
+                                        orchestrator.advance()
+                                        _lead_short = _lead_snippet(_lead_text)
+                                        yield make_chunk(
+                                            content=_lead_short,
+                                            msg={"role": "assistant", "content": _lead_short, "type": "ai"},
+                                            status="loading",
+                                            message_id=orchestrator.bubble(),
+                                        )
+                                        # 落库：与实时流同序（前导文本先于卡片）
+                                        _lead_msg = {
+                                            "role": "assistant",
+                                            "type": "ai",
+                                            "content": _lead_short,
+                                            "timestamp": _now_iso(),
+                                        }
+                                        try:
+                                            await _store_bridge.add_message(thread_id, _lead_msg)
+                                        except Exception as _e_ls:
+                                            logging.warning(f"前导文本镜像失败（忽略）: {_e_ls}")
+                                        if conv_repo:
+                                            try:
+                                                await conv_repo.add_message(thread_id, _lead_msg)
+                                            except Exception:
+                                                pass
+                                    yield make_chunk(
+                                        status="thinking_process",
+                                        event="tool_call",
+                                        tool_call={
+                                            "tool_call_id": _card_call_id,
+                                            "function": "render_product_card",
+                                            "name": "render_product_card",
+                                            "args": {"product": {"sku_id": _sku}},
+                                            "status": "calling",
+                                            "message_id": orchestrator.bubble(),
+                                            "tool_meta": _tool_meta("render_product_card"),
+                                        },
+                                    )
+                                    yield make_chunk(
+                                        status="thinking_process",
+                                        event="tool_result",
+                                        tool_call={
+                                            "tool_call_id": _card_call_id,
+                                            "function": "render_product_card",
+                                            "name": "render_product_card",
+                                            "args": {"product": {"sku_id": _sku}},
+                                            "content": _card_json,
+                                            "status": "completed",
+                                            "message_id": orchestrator.bubble(),
+                                            "tool_meta": _tool_meta("render_product_card"),
+                                        },
+                                    )
+                                    # 持久化：与实时流同序 —— 先把卡片前的正文落盘，
+                                    # 再存卡片，保证刷新回放顺序一致
+                                    if accumulated_content:
+                                        _prev_text = "".join(accumulated_content)
+                                        if _prev_text.strip():
+                                            _txt_msg = {
+                                                "role": "assistant",
+                                                "type": "ai",
+                                                "content": _prev_text,
+                                                "timestamp": _now_iso(),
+                                            }
+                                            try:
+                                                await _store_bridge.add_message(thread_id, _txt_msg)
+                                            except Exception as _e1s:
+                                                logging.warning(f"卡片前文本镜像失败（忽略）: {_e1s}")
+                                            if conv_repo:
+                                                try:
+                                                    await conv_repo.add_message(thread_id, _txt_msg)
+                                                except Exception:
+                                                    pass
+                                        accumulated_content.clear()
+                                        _pg_full_text.clear()
+                                    # ═══ 思考过程落盘（按气泡，须在卡片之前）═══
+                                    # 卡片是 task 的产物，若 thinking 晚于卡片落盘，
+                                    # 刷新后过程会跑到卡片后面（顺序错乱）。
+                                    await _flush_thinking_by_bubble()
+                                    _card_msg = {
+                                        "role": "tool",
+                                        "type": "ai",
+                                        "content": "",
+                                        "tool_name": "render_product_card",
+                                        "productCards": [json.loads(_card_json)["data"]],
+                                        "timestamp": _now_iso(),
+                                    }
+                                    try:
+                                        await _store_bridge.add_message(thread_id, _card_msg)
+                                    except Exception as _e3s:
+                                        logging.warning(f"商品卡片镜像失败（忽略）: {_e3s}")
+                                    if conv_repo:
+                                        try:
+                                            await conv_repo.add_message(thread_id, _card_msg)
+                                        except Exception:
+                                            pass
+                                if not _pp_picks:
+                                    logging.info(
+                                        f"[CardSynthesis] pre_purchase 无 picks，不出卡。"
+                                        f" reason={(_pp_data or {}).get('no_recommendation_reason')!r}"
+                                    )
+                            except Exception as _e_pp:
+                                logging.warning(f"[CardSynthesis] 解析 pre_purchase 输出失败: {_e_pp}")
+
                     # 持久化 render_product_card 结果到存储，供历史记录加载
                     _tool_name = getattr(msg, "name", "")
                     if _tool_name == "render_product_card":
@@ -1060,6 +1829,8 @@ async def stream_agent_chat(
                                                 except Exception as _e2:
                                                     pass
                                         accumulated_content.clear()
+                                    # ═══ 思考过程落盘（按气泡，须在卡片之前）═══
+                                    await _flush_thinking_by_bubble()
                                     # 保存商品卡片（同步写入 PostgreSQL）
                                     _card_msg = {
                                         "role": "tool",
@@ -1080,6 +1851,14 @@ async def stream_agent_chat(
                                             pass
                             except Exception as _e:
                                 logging.warning(f"保存商品卡片到内存失败: {_e}")
+
+                # 子智能体生命周期事件：必须翻译成同一 task_call_id 的卡片更新，
+                # 否则 custom 事件会被当作普通 loading 数据丢掉，前端看不到实时状态。
+                if isinstance(msg, dict) and msg.get("status") == "subagent_progress":
+                    _progress_payload = _apply_subagent_progress_event(msg)
+                    if _progress_payload is not None:
+                        yield _emit_thinking_payload(_progress_payload)
+                    continue
 
                 # ═══ 处理中间件通过 custom 模式写入的自定义 SSE 事件 ═══
                 if isinstance(msg, dict) and msg.get("status") == "thinking_process" and msg.get("event"):
@@ -1183,22 +1962,34 @@ async def stream_agent_chat(
 
         for tool_call_id, tool_call in list(active_tool_calls.items()):
             meta_info = _tool_meta(tool_call.get("function", "unknown"))
-            yield make_chunk(
-                status="thinking_process",
-                event="tool_result",
-                tool_call={
-                    "tool_call_id": tool_call_id,
-                    "function": tool_call.get("function", "unknown"),
-                    "name": tool_call.get("function", "unknown"),
-                    "args": tool_call.get("args", {}),
-                    "status": "completed",
-                    "duration_ms": int((asyncio.get_event_loop().time() - tool_call.get("started_at", start_time)) * 1000),
-                    "tool_meta": meta_info,
-                    "icon": meta_info.get("icon"),
-                },
-                meta=meta,
-            )
+            _final_tool_call = {
+                "tool_call_id": tool_call_id,
+                "function": tool_call.get("function", "unknown"),
+                "name": tool_call.get("function", "unknown"),
+                "args": tool_call.get("args", {}),
+                "status": "completed",
+                "duration_ms": int((asyncio.get_event_loop().time() - tool_call.get("started_at", start_time)) * 1000),
+                "tool_meta": meta_info,
+                "icon": meta_info.get("icon"),
+            }
+            _final_run = _subagent_runs.get(tool_call_id)
+            if _final_run is not None:
+                _final_run.status = "completed"
+                _final_tool_call["subagent_run"] = _final_run.build()
+            yield _emit_thinking_payload({
+                "status": "thinking_process",
+                "event": "tool_result",
+                "tool_call": _final_tool_call,
+            })
             active_tool_calls.pop(tool_call_id, None)
+
+        # ═══ 思考过程落盘（按气泡）═══
+        # 必须在正文落盘**之前**：无卡片时（纯咨询类回答）要得到
+        # [thinking, 正文] 的顺序，与 Yuxi 的
+        # ['message'(user), 'process-group', 'message'(answer)] 一致。
+        # 有卡片时此处为空操作 —— 卡片路径已 flush 过，靠 _persisted_tc_ids 去重。
+        _flush_pending_events_as_top_level()
+        await _flush_thinking_by_bubble()
 
         # 保存 AI 响应：PostgreSQL 主存储优先，桥接存储镜像兜底
         if accumulated_content:
@@ -1220,31 +2011,6 @@ async def stream_agent_chat(
                 await _store_bridge.add_message(thread_id, _ai_msg)
             except Exception as e:
                 logging.warning(f"AI 消息镜像到桥接存储失败（忽略）: {e}")
-
-        # 保存思考过程到存储（供 History API 加载时恢复）
-        if _thinking_chunks or _completed_tool_calls:
-            _thinking_msg = {
-                "role": "system",
-                "type": "thinking",
-                "content": "",
-                "thinkingProcess": {
-                    "steps": [{"type": "thinking", "content": c} for c in _thinking_chunks],
-                    "planSteps": _todos_to_plan_steps(agent_state.get("todos") if isinstance(agent_state, dict) else None) or [],
-                    "toolCalls": _completed_tool_calls,
-                },
-                "timestamp": _now_iso(),
-            }
-            # PostgreSQL 主存储优先
-            if conv_repo:
-                try:
-                    await conv_repo.add_message(thread_id, _thinking_msg)
-                except Exception as _e:
-                    logging.warning(f"保存思考过程到 PostgreSQL 失败: {_e}")
-            # 镜像到桥接存储（失败不影响主链路）
-            try:
-                await _store_bridge.add_message(thread_id, _thinking_msg)
-            except Exception as _e:
-                logging.warning(f"保存思考过程到桥接存储失败（忽略）: {_e}")
 
         # 完成信号
         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
@@ -1274,44 +2040,51 @@ async def stream_agent_chat(
     # 异常处理（断开连接）
     except (asyncio.CancelledError, ConnectionError) as e:
         logging.warning(f"Client disconnected, cancelling stream: {e}")
-        
+
         # ═══ 清理会话 ═══
         session_manager.deactivate_session(thread_id)
 
-        # 保存已累积的内容到统一存储桥接（失败不阻断后续 PG 兜底）
-        if accumulated_content:
+        # ═══ 2026-09-22 修复：终止时把已生成的内容落库 ═══
+        # 关键点：本 task 已被取消，**任何 await 都会立刻再抛 CancelledError**。
+        # 旧实现因此连一条保存日志都没打出来，用户刷新后整轮消失。
+        # 这里先 uncancel() 清除取消标记（Python 3.11+ 官方推荐的清理做法），
+        # 让下面的 await 能真正执行；保存失败也不影响「已中断」事件的发送。
+        try:
+            _cur = asyncio.current_task()
+            if _cur is not None and hasattr(_cur, "uncancel"):
+                _cur.uncancel()
+        except Exception as _e_unc:
+            logging.warning(f"uncancel 失败（忽略）: {_e_unc}")
+
+        # 保存已累积的内容（桥接镜像 + PostgreSQL 双写，各自容错）
+        _partial_text = "".join(accumulated_content)
+        if _partial_text.strip():
+            _partial_msg = {
+                "role": "assistant",
+                "content": _partial_text,
+                "type": "ai",
+                "partial": True,
+                "timestamp": _now_iso(),
+            }
             try:
-                await _store_bridge.add_message(thread_id, {
-                    "role": "assistant",
-                    "content": "".join(accumulated_content),
-                    "type": "ai",
-                    "partial": True,
-                    "timestamp": _now_iso(),
-                })
+                await _store_bridge.add_message(thread_id, _partial_msg)
             except Exception as _e:
                 logging.warning(f"中断内容镜像到桥接存储失败（忽略）: {_e}")
+            if conv_repo:
+                try:
+                    await conv_repo.add_message(thread_id, _partial_msg)
+                except Exception as _e:
+                    logging.warning(f"中断内容写入 PostgreSQL 失败: {_e}")
+            logging.info(
+                f"[Interrupted] 已保存中断内容 {len(_partial_text)} 字符 (thread={thread_id})"
+            )
 
-        async def save_cleanup():
-            nonlocal full_msg
-            full_msg = _ensure_full_msg(full_msg, _pg_full_text)
-
-            async with pg_manager.get_async_session_context() as new_db:
-                new_conv_repo = ConversationRepository(new_db)
-                await save_partial_message(
-                    new_conv_repo,
-                    thread_id,
-                    full_msg=full_msg,
-                    error_message="对话已中断" if not full_msg else None,
-                    error_type="interrupted",
-                )
-
-        cleanup_task = asyncio.create_task(save_cleanup())
+        # 思考过程快照（task / orchestrate 卡）也要保住，否则刷新后卡片消失
         try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
-            pass
+            _flush_pending_events_as_top_level()
+            await _save_thinking_snapshot()
         except Exception as exc:
-            logging.error(f"Error during cleanup save: {exc}")
+            logging.error(f"Error during interrupted cleanup save: {exc}")
 
         yield make_chunk(status="interrupted", message="对话已中断", meta=meta)
 
@@ -1345,6 +2118,7 @@ async def stream_agent_chat(
                 error_message=error_msg,
                 error_type=error_type,
             )
+            await _save_thinking_snapshot(repo=new_conv_repo)
 
         yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
     finally:
