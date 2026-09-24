@@ -29,17 +29,29 @@
 
       <section class="wb-col wb-col--center">
         <!-- 加载/错误：如实说明，不铺演示数据 -->
+        <!-- 文案用中性的「加载」：原先写「正在恢复任务」，对刚点完
+             「生成方案」的新任务听起来像出了故障在抢救。
+             不用 run.created_at 去区分新旧 —— 后端的 format_utc_datetime
+             把 naive UTC 当上海时间转，返回的字符串差 8 小时（前端按本地
+             解析后恰好显示正确，属两个错误互相抵消），拿它算「多久前建的」
+             必然误判。 -->
         <div v-if="loading" class="wb-state">
-          <a-spin tip="正在恢复任务…" />
+          <a-spin tip="正在加载任务…" />
         </div>
         <div v-else-if="loadError" class="wb-state">
           <p class="hint-err">{{ loadError }}</p>
           <a-button size="small" @click="loadSnapshot">重试</a-button>
         </div>
-        <!-- 空态：还没建任务 / 任务刚建、图还没长出来 -->
+        <!-- 空态：图还没长出来（阶段刚起步）或任务已结束但无节点 -->
         <div v-else-if="!graphData.nodes.length" class="wb-state">
-          <p class="hint-title">正在规划…</p>
-          <p class="hint-sub">阶段推进中，决策图会逐步长出来。</p>
+          <template v-if="runStatus === 'converged' || runStatus === 'failed'">
+            <p class="hint-title">这次规划没有产出决策图</p>
+            <p class="hint-sub">任务已结束，但没记录到任何节点 —— 可以回入口页重新开始。</p>
+          </template>
+          <template v-else>
+            <p class="hint-title">正在规划…</p>
+            <p class="hint-sub">阶段推进中，决策图会逐步长出来。</p>
+          </template>
         </div>
         <template v-else>
           <PurchaseDecisionGraph

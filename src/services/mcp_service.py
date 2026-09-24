@@ -549,19 +549,41 @@ async def call_stdio_tool_async(
         _call_stdio_tool, server_name, server_config, tool_name, arguments
     )
 
-async def get_tools_from_all_servers() -> List[Dict[str, Any]]:
+_tools_cache: Dict[str, Any] = {"specs": None, "at": 0.0}
+_TOOLS_CACHE_TTL = 300   # 秒。工具清单是启动期固定的，5 分钟足够保守
+
+
+async def get_tools_from_all_servers(force: bool = False) -> List[Dict[str, Any]]:
     """
     从所有注册的 MCP 服务器拉取并聚合工具。
-    
+
     注意：
     这里返回的不是可执行的 Callable 函数，而是工具的描述字典 (Tool Spec)。
     `mcp_tool_adapter` 会负责把这些字典转换为 LangChain 可用的 Tool 对象。
-    
+
+    ⚠️ 2026-09-24 修复（两处）：
+    1. **不再阻塞事件循环**。本函数虽是 async，但内部 `_get_stdio_tool_specs()`
+       是同步阻塞的（握手 + `time.sleep(5)` 等 tools/list 响应），直接在协程里
+       调用会**卡死整个事件循环**。实测：建一次采购规划 run 时，`/api/system/health`
+       这种不碰 DB 的探针也一起停了 5.13 秒 —— 前端表现为工作台长时间卡在
+       「正在恢复任务…」。改为 `asyncio.to_thread`，与 `call_stdio_tool_async`
+       同一处理（那个函数早就这么做了，只是这条**工具列表**路径漏了）。
+    2. **加 TTL 缓存**。`_get_stdio_tool_specs` 里有一个**无条件**的
+       `time.sleep(5)`（即便子进程早已预热），所以每次调用都实打实付 5 秒。
+       原先主智能体只在建图时调一次，问题不明显；采购规划每个阶段都取一次
+       工具，代价立刻放大。工具清单是启动期固定的，缓存 5 分钟足够保守。
+
     返回:
         聚合后的所有工具描述列表
     """
+    import time as _time
+
+    if not force and _tools_cache["specs"] is not None:
+        if _time.time() - _tools_cache["at"] < _TOOLS_CACHE_TTL:
+            return _tools_cache["specs"]
+
     all_tools_specs: List[Dict[str, Any]] = []
-    
+
     for server_name, server_config in MCP_SERVERS.items():
         # 挂起的 MCP 服务器不拉取工具，避免 Linux 下阻塞整个工具加载流程
         if not server_config.get("enabled", True):
@@ -572,7 +594,12 @@ async def get_tools_from_all_servers() -> List[Dict[str, Any]]:
             srv_type = server_config.get("type", "http")
             
             if srv_type == "stdio":
-                tools_specs = _get_stdio_tool_specs(server_name, server_config)
+                # 丢到线程池：_get_stdio_tool_specs 内部是阻塞 IO（含 time.sleep），
+                # 直接 await 会卡死事件循环（见函数 docstring 的实测记录）
+                import asyncio
+                tools_specs = await asyncio.to_thread(
+                    _get_stdio_tool_specs, server_name, server_config
+                )
             else:
                 logger.warning(f"MCP 服务器 {server_name} 的 type={srv_type} 暂未实现")
                 tools_specs = []
@@ -583,5 +610,7 @@ async def get_tools_from_all_servers() -> List[Dict[str, Any]]:
             # 工程性防御：一个 MCP Server 挂了，不能影响其他 Server 的工具加载
             logger.error(f"从 MCP 服务器 {server_name} 拉取工具失败: {e}", exc_info=True)
             continue
-            
+
+    _tools_cache["specs"] = all_tools_specs
+    _tools_cache["at"] = _time.time()
     return all_tools_specs
