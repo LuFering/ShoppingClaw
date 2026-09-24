@@ -36,6 +36,21 @@ class UserRepository:
             result = await session.execute(select(User).where(User.user_id == user_id, User.is_deleted == 0))
             return result.scalar_one_or_none()
 
+    async def get_by_phone(self, phone: str) -> User | None:
+        """根据手机号获取用户。
+
+        登录表单承诺「用户ID或手机号」都能登 —— 原先只查了 user_name，
+        这两条承诺都是空的（实测用登录 ID 登录返回 401）。手机号是一列
+        唯一约束，按它查是安全的。
+        """
+        if not phone:
+            return None
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(User).where(User.phone_number == phone, User.is_deleted == 0)
+            )
+            return result.scalar_one_or_none()
+
     async def create(self, data: dict[str, Any]) -> User:
         """创建用户"""
         async with pg_manager.get_async_session_context() as session:

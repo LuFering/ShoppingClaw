@@ -65,6 +65,9 @@ class User(Base):
             "user_id": self.user_id,
             "phone_number": self.phone_number,
             "avatar": self.avatar,
+            # shipping_address 是真实存在的列，但 to_dict 一直漏了它 ——
+            # 表现是「收货地址」在个人信息里永远是空。一并补上。
+            "shipping_address": self.shipping_address,
             "role": self.role,
             "created_at": format_utc_datetime(self.created_at),
             "last_login": format_utc_datetime(self.last_login),
