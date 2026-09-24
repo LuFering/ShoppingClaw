@@ -2,8 +2,9 @@
   <div class="page">
     <PageHeader
       title="代购送礼"
-      desc="给一个人挑一份说得通的礼物 —— 先理解关系，再组合心意"
+      desc="读收礼人的真实偏好，组合成一份每处取舍都说得清的礼物"
     >
+      <template #mark>礼</template>
       <template #stats>
         <span class="stat-pill">进行中 <b>{{ runningCount }}</b> 个</span>
       </template>
@@ -13,15 +14,6 @@
         </a-button>
       </template>
     </PageHeader>
-
-    <!-- 身份带：印章与 /planning 的「采」同一种表达，全站一致 -->
-    <section class="gf-id">
-      <span class="gf-sig">礼</span>
-      <div>
-        <p class="gf-name">送礼顾问</p>
-        <p class="gf-desc">不是挑最贵的 —— 先定关系，再定东西</p>
-      </div>
-    </section>
 
     <div class="gf-grid">
       <!-- 左：这次送礼的情境 -->
@@ -90,7 +82,7 @@
       <!-- 右：说明这是怎么工作的 -->
       <aside class="page-section">
         <div class="page-section-head">
-          <h2 class="page-section-title">我会怎么做</h2>
+          <h2 class="page-section-title">推演步骤</h2>
         </div>
         <ol class="gf-steps">
           <li v-for="(s, i) in PROCESS" :key="s.name">
@@ -102,8 +94,7 @@
           </li>
         </ol>
         <p class="gf-note">
-          每一步的关键依据都会留在工作台上 —— 你能看到我为什么这样挑，
-          也能改掉任何一条。
+          每一步的关键依据都会留在工作台上，可核对，也可改。
         </p>
       </aside>
     </div>
@@ -193,38 +184,12 @@ const begin = async () => {
 </script>
 
 <style lang="less" scoped>
-/* 布局交给全局 .page。这里只保留送礼页特有的样式。 */
-
-.gf-id {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  margin-bottom: 22px;
-}
-.gf-sig {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 9px;
-  background: var(--gift-accent-soft);
-  color: var(--gift-accent);
-  font-size: 0.92rem;
-  font-weight: 600;
-}
-.gf-name {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 0.98rem;
-  font-weight: 600;
-  color: var(--text-strong);
-}
-.gf-desc {
-  margin: 2px 0 0;
-  font-size: 0.8rem;
-  color: var(--text-muted);
+/* 布局交给全局 .page。这里只保留送礼页特有的样式。
+   印章走 PageHeader 的 #mark 插槽；这里只覆盖它的配色 ——
+   送礼用暖金主色，与采购的 emerald 区分身份。 */
+.page {
+  --mark-bg: var(--gift-accent-soft);
+  --mark-fg: var(--gift-accent);
 }
 
 /* 两栏：左表单 / 右说明。窄屏堆叠 */

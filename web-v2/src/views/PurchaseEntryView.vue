@@ -2,29 +2,19 @@
   <div class="page">
     <PageHeader
       title="采购规划"
-      desc="装修、换季、搬家的组合采购 —— 我拆清单、排顺序、盯依赖"
+      desc="把组合采购拆成清单、排出顺序，取舍过程留在决策图上可回看"
     >
+      <template #mark>采</template>
       <template #stats>
         <span class="stat-pill">进行中 <b>{{ runningCount }}</b> 个</span>
         <span v-if="awaitingCount" class="stat-pill">待你确认 <b>{{ awaitingCount }}</b> 个</span>
       </template>
       <template #actions>
         <a-button size="small" class="lucide-icon-btn" @click="router.push('/tasks')">
-          <ClipboardList :size="14" /><span>任务状态</span>
+          <ClipboardList :size="14" /><span>监控任务</span>
         </a-button>
       </template>
     </PageHeader>
-
-    <!-- 身份区：与欢迎页智能体最直接的区分 —— 用户一眼知道自己在跟谁说话。
-         印章与 /proxy 的「礼」是同一种表达，全站一致；不再居中，
-         改为左对齐的信息带，与其余页面同一阅读起点。 -->
-    <section class="pe-id">
-      <span class="pe-sig">采</span>
-      <div class="pe-id-text">
-        <p class="pe-name">采办 · 采购规划顾问</p>
-        <p class="pe-desc">把模糊需求收敛成结构化参数，交给工作台执行</p>
-      </div>
-    </section>
 
     <!-- 输入形式入口：结构化表单，让用户把需求填实而不是组织语言 -->
     <section class="page-section">
@@ -200,42 +190,8 @@ const startFromPreset = (preset) => {
 <style lang="less" scoped>
 /* 布局交给全局 .page（page.less）。本文件只保留采购页特有的样式。
    刻意不再自绘 max-width / margin:auto —— 那会让内容左边界与全站其它页
-   差出三百多像素（实测 405 vs 82）。 */
-
-/* 身份带：左对齐，与页头同一阅读起点 */
-.pe-id {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  margin-bottom: 22px;
-}
-.pe-id-text { min-width: 0; }
-.pe-sig {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 9px;
-  background: var(--accent-50);
-  color: var(--accent-700);
-  font-size: 0.92rem;
-  font-weight: 600;
-}
-.pe-name {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 0.98rem;
-  font-weight: 600;
-  color: var(--text-strong);
-}
-.pe-desc {
-  margin: 2px 0 0;
-  font-size: 0.8rem;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
+   差出三百多像素（实测 405 vs 82）。
+   印章已移入 PageHeader 的 #mark 插槽，本文件不再需要身份带样式。 */
 
 /* 表单 */
 .pe-form {
