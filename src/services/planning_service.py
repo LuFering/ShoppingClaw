@@ -504,7 +504,17 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
             nodes = await _current_nodes(run_id)
             target = next((n for n in nodes if n.get("name") == best.get("name")), None)
             if target:
-                await _merge_graph(run_id, [{**target, "state": "selected"}], [])
+                # ⚠️ 把「为什么选它」和「判断来源」**一起写进图节点**。
+                # 交付物是在收尾时生成的，那时 state 早已不在内存里，只能
+                # 从落库的图反推 —— 只标 state=selected 的话，「依据」那一栏
+                # 永远是空的，来源也会被当成默认值（实测交付物里显示
+                # 「规则兜底」，而模型其实答得好好的）。
+                await _merge_graph(run_id, [{
+                    **target, "state": "selected",
+                    "meta": {**(target.get("meta") or {}),
+                             "why": str(best.get("why") or ""),
+                             "by": best.get("by") or "rule"},
+                }], [])
 
     elif node == "risk":
         risks = delta.get("risks") or []
@@ -528,15 +538,34 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
 
 
 async def _finish(run_id: str, user_id: str) -> None:
-    """收尾：产出交付物 → 收敛。永不抛异常。"""
+    """收尾：产出交付物 → 收敛。永不抛异常。
+
+    ⚠️ 2026-09-25 之前这里只把状态从 running 翻成 ready，**什么内容都没生成**
+    —— 交付物是「空的」，正文要等用户点预览时才现算，而且三份算出的是同一段
+    文字。现在真正把内容算出来，随事件一起下发：前端拿到就能直接渲染，
+    刷新后也能从事件流里恢复。
+
+    算不出来（state 不全）也照发 ready，但 data 为 None —— 前端会显示
+    「无可交付内容」而不是假装成功。
+    """
     try:
-        if await get_run(run_id, user_id) is None:
+        run = await get_run(run_id, user_id)
+        if run is None:
             return
+
+        state = _state_from_run(run)
         for did, name, meta in DELIVERABLE_SPEC:
             await emit(run_id, "deliverable",
                        {"id": did, "name": name, "meta": meta, "state": "running", "progress": 0.5})
+            try:
+                doc = st.build_deliverable(state, did)
+            except Exception as e:
+                logger.warning(f"[planning] 交付物 {did} 生成失败: {e}")
+                doc = None
             await emit(run_id, "deliverable",
-                       {"id": did, "name": name, "meta": meta, "state": "ready"})
+                       {"id": did, "name": name, "meta": meta,
+                        "state": "ready" if doc else "empty", "data": doc})
+
         await _patch_run(run_id, status="converged")
         await emit(run_id, "done", {"status": "converged"})
     except Exception as e:
@@ -545,33 +574,77 @@ async def _finish(run_id: str, user_id: str) -> None:
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
 
 
+def _state_from_run(run: PlanningRun) -> dict:
+    """把 run 还原成 stages 需要的 state。
+
+    交付物在**收尾时**生成，那时图已经跑完、state 早已不在内存里 ——
+    只能从落库的东西反推。可用的两处：
+      · run 的入口参数（scene/budget/…）
+      · run.graph 的节点（候选商品带 price/item_id，已排除的带 reason）
+    候选池与排除项都能从图上重建，因为图里本来就记着它们。
+    """
+    nodes = (run.graph or {}).get("nodes") or []
+    candidates, excluded = [], []
+    for n in nodes:
+        meta = n.get("meta") or {}
+        if n.get("type") == "候选商品":
+            candidates.append({
+                "name": n.get("name"),
+                "price_yuan": meta.get("price"),
+                "item_id": meta.get("item_id"),
+                # 选中的那件带着 why / by（见 _on_node 的 compare 分支）
+                "why": meta.get("why") or "",
+                "by": meta.get("by") or "",
+                "_selected": n.get("state") == "selected",
+            })
+        elif n.get("type") == "已排除":
+            excluded.append({
+                "name": n.get("name"),
+                "price_yuan": meta.get("price"),
+                "_reason": meta.get("reason") or "",
+            })
+
+    # 选中的那件：图上被标成 selected 的候选
+    selected = next((c for c in candidates if c.pop("_selected", False)), None) or {}
+
+    return {
+        "scene": run.scene, "budget": run.budget, "duration": run.duration,
+        "constraints": run.constraints or [], "subject": run.subject,
+        "run_id": run.id, "user_id": run.user_id,
+        "candidates": candidates, "excluded": excluded, "selected": selected,
+        "risks": [n.get("name") for n in nodes if n.get("type") == "风险"],
+        "dimensions": [n.get("name") for n in nodes if n.get("type") == "决策依据"],
+        "needs": [n.get("name") for n in nodes if n.get("type") == "需求"],
+    }
+
+
 async def get_deliverable(run_id: str, user_id: str, did: str) -> dict | None:
-    """生成交付物正文（Markdown）。查不到 run 或 id 非法返回 None。"""
+    """取一份交付物：结构化 data（前端渲染）+ markdown（下载）。
+
+    ⚠️ 之前这里无论 `did` 是什么都返回**同一段「决策图节点」罗列**，
+    只有标题不同 —— 点开「候选对比表」看到的其实是一张节点清单。
+    现在按 did 分别生成，与收尾时下发的是同一套 builder，不会漂。
+    """
     run = await get_run(run_id, user_id)
     if run is None:
         return None
     spec = next((s for s in DELIVERABLE_SPEC if s[0] == did), None)
     if spec is None:
         return None
-    _, name, _ = spec
-    nodes = (run.graph or {}).get("nodes") or []
-    lines = [
-        f"# {name}",
-        "",
-        f"- 场景：{run.scene or '—'}",
-        f"- 预算：{run.budget or '—'}",
-        f"- 周期：{run.duration or '—'}",
-        f"- 生成时间：{datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M')}",
-        "",
-        "## 决策图节点",
-        "",
-    ]
-    for n in nodes:
-        meta = n.get("meta") or {}
-        line = f"- [{n.get('type')}] {n.get('name')}（{n.get('state')}）"
-        if meta.get("price"):
-            line += f" · ¥{meta['price']}"
-        if meta.get("pruneReason"):
-            line += f" · 排除原因：{meta['pruneReason']}"
-        lines.append(line)
-    return {"name": name, "content": "\n".join(lines) + "\n"}
+    _, name, meta = spec
+
+    state = _state_from_run(run)
+    try:
+        doc = st.build_deliverable(state, did)
+    except Exception as e:
+        logger.warning(f"[planning] 交付物 {did} 生成失败: {e}")
+        doc = None
+
+    return {
+        "id": did,
+        "name": name,
+        "meta": meta,
+        "data": doc,
+        "content": st.deliverable_markdown(doc, name) if doc else "",
+        "generated_at": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M"),
+    }

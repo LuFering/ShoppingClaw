@@ -21,9 +21,9 @@
         <button
           class="wb-btn primary"
           type="button"
-          :disabled="!deliverables.length || runStatus !== 'converged'"
+          :disabled="!deliverables.length || runStatus !== 'converged' || producing"
           @click="produceAll"
-        >生成交付</button>
+        >{{ producing ? '正在取回…' : '生成交付' }}</button>
       </div>
     </header>
 
@@ -89,21 +89,10 @@
           :items="deliverables"
           :question="pendingQuestion"
           @answer="onAnswer"
-          @preview="onPreview"
           @download="onDownload"
         />
       </section>
     </div>
-
-    <!-- 交付物预览：正文由后端按决策图生成 -->
-    <a-modal
-      v-model:open="previewOpen"
-      :title="previewData?.name || '交付物'"
-      width="720px"
-      :footer="null"
-    >
-      <pre class="wb-preview mono">{{ previewData?.content || '' }}</pre>
-    </a-modal>
   </div>
 </template>
 
@@ -252,6 +241,10 @@ const applyEvent = (kind, payload) => {
       break
     case 'done':
       runStatus.value = payload.status || 'converged'
+      // 收敛/失败后**收掉待拍板的问题** —— 否则用户已经点过「定下来」，
+      // 那个问题卡还挂在右栏，看起来像没生效、又像在重复问。
+      // 后端在 _patch_run 里已经清空了 run.question，前端也要跟着清。
+      pendingQuestion.value = null
       if (payload.status === 'failed') {
         loadError.value = payload.error || '任务执行失败'
       }
@@ -264,7 +257,14 @@ const applyEvent = (kind, payload) => {
 const upsertDeliverable = (d) => {
   if (!d?.id) return
   const i = deliverables.value.findIndex((x) => x.id === d.id)
-  const item = { id: d.id, name: d.name, meta: d.meta, state: d.state, progress: d.progress }
+  const item = {
+    id: d.id, name: d.name, meta: d.meta, state: d.state, progress: d.progress,
+    // ⚠️ `data` 必须带上：后端把交付物**正文**（结构化的方案/对比表/预算）
+    // 随事件下发，交付区就地渲染它。原先这里只挑了 id/name/meta/state，
+    // 正文被丢掉 —— 面板就只剩文件名，只能靠弹窗再请求一次，
+    // 而那次请求返回的又是同一段节点罗列。这是「交付物很简陋」的一半原因。
+    data: d.data ?? null,
+  }
   if (i >= 0) deliverables.value[i] = { ...deliverables.value[i], ...item }
   else deliverables.value.push(item)
 }
@@ -294,9 +294,23 @@ const loadSnapshot = async () => {
     pendingQuestion.value = run.question
       ? { text: run.question.text, options: run.question.options || [] }
       : null
-    // 交付物：快照里没有清单，靠事件补齐；已收敛时用约定的三件套占位
+    // 交付物：快照里没有正文，靠事件补齐。刷新时先按约定的三件套占位，
+    // 再**真的把内容取回来** —— 只占位会让面板显示「已生成」却没有正文。
     if (run.status === 'converged') {
-      for (const d of DELIVERABLE_FALLBACK) upsertDeliverable({ ...d, state: 'ready' })
+      for (const d of DELIVERABLE_FALLBACK) upsertDeliverable({ ...d, state: 'running' })
+      await Promise.all(DELIVERABLE_FALLBACK.map(async (d) => {
+        try {
+          const got = await planningApi.getDeliverable(runId.value, d.id)
+          upsertDeliverable({
+            ...d,
+            state: got?.data ? 'ready' : 'empty',
+            data: got?.data || null,
+          })
+        } catch {
+          // 取不到就如实标成无内容，不假装已生成
+          upsertDeliverable({ ...d, state: 'empty', data: null })
+        }
+      }))
     }
     subscribe()
   } catch (e) {
@@ -360,19 +374,6 @@ const onAnswer = async (key) => {
   }
 }
 
-const previewOpen = ref(false)
-const previewData = ref(null)
-
-const onPreview = async (d) => {
-  if (!runId.value) return
-  try {
-    previewData.value = await planningApi.getDeliverable(runId.value, d.id)
-    previewOpen.value = true
-  } catch (e) {
-    loadError.value = e?.message || '交付物加载失败'
-  }
-}
-
 const onDownload = async (d) => {
   if (!runId.value) return
   try {
@@ -382,7 +383,7 @@ const onDownload = async (d) => {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = data.name || 'deliverable.md'
+    a.download = `${data.name || 'deliverable'}.md`
     a.click()
     URL.revokeObjectURL(url)
   } catch (e) {
@@ -445,9 +446,35 @@ const briefThesis = () => {
   return sel ? `共 ${n} 个决策节点，选定「${sel.name}」` : `共 ${n} 个决策节点`
 }
 
-const produceAll = () => {
-  // 收敛后交付物已由后端产出；这里只是把右栏状态对齐
-  deliverables.value = deliverables.value.map((d) => ({ ...d, state: 'ready' }))
+const producing = ref(false)
+
+/**
+ * 「生成交付」= 把三份交付物的正文取回来。
+ *
+ * 后端在收敛时就已算好并随事件下发过；这个按钮是给「事件丢了 / 中途刷新 /
+ * 想重新拉一次」准备的，所以它是**真的去取**，而不是把状态标成 ready。
+ * 原先这里只做 `state: 'ready'` 的映射 —— 没有正文也照样显示「已生成」，
+ * 点开是空的。状态必须跟着内容走。
+ */
+const produceAll = async () => {
+  if (!runId.value || producing.value) return
+  producing.value = true
+  try {
+    await Promise.all(deliverables.value.map(async (d) => {
+      try {
+        const got = await planningApi.getDeliverable(runId.value, d.id)
+        upsertDeliverable({
+          ...d,
+          state: got?.data ? 'ready' : 'empty',
+          data: got?.data || null,
+        })
+      } catch {
+        upsertDeliverable({ ...d, state: 'empty', data: null })
+      }
+    }))
+  } finally {
+    producing.value = false
+  }
 }
 
 onMounted(loadSnapshot)
@@ -617,17 +644,8 @@ onBeforeUnmount(() => { try { abort?.abort?.() } catch { /* ignore */ } })
   &:hover { color: var(--text); background: var(--bg-sunken); }
 }
 
-/* 交付物预览 */
-.wb-preview {
-  margin: 0;
-  max-height: 60vh;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 0.78rem;
-  line-height: 1.7;
-  color: var(--text);
-}
+/* 交付物正文现在**就地**渲染在右栏（DeliverablesPanel），
+   不再有弹窗预览 —— 原先的 .wb-preview 是那个弹窗的样式，已随之删除。 */
 
 @media (max-width: 1100px) {
   .wb-body {

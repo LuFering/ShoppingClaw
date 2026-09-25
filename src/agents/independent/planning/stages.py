@@ -420,3 +420,211 @@ def deliver_question(state: dict) -> dict:
             {"key": "narrow", "label": "再收窄条件", "primary": False},
         ],
     }
+
+
+# ══════════════════════════════════════════════════════════
+# 交付物：三份**内容不同**的产物
+# ══════════════════════════════════════════════════════════
+#
+# ⚠️ 2026-09-25 之前这里是坏的：`get_deliverable` 无论要哪一份，都返回
+# **同一段「决策图节点」的罗列**，只是标题不同。也就是说「候选对比表」
+# 和「预算分配表」其实是同一份东西贴了两个名字，而且都不含候选价格、
+# 不含对比、不含预算 —— 用户点「预览」看到的是一张节点清单。
+#
+# 根因是把「图里有什么」当成了「交付物该是什么」。图是**过程**的投影，
+# 交付物是**结论**的载体，两者形状本就不同：图里有 17 个节点、含需求与
+# 依据；而交付物要回答的是「买哪件、为什么、花多少钱、有什么坑」。
+#
+# 所以这里从 state 里重新组织三份**用途不同**的东西：
+#   d-plan    采购方案   —— 买哪件 + 理由 + 排除原因（决策结论）
+#   d-compare 候选对比表 —— 逐项横比，入选与排除同表（可核对）
+#   d-budget  预算分配表 —— 花了多少、占预算几成、剩多少（可执行）
+
+def _price_of(c: dict) -> float | None:
+    return cand_yuan(c)
+
+
+def build_plan_doc(state: dict) -> dict:
+    """采购方案：这次买什么、为什么是它、别的为什么不行。"""
+    selected = state.get("selected") or {}
+    cands = state.get("candidates") or []
+    excluded = state.get("excluded") or []
+
+    name = str(selected.get("name") or "").strip()
+    why = str(selected.get("why") or "").strip()
+    by = str(selected.get("by") or "rule")
+    price = cand_yuan(selected) if selected else None
+
+    # 选中的那件可能不在 candidates 里（pick_best 从候选池挑，池子是筛过的）
+    alts = [c for c in cands if cand_name(c) != name][:3]
+
+    return {
+        "kind": "plan",
+        "subject": state.get("subject") or state.get("scene") or "本次采购",
+        "scene": state.get("scene") or "",
+        "budget": state.get("budget") or "",
+        "duration": state.get("duration") or "",
+        "constraints": [str(c) for c in (state.get("constraints") or [])],
+        "pick": {
+            "name": name or "（未选出）",
+            "price": price,
+            "why": why,
+            "by": by,
+        },
+        "alternatives": [
+            {"name": cand_name(c), "price": cand_yuan(c)} for c in alts
+        ],
+        "excluded": [
+            {"name": cand_name(c), "price": cand_yuan(c),
+             "reason": str(c.get("_reason") or "")}
+            for c in excluded[:6]
+        ],
+        "risks": [str(r) for r in (state.get("risks") or [])],
+        "dimensions": [str(d) for d in (state.get("dimensions") or [])],
+    }
+
+
+def build_compare_doc(state: dict) -> dict:
+    """候选对比表：入选与排除放同一张表，逐项可比。"""
+    cands = state.get("candidates") or []
+    excluded = state.get("excluded") or []
+    selected = state.get("selected") or {}
+    sel_name = str(selected.get("name") or "")
+    dims = [str(d) for d in (state.get("dimensions") or [])][:4]
+
+    rows = []
+    for c in cands:
+        n = cand_name(c)
+        picked = n == sel_name
+        rows.append({
+            "name": n,
+            "price": cand_yuan(c),
+            "picked": picked,
+            "tag": "入选" if picked else "候选",
+            # 入选的那行给模型的完整理由；其余行如实说明它**为什么没被选**
+            # —— 留空的话「依据」列整列是空白，表就成了摆设。
+            "reason": (str(selected.get("why") or "")[:80] if picked
+                       else ("未入选" if sel_name else "")),
+        })
+    for c in excluded:
+        rows.append({
+            "name": cand_name(c),
+            "price": cand_yuan(c),
+            "picked": False,
+            "tag": "排除",
+            "reason": str(c.get("_reason") or "不满足硬约束"),
+        })
+
+    return {
+        "kind": "compare",
+        "dimensions": dims,
+        "rows": rows,
+        "counts": {"candidates": len(cands), "excluded": len(excluded)},
+    }
+
+
+def build_budget_doc(state: dict) -> dict:
+    """预算分配表：花多少、占几成、剩多少。"""
+    selected = state.get("selected") or {}
+    cands = state.get("candidates") or []
+    budget = _budget_yuan(state.get("budget"))
+
+    sel_price = cand_yuan(selected) if selected else None
+    prices = [p for p in (_price_of(c) for c in cands) if p is not None]
+
+    spent = sel_price or 0.0
+    ratio = (spent / budget) if (budget and budget > 0) else None
+
+    return {
+        "kind": "budget",
+        "budget": budget,
+        "spent": spent,
+        "remaining": (budget - spent) if budget else None,
+        "ratio": ratio,
+        "range": {"min": min(prices), "max": max(prices)} if prices else None,
+        "items": ([{"name": cand_name(selected), "price": sel_price}] if sel_price else []),
+    }
+
+
+DELIVERABLE_BUILDERS = {
+    "d-plan": build_plan_doc,
+    "d-compare": build_compare_doc,
+    "d-budget": build_budget_doc,
+}
+
+
+def build_deliverable(state: dict, did: str) -> dict | None:
+    """按 id 产出结构化交付物。未知 id 返回 None。"""
+    fn = DELIVERABLE_BUILDERS.get(did)
+    return fn(state) if fn else None
+
+
+def deliverable_markdown(doc: dict, name: str) -> str:
+    """把结构化交付物渲染成 Markdown —— 下载用。"""
+    kind = doc.get("kind")
+    L: list[str] = [f"# {name}", ""]
+
+    if kind == "plan":
+        L += [
+            f"- 采购对象：{doc.get('subject') or '—'}",
+            f"- 场景：{doc.get('scene') or '—'}",
+            f"- 预算：{doc.get('budget') or '—'}",
+            f"- 周期：{doc.get('duration') or '—'}",
+        ]
+        if doc.get("constraints"):
+            L.append(f"- 硬约束：{'、'.join(doc['constraints'])}")
+        L += ["", "## 建议购买", ""]
+        p = doc.get("pick") or {}
+        price = p.get("price")
+        L.append(f"**{p.get('name')}**" + (f"　¥{price:g}" if price else ""))
+        if p.get("why"):
+            L += ["", f"> {p['why']}", ""]
+        src = "模型判断" if p.get("by") == "llm" else "规则兜底"
+        L.append(f"（判断来源：{src}）")
+
+        if doc.get("alternatives"):
+            L += ["", "## 备选", ""]
+            for a in doc["alternatives"]:
+                pr = f"　¥{a['price']:g}" if a.get("price") else ""
+                L.append(f"- {a['name']}{pr}")
+        if doc.get("excluded"):
+            L += ["", "## 已排除", ""]
+            for e in doc["excluded"]:
+                pr = f"　¥{e['price']:g}" if e.get("price") else ""
+                why = f" —— {e['reason']}" if e.get("reason") else ""
+                L.append(f"- {e['name']}{pr}{why}")
+        if doc.get("risks"):
+            L += ["", "## 待确认风险", ""]
+            L += [f"- {r}" for r in doc["risks"]]
+        if doc.get("dimensions"):
+            L += ["", "## 评估维度", ""]
+            L.append("、".join(doc["dimensions"]))
+
+    elif kind == "compare":
+        L += ["| 候选 | 价格 | 结论 | 依据 |", "|---|---|---|---|"]
+        for r in doc.get("rows") or []:
+            pr = f"¥{r['price']:g}" if r.get("price") else "—"
+            L.append(f"| {r['name']} | {pr} | {r.get('tag') or ''} | {r.get('reason') or ''} |")
+        c = doc.get("counts") or {}
+        L += ["", f"共 {c.get('candidates', 0)} 个候选，排除 {c.get('excluded', 0)} 个。"]
+
+    elif kind == "budget":
+        b = doc.get("budget")
+        L += [
+            f"- 预算：{'¥%g' % b if b else '—'}",
+            f"- 本次花费：¥{doc.get('spent') or 0:g}",
+        ]
+        if doc.get("remaining") is not None:
+            L.append(f"- 结余：¥{doc['remaining']:g}")
+        if doc.get("ratio") is not None:
+            L.append(f"- 预算占用：{doc['ratio'] * 100:.0f}%")
+        rng = doc.get("range")
+        if rng:
+            L += ["", f"候选价格区间：¥{rng['min']:g} – ¥{rng['max']:g}"]
+        if doc.get("items"):
+            L += ["", "## 明细", ""]
+            for it in doc["items"]:
+                pr = f"　¥{it['price']:g}" if it.get("price") else ""
+                L.append(f"- {it['name']}{pr}")
+
+    return "\n".join(L) + "\n"
