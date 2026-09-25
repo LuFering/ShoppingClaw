@@ -172,18 +172,40 @@ const applyEvent = (kind, payload) => {
   switch (kind) {
     case 'phase': {
       const phase = payload.phase
-      if (payload.state === 'running') {
-        // 同一步可能先 running 后 done；用 phase key 找到那一行就地改状态，
-        // 而不是再 push 一条（否则一步会占两行）
+      // 建 run 时后端会把**全部 7 个阶段**以 todo 铺下来，让用户一开始
+      // 就看得到全貌与剩余步数（而不是一条条冒出来、不知道还有多少）。
+      if (payload.state === 'todo') {
+        if (stream.value.some((x) => x.kind === 'phase' && x.phase === phase)) break
         stream.value.push({
           kind: 'phase',
           phase,
           title: payload.label || phase,
           detail: payload.hint || '',
-          state: 'running',
-          startedAt: Date.now(),
-          time: nowClock()
+          state: 'todo',
+          time: ''
         })
+        break
+      }
+      if (payload.state === 'running') {
+        // 同一步可能先 running 后 done；用 phase key 找到那一行就地改状态，
+        // 而不是再 push 一条（否则一步会占两行）
+        const exist = stream.value.find((x) => x.kind === 'phase' && x.phase === phase)
+        if (exist) {
+          exist.state = 'running'
+          exist.detail = payload.hint || exist.detail
+          exist.startedAt = Date.now()
+          exist.time = nowClock()
+        } else {
+          stream.value.push({
+            kind: 'phase',
+            phase,
+            title: payload.label || phase,
+            detail: payload.hint || '',
+            state: 'running',
+            startedAt: Date.now(),
+            time: nowClock()
+          })
+        }
       } else {
         const row = stream.value.find((x) => x.kind === 'phase' && x.phase === phase)
         if (row) {
@@ -207,10 +229,56 @@ const applyEvent = (kind, payload) => {
       }
       break
     }
+
+    // 推理增量：**追加到上一条思考里**，而不是新起一行。
+    // 后端按 0.22s 节流推送，一段段长出来 —— 这就是「实时」的来源。
+    //
+    // kind 两种：
+    //   reasoning 模型的自言自语（试错、自我纠正），弱化显示
+    //   content   它最终要说的话，正常显示
+    // 两者观感不同，混在一起会让用户以为模型在胡言乱语。
+    case 'think_delta': {
+      const kind = payload.kind || 'content'
+      const last = stream.value[stream.value.length - 1]
+      if (last && last.streaming && last.thinkKind === kind) {
+        last.detail += payload.text || ''
+      } else {
+        // 换了一种文本（reasoning → content）：收掉上一条，另起一条，
+        // 否则「它在想」和「它的结论」会粘成一段。
+        const prev = stream.value[stream.value.length - 1]
+        if (prev && prev.streaming) {
+          prev.streaming = false
+          prev.state = 'done'
+        }
+        stream.value.push({
+          kind: 'think',
+          title: kind === 'reasoning' ? '正在权衡' : '判断依据',
+          detail: payload.text || '',
+          streaming: true,          // 有光标；收到收尾事件后置 false
+          thinkKind: kind,
+          by: 'llm',
+          state: 'running',
+          // ⚠️ 不记 startedAt / 不算耗时。
+          // 刷新时事件是**重放**的，几秒的推理会在几十毫秒内全部到达，
+          // 本地计时算出「0ms」这种假数字。真实耗时由所属的 phase 行
+          // 提供（后端按节点实测），这里再算一遍只会误导。
+          time: nowClock()
+        })
+      }
+      break
+    }
+
     case 'think':
     case 'retrieve':
     case 'call':
-    case 'produce':
+    case 'produce': {
+      // 推理结束时，把上面那条流式行**收尾**（去掉光标），而不是再插一条
+      // —— 否则同一段推理会显示两遍。耗时由 phase 行提供，这里不算（见上）。
+      const prev = stream.value[stream.value.length - 1]
+      if (prev && prev.streaming) {
+        prev.streaming = false
+        prev.state = 'done'
+      }
       stream.value.push({
         kind,
         title: payload.title || '',
@@ -218,10 +286,15 @@ const applyEvent = (kind, payload) => {
         // 判断来源：llm 模型判断 / rule 规则兜底。原样透传给 AgentExecStream
         // 显示出来 —— 不显示的话，降级输出和模型输出在界面上无从分辨。
         by: payload.by || '',
+        // 真实入参与返回样本（call 事件带）：可展开核对「它真去搜了」。
+        args: payload.args || null,
+        sample: payload.sample || null,
+        ok: payload.ok,
         state: 'done',
         time: nowClock()
       })
       break
+    }
     case 'graph':
       // 整图替换 —— 合并已在服务端做过
       graphData.value = {

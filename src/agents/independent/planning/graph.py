@@ -85,8 +85,9 @@ def build_planning_graph():
             state.get("subject") or state.get("scene") or "商品")
         return {"dimensions": dims, "dims_from_kb": from_kb}
 
-    async def n_search(state: PlanningState) -> dict:
-        return {"candidates": await st.search_candidates(state)}
+    async def n_search(state: PlanningState, config=None) -> dict:
+        on_progress = (config or {}).get("configurable", {}).get("on_search_progress")
+        return {"candidates": await st.search_candidates(state, on_progress=on_progress)}
 
     async def n_filter(state: PlanningState) -> dict:
         # 按硬约束（预算/价格上限）真筛。算术交给代码，不由模型算 ——
@@ -94,9 +95,12 @@ def build_planning_graph():
         kept, excluded = st.filter_candidates(state.get("candidates") or [], state)
         return {"candidates": kept, "excluded": excluded}
 
-    async def n_compare(state: PlanningState) -> dict:
-        # 真调模型做多维度取舍；state 带过去让它能看硬约束
-        return {"selected": await st.pick_best(state.get("candidates") or [], state)}
+    async def n_compare(state: PlanningState, config=None) -> dict:
+        # 真调模型做多维度取舍；state 带过去让它能看硬约束。
+        # 流式回调从 config 取（service 注入）—— 图不认识 DB，只转发。
+        on_think = (config or {}).get("configurable", {}).get("on_think")
+        return {"selected": await st.pick_best(
+            state.get("candidates") or [], state, on_think=on_think)}
 
     async def n_risk(state: PlanningState) -> dict:
         risks, from_kb = await st.retrieve_risks(

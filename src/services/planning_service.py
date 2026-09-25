@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy import desc, func, select
 
 from src.agents.independent.planning import stages as st
+from src.agents.independent.common_llm import DeltaPump
 from src.storage.postgres.manager import pg_manager
 from src.agents.independent.planning.graph import get_planning_graph
 from src.storage.postgres.models_business import PlanningEvent, PlanningRun
@@ -49,6 +50,22 @@ STAGES: tuple[tuple[str, str], ...] = (
 )
 STAGE_LABEL = dict(STAGES)
 STAGE_KEYS = [k for k, _ in STAGES]
+
+# 每个阶段「正在做什么」。刻意不写「正在思考…」这种放之四海皆准的话：
+# 写具体了，用户才知道它此刻是在等 MCP（慢）还是在等模型（慢），
+# 而不是以为界面卡住了。
+#
+# 位置放在 STAGES 旁边（而不是用到的 _on_debug 旁）：建 run 时要用它给
+# 全部阶段铺初始提示，两处引用同一份，别的地方改了这里不会漏。
+RUNNING_HINT = {
+    "intake": "把入口参数摊成可筛选的需求",
+    "clarify": "查这个品类该看哪些维度",
+    "search": "向淘宝检索真实商品",
+    "filter": "按预算等硬约束筛选",
+    "compare": "让模型逐条对比取舍",
+    "risk": "查售后与风险政策",
+    "deliver": "整理成待你拍板的问题",
+}
 
 # 交付物清单：收敛后逐个产出。state: waiting → running → ready
 DELIVERABLE_SPEC = (
@@ -236,6 +253,19 @@ async def create_run(user_id: str, params: dict) -> dict:
         session.add(run)
         await session.commit()
 
+    # 建 run 时就把**全部阶段**以「待办」下发。
+    # ═══════════════════════════════════════════════════════════════════
+    # 2026-09-25：为什么要先铺满
+    # ═══════════════════════════════════════════════════════════════════
+    # 原先阶段是一条条冒出来的，用户看不到还剩几步、也不知道总共要做什么。
+    # 铺满之后是「7 步，正在第 3 步」—— 等待有了边界，焦虑感完全不同。
+    # 每条的 state 由后续的 phase 事件就地改成 running / done。
+    for key, label in STAGES:
+        await emit(run_id, "phase", {
+            "phase": key, "label": label,
+            "state": "todo", "hint": RUNNING_HINT.get(key, ""),
+        })
+
     # 后台推进：不阻塞本次请求。失败只记日志，run 会停在 failed 且带 error。
     asyncio.create_task(advance(run_id, user_id))
 
@@ -312,31 +342,70 @@ async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
 
         started: dict[str, float] = {}   # 节点名 → 开始时刻，用来算真实耗时
 
-        async for mode, chunk in graph.astream(state, stream_mode=["updates", "debug"]):
-            if await get_run(run_id, user_id) is None:
-                return   # run 被删了
+        # ── 推理逐字流 ──
+        # compare 阶段模型要想 8~12 秒。原先它是 ainvoke（一次性），界面上
+        # 就是「正在思考」静止十几秒然后突然冒出一整段。这里注入一个节流泵：
+        # 模型每吐一段文字，泵把它合并成一条 think_delta 事件发出去，
+        # 前端在同一行追加 —— 用户看到的是「它在想」，不是「它在等」。
+        # 详见 common_llm.DeltaPump 里关于节流的说明。
+        pump = DeltaPump(lambda text, kind: _emit_think_delta(run_id, text, kind))
 
-            if mode == "debug":
-                await _on_debug(run_id, chunk, start_idx, started)
-                continue
+        async def _on_think(text: str, kind: str) -> None:
+            pump.feed(text, kind)
 
-            for node, delta in (chunk or {}).items():
-                # ⚠️ 必须自己累积。`stream_mode="updates"` 只给**本节点的增量**，
-                # 不是累积状态 —— 早先直接把初始 `state` 传下去，于是
-                # deliver 阶段看到的 selected/excluded 永远是空的
-                # （问题文案据此编造，见 stages.deliver_question 的说明）。
-                for k, v in (delta or {}).items():
-                    if v is not None:
-                        state[k] = v
-                # 续跑时跳过 start_at 之前的节点（answer 之后从下一阶段接上）
-                if node in STAGE_KEYS and STAGE_KEYS.index(node) < start_idx:
+        async def _on_search_progress(info: dict) -> None:
+            """每个关键词查完发一条 call 事件 —— 带真实入参与返回样本。
+
+            这样「搜索候选」那 9 秒不再是整块静默，而且界面上能看到
+            **真的搜了什么、搜回来什么**（不是「返回 6 个 SKU」这种计数）。
+            """
+            kw = info.get("keyword") or ""
+            n = info.get("count") or 0
+            ok = info.get("ok")
+            await emit(run_id, "call", {
+                "title": f'检索「{kw}」',
+                "detail": (f"返回 {n} 件" if ok else "没有返回 —— 换词重试或跳过"),
+                "args": info.get("args") or {},
+                "sample": info.get("sample") or [],
+                "ok": bool(ok),
+            })
+
+        cfg = {"configurable": {
+            "on_think": _on_think,
+            "on_search_progress": _on_search_progress,
+        }}
+
+        try:
+            async for mode, chunk in graph.astream(
+                state, config=cfg, stream_mode=["updates", "debug"]
+            ):
+                if await get_run(run_id, user_id) is None:
+                    return   # run 被删了
+
+                if mode == "debug":
+                    await _on_debug(run_id, chunk, start_idx, started)
                     continue
-                stop = await _on_node(run_id, node, delta or {}, state,
-                                      started.pop(node, None))
-                if stop:
-                    await _patch_run(run_id, status="awaiting", question=stop)
-                    await emit(run_id, "question", stop)
-                    return
+
+                for node, delta in (chunk or {}).items():
+                    # ⚠️ 必须自己累积。`stream_mode="updates"` 只给**本节点的增量**，
+                    # 不是累积状态 —— 早先直接把初始 `state` 传下去，于是
+                    # deliver 阶段看到的 selected/excluded 永远是空的
+                    # （问题文案据此编造，见 stages.deliver_question 的说明）。
+                    for k, v in (delta or {}).items():
+                        if v is not None:
+                            state[k] = v
+                    # 续跑时跳过 start_at 之前的节点（answer 之后从下一阶段接上）
+                    if node in STAGE_KEYS and STAGE_KEYS.index(node) < start_idx:
+                        continue
+                    stop = await _on_node(run_id, node, delta or {}, state,
+                                          started.pop(node, None))
+                    if stop:
+                        await _patch_run(run_id, status="awaiting", question=stop)
+                        await emit(run_id, "question", stop)
+                        return
+        finally:
+            # 无论怎么退出都要收尾，否则最后一段推理会留在缓冲里丢掉
+            await pump.close()
 
         await _finish(run_id, user_id)
 
@@ -349,15 +418,7 @@ async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
 # 每个阶段「正在做什么」。
 # 刻意不写「正在思考…」这种放之四海皆准的话：写具体了，用户才知道它此刻
 # 是在等 MCP（慢）还是在等模型（慢），而不是以为界面卡住了。
-RUNNING_HINT = {
-    "intake": "把入口参数摊成可筛选的需求",
-    "clarify": "查这个品类该看哪些维度",
-    "search": "向淘宝检索真实商品",
-    "filter": "按预算等硬约束筛选",
-    "compare": "让模型逐条对比取舍",
-    "risk": "查售后与风险政策",
-    "deliver": "整理成待你拍板的问题",
-}
+# 每个阶段「正在做什么」已上移到 STAGES 旁边（建 run 时也要用）。
 
 
 async def _on_debug(run_id: str, chunk: dict, start_idx: int,
@@ -424,10 +485,11 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
 
     if node == "intake":
         needs = delta.get("needs") or []
+        # detail 直接列出这几条需求本身，而不是「N 条约束待落到可筛选字段」——
+        # 后者是 len() 拼出来的系统腔，用户看不出它到底读懂了什么。
         await emit(run_id, "think", {
-            "title": f"解析需求：{state.get('scene') or '未指定场景'}"
-                     + (f" · {state['budget']}" if state.get("budget") else ""),
-            "detail": f"{len(needs)} 条约束待落到可筛选字段",
+            "title": f"读懂这次要买什么",
+            "detail": "、".join(str(n.get("name") or "") for n in needs) or "没有解析出明确需求",
         })
         await _merge_graph(
             run_id,
@@ -438,16 +500,15 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
     elif node == "clarify":
         dims = delta.get("dimensions") or []
         from_kb = delta.get("dims_from_kb")
-        # 措辞必须跟着来源变：知识库真命中才说「命中 N 条」，
-        # 否则如实说用的是通用维度 —— 不然「命中」二字会被读成
-        # 「知识库里收录了这个品类」，而实际可能一条都没有。
+        # 措辞必须跟着来源变：知识库真命中才说「命中」，否则如实说用的是
+        # 通用维度 —— 不然「命中」二字会被读成「知识库里收录了这个品类」。
         #
         # by 用 "kb" 而不是 "llm"：知识库命中是**检索**结果，不是模型判断。
         # 三种来源要能分辨：kb 知识库 / llm 模型 / rule 规则兜底。
         await emit(run_id, "retrieve", {
-            "title": f"品类知识 · {state.get('subject') or state.get('scene') or '商品'}",
-            "detail": (f"命中 {len(dims)} 条评估维度" if from_kb
-                       else f"知识库未收录该品类，改用通用维度：{'、'.join(dims)}"),
+            "title": f"{state.get('subject') or state.get('scene') or '这个品类'}该看哪些维度",
+            # 列出维度本身，而不是「命中 N 条评估维度」
+            "detail": ("、".join(dims) + ("（来自知识库）" if from_kb else "（知识库未收录，用通用维度）")),
             "by": "kb" if from_kb else "rule",
         })
         await _merge_graph(
@@ -459,9 +520,16 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
     elif node == "search":
         cands = delta.get("candidates") or []
         base = state.get("subject") or state.get("scene") or "好物"
+        # 逐关键词的进度已由 stages 的 on_progress 回调实时发过 call 事件，
+        # 这里只补一条收尾汇总：把搜到的**真实商品**列出来（名字 + 价格），
+        # 而不是「返回 N 个真实 SKU」。
         await emit(run_id, "call", {
-            "title": f"搜索商品 ·「{base}」",
-            "detail": f"返回 {len(cands)} 个真实 SKU" if cands else "无结果 —— 不中断流程",
+            "title": f"搜索完成 ·「{base}」",
+            "detail": (f"共 {len(cands)} 件可用候选" if cands else "没有结果 —— 不中断流程"),
+            "sample": [
+                {"name": st.cand_name(c), "price": st.cand_yuan(c)} for c in cands[:5]
+            ],
+            "ok": bool(cands),
         })
         if cands:
             await _merge_graph(
@@ -479,10 +547,12 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
         kept = delta.get("candidates") or []
         dropped = delta.get("excluded") or []
         await emit(run_id, "think", {
-            "title": f"按硬约束筛选：保留 {len(kept)} 个"
-                     + (f"，排除 {len(dropped)} 个" if dropped else ""),
-            "detail": ("；".join(str(d.get("_reason") or "") for d in dropped[:2])
-                       or "没有候选违反预算等硬约束"),
+            "title": "按硬约束筛一遍",
+            # 列出被排除的**具体哪几件、为什么**，而不是「排除 N 个」
+            "detail": ("；".join(
+                f"{st.cand_name(d)}（{d.get('_reason') or '不满足硬约束'}）"
+                for d in dropped[:3]
+            ) or f"{len(kept)} 件都符合预算等硬约束"),
         })
         if dropped:
             nodes = [_node(
@@ -497,8 +567,10 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
         cands = [n for n in await _current_nodes(run_id) if n.get("type") == "候选商品"]
         if best.get("name"):
             await emit(run_id, "think", {
-                "title": f"对比 {len(cands) or '若干'} 款，选定「{str(best['name'])[:20]}」",
-                "detail": str(best.get("why") or "")[:80],
+                "title": f"选定「{str(best['name'])[:24]}」",
+                # why 不再截断到 80 字：那是模型真正在比较什么，砍掉只剩结论。
+                # 「AI 味」有一半来自这种被压扁的措辞。
+                "detail": str(best.get("why") or ""),
                 "by": best.get("by") or "rule",
             })
             nodes = await _current_nodes(run_id)
@@ -520,9 +592,10 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict,
         risks = delta.get("risks") or []
         from_kb = delta.get("risks_from_kb")
         await emit(run_id, "retrieve", {
-            "title": "风险与售后政策",
-            "detail": (f"命中 {len(risks)} 条待确认项" if from_kb
-                       else "知识库未收录该品类，按通用项提示"),
+            "title": "查了这类东西的售后与风险",
+            # 列出风险本身，而不是「命中 N 条待确认项」
+            "detail": ("、".join(risks) if risks else "没有查到明确风险项")
+                      + ("" if from_kb else "（知识库未收录，按通用项提示）"),
             "by": "kb" if from_kb else "rule",
         })
         await _merge_graph(
@@ -572,6 +645,19 @@ async def _finish(run_id: str, user_id: str) -> None:
         logger.error(f"[planning] run {run_id} 收尾失败: {e}", exc_info=True)
         await _patch_run(run_id, status="failed", error=str(e)[:500])
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
+
+
+async def _emit_think_delta(run_id: str, text: str, kind: str = "content") -> None:
+    """把模型推理的一段增量发出去。
+
+    ⚠️ 单独一种事件（而不是复用 `think`）：前端要把这些片段**追加到同一行**，
+    而 `think` 是「新起一条」。两者语义不同，混用会让每次增量都变成新条目。
+
+    带上 `phase` 让前端知道这段推理属于哪一步；带 `kind` 让前端区分
+    「它在想」（reasoning）与「它的结论」（content）—— 两者观感不同，
+    前者该弱化成过程，后者才是要读的内容。
+    """
+    await emit(run_id, "think_delta", {"phase": "compare", "text": text, "kind": kind})
 
 
 def _state_from_run(run: PlanningRun) -> dict:

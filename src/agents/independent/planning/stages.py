@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ from src.agents.independent.common_llm import (
     parse_json_block,
 )
 from src.agents.independent.common_llm import ask_model as _ask
+from src.agents.independent.common_llm import ask_model_streaming
 
 
 async def ask_model(system: str, user: str) -> str:
@@ -161,12 +162,27 @@ async def retrieve_dimensions(subject: str) -> tuple[list[str], bool]:
     return (hits, True) if hits else (["价格", "口碑", "售后"], False)
 
 
-async def search_candidates(state: dict) -> list[dict]:
+async def search_candidates(
+    state: dict,
+    on_progress: Callable[[dict], None] | None = None,
+) -> list[dict]:
     """search：**真调淘宝 MCP**，拿真实 SKU 与价格。
 
     复用 task_executors.common.parse_search_result —— 它已处理真实淘宝的
     嵌套结构（`result_list.map_data`，见 B6 修复）并把价格统一转成**分**。
     绝不再写第二套解析：两套必然漂。
+
+    `on_progress` 每个关键词查完回调一次。
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-25：为什么要按关键词报进度
+    ═══════════════════════════════════════════════════════════════════
+    两个关键词串行、每个约 4~5 秒，合起来是一整块 9 秒的静默 —— 界面上
+    就是「搜索候选」那一行干等。拆成「第 1 个词 → 返回 N 件」后，
+    9 秒变成两次 4.5 秒，中间有东西可看。
+
+    回调里带的是**真实入参与真实返回**（关键词、返回件数、前几件的
+    名字与价格），不是「返回 N 个 SKU」这种由 len() 拼出来的话 ——
+    用户能核对「它真去搜了，搜回来的是这些」。
     """
     base = state.get("subject") or state.get("scene") or "好物"
     keywords = [base]
@@ -179,8 +195,29 @@ async def search_candidates(state: dict) -> list[dict]:
     tool = await _mcp_tool("taobao_searchMaterial")
     found: list[dict] = []
     for kw in keywords:
-        raw = await _call(tool, {"q": kw, "page_size": SEARCH_PAGE_SIZE}, MCP_TIMEOUT)
-        found.extend(parse_search_result(raw) if raw is not None else [])
+        args = {"q": kw, "page_size": SEARCH_PAGE_SIZE}
+        raw = await _call(tool, args, MCP_TIMEOUT)
+        got = parse_search_result(raw) if raw is not None else []
+        found.extend(got)
+        if on_progress is not None:
+            try:
+                res = on_progress({
+                    "keyword": kw,
+                    "args": args,
+                    "ok": raw is not None,
+                    "count": len(got),
+                    # 真实返回的样本：名字 + 价格（元）。截 3 件，够核对。
+                    "sample": [
+                        {"name": cand_name(c), "price": cand_yuan(c)}
+                        for c in got[:3]
+                    ],
+                })
+                # 回调可能是协程（service 那边要 await emit）—— 不 await 的话
+                # 事件永远不会发出去，而且不会有任何报错，只是界面没反应。
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as e:
+                logger.warning(f"[planning] 搜索进度回调失败（忽略）: {e}")
         if len(found) >= SEARCH_PAGE_SIZE * 2:
             break
 
@@ -228,7 +265,11 @@ def cand_yuan(c: dict) -> float | None:
         return None
 
 
-async def pick_best(cands: list[dict], state: dict | None = None) -> dict:
+async def pick_best(
+    cands: list[dict],
+    state: dict | None = None,
+    on_think: Callable[[str, str], None] | None = None,
+) -> dict:
     """compare：**让模型做多维度取舍**，并给出理由。
 
     返回 {"name", "why", "by"}；`by` 标明这次是模型判断还是规则兜底 ——
@@ -236,6 +277,9 @@ async def pick_best(cands: list[dict], state: dict | None = None) -> dict:
 
     为什么不让模型自由发挥：它会挑一个候选池里不存在的商品。
     所以只让它**从给定编号里选**，编号越界整体降级。
+
+    `on_think` 传了就走流式：模型「先说人话、后给 JSON」，那段人话逐段
+    回调出去，界面上就是**看着它想**而不是干等十几秒。
     """
     if not cands:
         return {}
@@ -261,12 +305,17 @@ async def pick_best(cands: list[dict], state: dict | None = None) -> dict:
         f"候选：\n{listing}"
     )
 
-    reply = await ask_model(system, user)
+    if on_think is not None:
+        reply = await ask_model_streaming(system, user, on_think, tag="planning/pick_best")
+    else:
+        reply = await ask_model(system, user)
     obj = parse_json_block(reply)
     idx = as_idx((obj or {}).get("idx"))
     why = str((obj or {}).get("why") or "").strip()
     if idx is not None and 0 <= idx < len(cands) and why:
-        return {"name": cand_name(cands[idx]), "why": why[:120], "by": "llm"}
+        # why 不再截断到 120 字：那是模型真正在比较什么，砍掉就只剩结论，
+        # 「AI 味」有一半来自这种被压扁的措辞。
+        return {"name": cand_name(cands[idx]), "why": why, "by": "llm"}
 
     # 走到这儿说明模型**答了但没按契约答**（或压根没答上）。
     # 降级本身没问题，但降级必须**看得见** —— 见 degrade_note 的说明。

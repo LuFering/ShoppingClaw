@@ -2,7 +2,10 @@
   <div class="es">
     <header class="es-head">
       <span class="es-title">执行流</span>
-      <span class="es-sub">调用 · 检索 · 思考</span>
+      <!-- 阶段进度：总共几步、现在第几步。等待有了边界，焦虑感完全不同。 -->
+      <span v-if="phases.length" class="es-prog mono">
+        第 {{ phaseNow }} / {{ phases.length }} 步
+      </span>
       <!-- 整体状态：有步骤在跑时给一个会动的指示，静止的界面看起来像卡死 -->
       <span v-if="runningItem" class="es-live">
         <i class="es-live-dot" />进行中
@@ -43,14 +46,51 @@
           </span>
           <p class="es-text" :class="{ dim: item.state === 'todo' }">
             {{ item.title }}
-            <span v-if="item.state === 'running' && item.detail" class="es-hint">· {{ item.detail }}</span>
+            <span v-if="item.state === 'running' && !item.streaming && item.detail" class="es-hint">· {{ item.detail }}</span>
           </p>
+
+          <!--
+            推理正文：模型逐段吐出来的原文，不是我们拼的一句话。
+            流式期间带光标；结束后光标消失、文字留着 —— 这段文字**不删**，
+            它是这次判断的依据，用户随时能回看。
+
+            reasoning（它的自言自语）弱化成灰色；content（它要说的话）用正文色。
+            两者不区分的话，用户会以为模型在胡言乱语 —— 实测 reasoning 里
+            确实有试错和自我纠正（「第2是下水管隔音，场景太窄」这种）。
+          -->
+          <p
+            v-if="item.streaming || (item.kind === 'think' && item.detail)"
+            class="es-think"
+            :class="{ 'is-reasoning': item.thinkKind === 'reasoning' }"
+          >{{ item.detail }}<i v-if="item.streaming" class="es-caret" /></p>
+
+          <!--
+            真实入参与真实返回样本（call 事件带）。
+            这是「不假」的关键：用户能核对它**真的搜了什么、搜回来什么**，
+            而不是只看一句由 len() 拼出来的「返回 6 个 SKU」。
+          -->
+          <div v-if="item.args || item.sample?.length" class="es-tool">
+            <p v-if="item.args" class="es-tool-line">
+              <span class="es-tool-k">入参</span>
+              <span class="es-tool-v mono">{{ fmtArgs(item.args) }}</span>
+            </p>
+            <template v-if="item.sample?.length">
+              <p class="es-tool-k">返回</p>
+              <ul class="es-samples">
+                <li v-for="(s, k) in item.sample" :key="k">
+                  <span class="es-sample-n">{{ s.name }}</span>
+                  <span v-if="s.price != null" class="es-sample-p mono">¥{{ fmtPrice(s.price) }}</span>
+                </li>
+              </ul>
+            </template>
+          </div>
+
           <!-- 正在跑的这一步：显示**实时**已用时长，让「它在动」可见 -->
-          <p v-if="item.state === 'running'" class="es-meta">
+          <p v-if="item.state === 'running' && !item.streaming" class="es-meta">
             <span class="es-elapsed mono">{{ elapsedOf(item) }}</span>
             <i class="es-caret" />
           </p>
-          <p v-else-if="item.detail" class="es-detail" :class="{ dim: item.state === 'todo' }">{{ item.detail }}</p>
+          <p v-else-if="item.detail && !item.streaming && item.kind !== 'think'" class="es-detail" :class="{ dim: item.state === 'todo' }">{{ item.detail }}</p>
           <p class="es-time mono">
             <span v-if="item.ms != null" class="es-ms">{{ fmtMs(item.ms) }}</span>
             <span v-if="item.time">{{ item.time }}</span>
@@ -113,6 +153,20 @@ const totalMs = computed(() =>
   props.items.reduce((sum, x) => sum + (typeof x.ms === 'number' ? x.ms : 0), 0)
 )
 
+/**
+ * 阶段进度：已完成的 / 总共几个。
+ *
+ * 建 run 时后端就把 7 个阶段全部铺下来了，所以这个分母从第一秒就成立 ——
+ * 用户一开始就知道「总共 7 步、现在第 3 步」，而不是看着一条条冒出来
+ * 不知道还有多久。
+ */
+const phases = computed(() => props.items.filter((x) => x.kind === 'phase'))
+const phaseDone = computed(() => phases.value.filter((x) => x.state === 'done').length)
+const phaseNow = computed(() => {
+  const i = phases.value.findIndex((x) => x.state === 'running')
+  return i >= 0 ? i + 1 : Math.min(phaseDone.value + 1, phases.value.length)
+})
+
 // ── 实时秒数 ──────────────────────────────────────────────
 // tick 只是用来触发重算的计数器：已用时长必须每帧重算（见 elapsedOf），
 // 存在数据里的话就成了「只算一次的假时钟」。
@@ -137,6 +191,21 @@ const fmtMs = (ms) => {
   if (ms == null) return ''
   if (ms < 1000) return `${Math.round(ms)}ms`
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+/** 价格是「元」，整数不显示小数点 */
+const fmtPrice = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  return Number.isInteger(n) ? String(n) : n.toFixed(2)
+}
+
+/** 工具入参：`{"q":"隔音材料","page_size":6}` → `q=隔音材料 · page_size=6` */
+const fmtArgs = (args) => {
+  if (!args || typeof args !== 'object') return ''
+  return Object.entries(args)
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+    .join(' · ')
 }
 
 const isNearBottom = () => {
@@ -202,8 +271,10 @@ onBeforeUnmount(() => {
   font-weight: 600;
   color: var(--text-strong);
 }
-.es-sub {
-  font-size: 0.7rem;
+/* 阶段进度：取代原来的静态说明「调用 · 检索 · 思考」——
+   那句是分类标签，而这里给的是**进程信息**（第几步 / 共几步）。 */
+.es-prog {
+  font-size: 0.68rem;
   color: var(--text-muted);
 }
 .es-live {
@@ -381,6 +452,73 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
   &.dim { color: var(--text-faint); }
 }
+
+/* 推理正文：模型原文，逐段长出来。比 es-detail 更"实"（是内容不是注脚），
+   所以用正文色、行距放开一点，读起来像一段话而不是一条日志。 */
+.es-think {
+  margin: 3px 0 0;
+  font-size: 0.74rem;
+  line-height: 1.65;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* reasoning（模型的自言自语）弱化：它是过程，不是结论 */
+  &.is-reasoning {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+  }
+}
+
+/* 工具的真实入参与返回样本 */
+.es-tool {
+  margin: 5px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+.es-tool-line {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+}
+.es-tool-k {
+  flex: 0 0 auto;
+  margin: 0 0 3px;
+  font-size: 0.64rem;
+  color: var(--text-faint);
+}
+.es-tool-v {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.es-samples {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  li {
+    display: flex;
+    gap: 8px;
+    font-size: 0.69rem;
+    line-height: 1.45;
+  }
+}
+.es-sample-n {
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.es-sample-p {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
 .es-time {
   display: flex;
   gap: 6px;
