@@ -172,60 +172,29 @@ const applyEvent = (kind, payload) => {
   switch (kind) {
     case 'phase': {
       const phase = payload.phase
-      // 建 run 时后端会把**全部 7 个阶段**以 todo 铺下来，让用户一开始
-      // 就看得到全貌与剩余步数（而不是一条条冒出来、不知道还有多少）。
-      if (payload.state === 'todo') {
-        if (stream.value.some((x) => x.kind === 'phase' && x.phase === phase)) break
+      // ═══════════════════════════════════════════════════════════════
+      // 2026-09-26：阶段从「流程步骤」降级成「归类标签」
+      // ═══════════════════════════════════════════════════════════════
+      // 旧实现按写死的七个阶段推进，所以有 todo→running→done 三态、
+      // 还要给每一步算耗时。现在走法由模型定，阶段只是给工具调用**分组**
+      // 用的（「这次搜索属于『搜索候选』」），不再是一条可预期的流水线。
+      //
+      // 所以这里不再维护 todo 态、也不再算耗时 —— 真实耗时由调用行自己带。
+      // 同名的阶段标签只落一条，后续调用往它下面挂。
+      const exist = stream.value.find((x) => x.kind === 'phase' && x.phase === phase)
+      if (exist) {
+        exist.state = 'running'
+        exist.detail = payload.hint || exist.detail
+        exist.time = nowClock()
+      } else {
         stream.value.push({
           kind: 'phase',
           phase,
           title: payload.label || phase,
           detail: payload.hint || '',
-          state: 'todo',
-          time: ''
+          state: 'running',
+          time: nowClock()
         })
-        break
-      }
-      if (payload.state === 'running') {
-        // 同一步可能先 running 后 done；用 phase key 找到那一行就地改状态，
-        // 而不是再 push 一条（否则一步会占两行）
-        const exist = stream.value.find((x) => x.kind === 'phase' && x.phase === phase)
-        if (exist) {
-          exist.state = 'running'
-          exist.detail = payload.hint || exist.detail
-          exist.startedAt = Date.now()
-          exist.time = nowClock()
-        } else {
-          stream.value.push({
-            kind: 'phase',
-            phase,
-            title: payload.label || phase,
-            detail: payload.hint || '',
-            state: 'running',
-            startedAt: Date.now(),
-            time: nowClock()
-          })
-        }
-      } else {
-        const row = stream.value.find((x) => x.kind === 'phase' && x.phase === phase)
-        if (row) {
-          row.state = 'done'
-          row.ms = payload.ms ?? null
-          // 用后端给的真实耗时；后端没给就退回本地计时（仍是实测，不是编的）
-          if (row.ms == null && row.startedAt) row.ms = Date.now() - row.startedAt
-          row.time = nowClock()
-        } else {
-          // 没有对应的 running（比如续跑跳过了 debug）—— 如实落一条无时长的
-          stream.value.push({
-            kind: 'phase',
-            phase,
-            title: payload.label || phase,
-            detail: '',
-            state: 'done',
-            ms: payload.ms ?? null,
-            time: nowClock()
-          })
-        }
       }
       break
     }
@@ -290,11 +259,45 @@ const applyEvent = (kind, payload) => {
         args: payload.args || null,
         sample: payload.sample || null,
         ok: payload.ok,
+        // 配对键：call_result 靠它找到这条，并行调用时不会串行
+        toolCallId: payload.tool_call_id || '',
         state: 'done',
         time: nowClock()
       })
       break
     }
+    // 工具**返回**：补到刚才那条调用上，而不是新起一行。
+    // ═══════════════════════════════════════════════════════════════
+    // 2026-09-26：按 tool_call_id 精确配对，不能靠「最后一条没返回的」
+    // ═══════════════════════════════════════════════════════════════
+    // 模型会**并行**调多个工具（实测一次并行搜 2~3 个关键词），返回顺序
+    // 不保证。按「最后一条还没返回的 call」去挂，会把 A 的结果挂到 B 上 ——
+    // 界面上就是「搜的是隔音毡、返回的却是吸音板」，看着像模型在胡说。
+    case 'call_result': {
+      const cid = payload.tool_call_id || ''
+      let row = cid
+        ? stream.value.find((x) => x.kind === 'call' && x.toolCallId === cid)
+        : null
+      if (!row) {
+        // 没有 id（旧事件）或找不到：退回到「最后一条还没返回的」。
+        // 单次调用时这是对的；并行时可能配错，但总比丢掉强。
+        row = [...stream.value].reverse().find((x) => x.kind === 'call' && !x.result)
+      }
+      if (row) {
+        row.result = payload.text || ''
+      } else {
+        stream.value.push({
+          kind: 'call',
+          title: '工具返回',
+          detail: '',
+          result: payload.text || '',
+          state: 'done',
+          time: nowClock()
+        })
+      }
+      break
+    }
+
     case 'graph':
       // 整图替换 —— 合并已在服务端做过
       graphData.value = {
@@ -302,6 +305,7 @@ const applyEvent = (kind, payload) => {
         edges: payload.edges || []
       }
       break
+
     case 'question':
       pendingQuestion.value = {
         text: payload.text,

@@ -493,7 +493,8 @@ async def _on_agent_step(
                 key = f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
                 first = key not in seen_tools
                 seen_tools.add(key)
-                await _emit_tool_call(run_id, name, args, first)
+                await _emit_tool_call(run_id, name, args, first,
+                                      call.get("id") or "")
 
             # ── 工具返回 ──
             if isinstance(m, ToolMessage):
@@ -507,8 +508,15 @@ async def _on_agent_step(
     return None
 
 
-async def _emit_tool_call(run_id: str, name: str, args: dict, first: bool) -> None:
-    """模型决定调某个工具 → 一条事件。**带真实入参**。"""
+async def _emit_tool_call(run_id: str, name: str, args: dict, first: bool,
+                          tool_call_id: str = "") -> None:
+    """模型决定调某个工具 → 一条事件。**带真实入参**。
+
+    ⚠️ 带上 `tool_call_id`：模型会**并行**调多个工具，返回时要用它精确配对
+    到是哪一次调用。前端靠「最后一条还没返回的 call」去猜是错的 ——
+    并行时返回顺序不保证，会把 A 的结果挂到 B 上（实测踩过：搜索关键词和
+    返回的商品对不上）。
+    """
     stage, verb = _TOOL_META.get(name, ("执行", name))
     if first:
         await emit(run_id, "phase", {
@@ -524,6 +532,7 @@ async def _emit_tool_call(run_id: str, name: str, args: dict, first: bool) -> No
         "sample": sample,
         "tool": name,
         "stage": stage,
+        "tool_call_id": tool_call_id,
     })
 
 

@@ -2,10 +2,16 @@
   <div class="es">
     <header class="es-head">
       <span class="es-title">执行流</span>
-      <!-- 阶段进度：总共几步、现在第几步。等待有了边界，焦虑感完全不同。 -->
-      <span v-if="phases.length" class="es-prog mono">
-        第 {{ phaseNow }} / {{ phases.length }} 步
-      </span>
+      <!--
+        不报「第 N / 7 步」了。
+        ═══════════════════════════════════════════════════════════════
+        2026-09-26：分母不存在了
+        ═══════════════════════════════════════════════════════════════
+        旧实现按写死的七个阶段推进，所以能说「总共 7 步、现在第 3 步」。
+        现在走法由模型定 —— 它可能搜三次、可能跳过风险排查、可能来回问
+        两次。硬报分母就是编的。改成报「调了几次工具」，那是真实发生的事。
+      -->
+      <span v-if="toolCount" class="es-prog mono">{{ toolCount }} 次工具调用</span>
       <!-- 整体状态：有步骤在跑时给一个会动的指示，静止的界面看起来像卡死 -->
       <span v-if="runningItem" class="es-live">
         <i class="es-live-dot" />进行中
@@ -69,7 +75,7 @@
             这是「不假」的关键：用户能核对它**真的搜了什么、搜回来什么**，
             而不是只看一句由 len() 拼出来的「返回 6 个 SKU」。
           -->
-          <div v-if="item.args || item.sample?.length" class="es-tool">
+          <div v-if="item.args || item.sample?.length || item.result" class="es-tool">
             <p v-if="item.args" class="es-tool-line">
               <span class="es-tool-k">入参</span>
               <span class="es-tool-v mono">{{ fmtArgs(item.args) }}</span>
@@ -82,6 +88,22 @@
                   <span v-if="s.price != null" class="es-sample-p mono">¥{{ fmtPrice(s.price) }}</span>
                 </li>
               </ul>
+            </template>
+            <!--
+              工具原文返回：模型看到的就是这段。
+              默认**收起成一行摘要** —— 搜索一次返回 6 件带描述，全展开会把
+              执行流顶爆（实测一次调用的输出占满整个面板，其他行全被挤出去）。
+              点一下展开完整内容。
+            -->
+            <template v-else-if="item.result">
+              <p class="es-tool-k">
+                <button class="es-result-toggle" type="button" @click="toggleResult(item)">
+                  返回 {{ item.result.split('\n').length }} 行
+                  <span class="es-result-chevron">{{ expanded.has(item) ? '收起' : '展开' }}</span>
+                </button>
+              </p>
+              <pre v-if="expanded.has(item)" class="es-result">{{ item.result }}</pre>
+              <p v-else class="es-result-brief">{{ firstLine(item.result) }}</p>
             </template>
           </div>
 
@@ -154,18 +176,30 @@ const totalMs = computed(() =>
 )
 
 /**
- * 阶段进度：已完成的 / 总共几个。
+ * 工具调用次数 —— 代替原来的「第 N / 7 步」。
  *
- * 建 run 时后端就把 7 个阶段全部铺下来了，所以这个分母从第一秒就成立 ——
- * 用户一开始就知道「总共 7 步、现在第 3 步」，而不是看着一条条冒出来
- * 不知道还有多久。
+ * 走法由模型定之后就没有固定分母了，但「它已经做了多少件事」是真实的、
+ * 可数的，而且恰好是用户想知道的量：调得越多说明它查得越细。
  */
-const phases = computed(() => props.items.filter((x) => x.kind === 'phase'))
-const phaseDone = computed(() => phases.value.filter((x) => x.state === 'done').length)
-const phaseNow = computed(() => {
-  const i = phases.value.findIndex((x) => x.state === 'running')
-  return i >= 0 ? i + 1 : Math.min(phaseDone.value + 1, phases.value.length)
-})
+const toolCount = computed(
+  () => props.items.filter((x) => x.kind === 'call').length
+)
+
+/**
+ * 哪些工具返回被展开了。
+ *
+ * 用 Set 存**行对象引用**（不是下标）—— 行会被 push 进来，下标会漂。
+ * 默认收起：搜索一次返回 6 件带描述，全展开会把执行流顶爆
+ * （实测一次调用的输出占满整个面板，其他行全被挤出去）。
+ */
+const expanded = ref(new Set())
+const toggleResult = (item) => {
+  const next = new Set(expanded.value)
+  if (next.has(item)) next.delete(item)
+  else next.add(item)
+  expanded.value = next
+}
+const firstLine = (text) => (text || '').split('\n')[0].slice(0, 60)
 
 // ── 实时秒数 ──────────────────────────────────────────────
 // tick 只是用来触发重算的计数器：已用时长必须每帧重算（见 elapsedOf），
@@ -517,6 +551,44 @@ onBeforeUnmount(() => {
   margin-left: auto;
   flex: 0 0 auto;
   color: var(--text-faint);
+}
+
+/* 工具原文返回：模型看到的就是这段。等宽、可滚动、限高 ——
+   它可能很长（搜索返回 6 件带描述），不能让执行流被一段输出顶爆。 */
+.es-result {
+  margin: 2px 0 0;
+  max-height: 132px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+/* 收起态：一行摘要 */
+.es-result-brief {
+  margin: 2px 0 0;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.es-result-toggle {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--font-body);
+  font-size: 0.64rem;
+  color: var(--text-faint);
+  cursor: pointer;
+  &:hover { color: var(--text-muted); }
+}
+.es-result-chevron {
+  margin-left: 4px;
+  color: var(--accent-700);
 }
 
 .es-time {
