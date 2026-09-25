@@ -22,18 +22,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from langchain_core.messages import ToolMessage
 from sqlalchemy import desc, func, select
 
 from src.agents.independent.planning import stages as st
 from src.agents.independent.common_llm import DeltaPump
 from src.storage.postgres.manager import pg_manager
-from src.agents.independent.planning.graph import get_planning_graph
+from src.agents.independent.planning.graph import get_planning_agent
 from src.storage.postgres.models_business import PlanningEvent, PlanningRun
 
 logger = logging.getLogger(__name__)
@@ -260,11 +262,15 @@ async def create_run(user_id: str, params: dict) -> dict:
     # 原先阶段是一条条冒出来的，用户看不到还剩几步、也不知道总共要做什么。
     # 铺满之后是「7 步，正在第 3 步」—— 等待有了边界，焦虑感完全不同。
     # 每条的 state 由后续的 phase 事件就地改成 running / done。
-    for key, label in STAGES:
-        await emit(run_id, "phase", {
-            "phase": key, "label": label,
-            "state": "todo", "hint": RUNNING_HINT.get(key, ""),
-        })
+    # 建 run 时**不铺阶段**了。
+    # ═══════════════════════════════════════════════════════════════════
+    # 2026-09-26：为什么撤掉「第 N / 7 步」
+    # ═══════════════════════════════════════════════════════════════════
+    # 旧实现按写死的七个阶段推进，所以能提前告诉用户「总共 7 步、现在第 3 步」。
+    # 现在走法由模型定 —— 它可能搜三次、可能跳过风险排查、可能来回问两次。
+    # 硬报「第 N / 7 步」就是编的：分母根本不存在。
+    # 阶段名改成**归组标签**（见 _TOOL_META），界面按工具调用实时归类，
+    # 不再有全局进度。宁可少一个进度条，也不给一个假的分母。
 
     # 后台推进：不阻塞本次请求。失败只记日志，run 会停在 failed 且带 error。
     asyncio.create_task(advance(run_id, user_id))
@@ -274,7 +280,18 @@ async def create_run(user_id: str, params: dict) -> dict:
 
 
 async def answer_question(run_id: str, user_id: str, key: str) -> dict | None:
-    """用户回答待确认问题 → 收掉问题、记事件、从**下一阶段**续跑。"""
+    """用户回答待确认问题 → 收掉问题、把回答喂回 agent 续跑。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-26：续跑方式变了
+    ═══════════════════════════════════════════════════════════════════
+    旧实现要算「从提问阶段的**下一阶段**接上」—— 因为阶段是写死的链，
+    从当前阶段重跑会让它再问一次（死循环）。
+
+    现在没有阶段链了：agent 是一圈 ReAct 循环，用户的回答就是**新的输入**。
+    把它接在历史消息后面重新跑一轮，模型自己会接着往下走。
+    所以这里只需要把「历史 + 回答」存下来供 `advance` 拼输入。
+    """
     run = await get_run(run_id, user_id)
     if run is None:
         return None
@@ -283,21 +300,15 @@ async def answer_question(run_id: str, user_id: str, key: str) -> dict | None:
         (o.get("label") for o in (q.get("options") or []) if o.get("key") == key), key
     )
     await emit(run_id, "think", {
-        "title": f"按你的选择「{label}」调整约束",
-        "detail": "已更新决策图的「预算约束」节点",
+        "title": f"按你的选择「{label}」继续",
+        "detail": "把这条回答交给 agent，它接着往下判断",
     })
-    await _patch_run(run_id, question=None, status="running")
 
-    # 从**提问阶段的下一阶段**续跑，而不是从提问阶段本身 ——
-    # 后者会让该阶段再问一次，陷入死循环（每个阶段都是「跑完才问」）。
-    asked = q.get("phase")
-    i = STAGE_KEYS.index(asked) if asked in STAGE_KEYS else len(STAGE_KEYS) - 1
-    nxt = STAGE_KEYS[i + 1] if i + 1 < len(STAGE_KEYS) else None
+    # 记下「回答了哪个选项」，advance 会把它转成一句话喂回模型。
+    # 不存完整消息历史：run 表已经够宽了，而且历史可以从事件流重建。
+    await _patch_run(run_id, question=None, answer_pick=key, status="running")
 
-    if nxt:
-        asyncio.create_task(advance(run_id, user_id, start_at=nxt))
-    else:
-        asyncio.create_task(_finish(run_id, user_id))
+    asyncio.create_task(advance(run_id, user_id))
 
     fresh = await get_run(run_id, user_id)
     return fresh.to_dict() if fresh else None
@@ -307,106 +318,85 @@ async def answer_question(run_id: str, user_id: str, key: str) -> dict | None:
 # 推进
 # ══════════════════════════════════════════════════════════
 
-async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
-    """推进这次 run。**永不抛异常**（失败落 run.error）。
 
-    start_at 是**起始阶段本身**（包含），语义与 answer_question 的续跑一致。
+async def advance(run_id: str, user_id: str) -> None:
+    """跑**一次 ReAct 循环**。**永不抛异常**（失败落 run.error）。
 
-    推进靠 `graph.astream()`：图的每个节点产出经 `_on_node` 转成事件与图变更，
-    返回 question 就落 awaiting 并跳出 —— 这就是「等用户拍板」的中断点。
-    流程本身只有图那一份定义，这里不再自己排阶段顺序。
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-26：从「按七个阶段推进」改成「订阅模型的一次次决策」
+    ═══════════════════════════════════════════════════════════════════
+
+    旧实现按 `STAGES` 顺序跑七个节点，service 知道每一步是什么、下一步去哪。
+    现在流程由模型定，service **不知道**它接下来要干什么 —— 只能订阅
+    agent 的产出，把「模型决定调哪个工具」翻译成事件。
+
+    订阅 `stream_mode=["updates", "messages"]`：
+      · `updates` —— 每个节点跑完的产出。模型节点的 `tool_calls` 就是
+        「它决定了什么」，工具节点的 `ToolMessage` 就是「拿到了什么」。
+      · `messages` —— **逐 token 的模型输出**，用来做实时推理流。
+        这是 `create_agent` 自带的，不需要我们再往模型里塞回调。
+
+    中断（ask_user）：工具写了 `question` 就落 awaiting 并停在这里。
+    续跑时把用户的回答作为新消息喂回去，循环接着走。
     """
     try:
         run = await get_run(run_id, user_id)
         if run is None:
             return
 
+        # 决策图：核心任务节点先立起来，后面每次搜索/排除往里加
         await _merge_graph(
             run_id,
             [_node("task", f"{run.scene}采购任务" if run.scene else "本次采购任务",
                     "核心任务", 5, "active", {"scene": run.scene})],
             [],
         )
-
-        start_idx = STAGE_KEYS.index(start_at) if start_at in STAGE_KEYS else 0
-        state = _state_of(run)
-
-        # ═══ 跑图，而不是自己串流程 ═══
-        # 2026-09-25 修正：这里原先是一个 for 循环调 `_run_stage`，
-        # 而 `graph.py` 里的 LangGraph **从未被执行过** —— 两份实现并存。
-        # 现在图是唯一推进路径，service 只订阅它的逐节点产出。
-        #
-        # 同时订阅 debug：只有它能给出「节点开始执行」的时点（见 _on_debug）。
-        graph = get_planning_graph()
         await _patch_run(run_id, status="running")
 
-        started: dict[str, float] = {}   # 节点名 → 开始时刻，用来算真实耗时
+        agent = get_planning_agent()
+        init = _agent_input(run)
+        # 续跑：用户答过问，就把那条回答作为新消息接上 —— agent 是循环，
+        # 多给一条输入它自己会接着判断，不需要我们算「从哪一步接」。
+        if run.answer_pick:
+            init["messages"] = init["messages"] + [
+                {"role": "user", "content": _answer_text(run)}
+            ]
 
-        # ── 推理逐字流 ──
-        # compare 阶段模型要想 8~12 秒。原先它是 ainvoke（一次性），界面上
-        # 就是「正在思考」静止十几秒然后突然冒出一整段。这里注入一个节流泵：
-        # 模型每吐一段文字，泵把它合并成一条 think_delta 事件发出去，
-        # 前端在同一行追加 —— 用户看到的是「它在想」，不是「它在等」。
-        # 详见 common_llm.DeltaPump 里关于节流的说明。
-        pump = DeltaPump(lambda text, kind: _emit_think_delta(run_id, text, kind))
-
-        async def _on_think(text: str, kind: str) -> None:
-            pump.feed(text, kind)
-
-        async def _on_search_progress(info: dict) -> None:
-            """每个关键词查完发一条 call 事件 —— 带真实入参与返回样本。
-
-            这样「搜索候选」那 9 秒不再是整块静默，而且界面上能看到
-            **真的搜了什么、搜回来什么**（不是「返回 6 个 SKU」这种计数）。
-            """
-            kw = info.get("keyword") or ""
-            n = info.get("count") or 0
-            ok = info.get("ok")
-            await emit(run_id, "call", {
-                "title": f'检索「{kw}」',
-                "detail": (f"返回 {n} 件" if ok else "没有返回 —— 换词重试或跳过"),
-                "args": info.get("args") or {},
-                "sample": info.get("sample") or [],
-                "ok": bool(ok),
-            })
-
-        cfg = {"configurable": {
-            "on_think": _on_think,
-            "on_search_progress": _on_search_progress,
-        }}
+        # 推理要过噪音过滤：agent 的推理通道会夹英文草稿与念任务要求的话，
+        # 那些是「AI 味」的主要来源（详见 common_llm.filter_reasoning）。
+        # 正文不过滤 —— 那是要读的内容，一个字都不能丢。
+        pump = DeltaPump(
+            lambda text, kind: _emit_think_delta(run_id, text, kind),
+            filter_reasoning_text=True,
+        )
+        seen_tools: set[str] = set()
+        # 跨步累积的产物（候选/排除/选中/风险/维度）。
+        # `stream_mode="updates"` 只给增量，得自己攒；攒出来的要落库，
+        # 否则收尾生成交付物时读不到（见 _persist_products 的说明）。
+        acc: dict = {}
 
         try:
-            async for mode, chunk in graph.astream(
-                state, config=cfg, stream_mode=["updates", "debug"]
+            async for mode, chunk in agent.astream(
+                init, stream_mode=["updates", "messages"]
             ):
                 if await get_run(run_id, user_id) is None:
                     return   # run 被删了
 
-                if mode == "debug":
-                    await _on_debug(run_id, chunk, start_idx, started)
+                if mode == "messages":
+                    await _on_model_token(run_id, chunk, pump)
                     continue
 
-                for node, delta in (chunk or {}).items():
-                    # ⚠️ 必须自己累积。`stream_mode="updates"` 只给**本节点的增量**，
-                    # 不是累积状态 —— 早先直接把初始 `state` 传下去，于是
-                    # deliver 阶段看到的 selected/excluded 永远是空的
-                    # （问题文案据此编造，见 stages.deliver_question 的说明）。
-                    for k, v in (delta or {}).items():
-                        if v is not None:
-                            state[k] = v
-                    # 续跑时跳过 start_at 之前的节点（answer 之后从下一阶段接上）
-                    if node in STAGE_KEYS and STAGE_KEYS.index(node) < start_idx:
-                        continue
-                    stop = await _on_node(run_id, node, delta or {}, state,
-                                          started.pop(node, None))
-                    if stop:
-                        await _patch_run(run_id, status="awaiting", question=stop)
-                        await emit(run_id, "question", stop)
-                        return
+                stop = await _on_agent_step(run_id, chunk, seen_tools, pump, acc)
+                if stop:
+                    await pump.close()
+                    await _patch_run(run_id, status="awaiting", question=stop)
+                    await emit(run_id, "question", stop)
+                    return
         finally:
-            # 无论怎么退出都要收尾，否则最后一段推理会留在缓冲里丢掉
             await pump.close()
 
+        # 收尾前把产物落库 —— `_finish` 生成交付物时要读它
+        await _persist_products(run_id, acc)
         await _finish(run_id, user_id)
 
     except Exception as e:
@@ -415,199 +405,157 @@ async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
 
 
-# 每个阶段「正在做什么」。
-# 刻意不写「正在思考…」这种放之四海皆准的话：写具体了，用户才知道它此刻
-# 是在等 MCP（慢）还是在等模型（慢），而不是以为界面卡住了。
-# 每个阶段「正在做什么」已上移到 STAGES 旁边（建 run 时也要用）。
+def _agent_input(run: PlanningRun) -> dict:
+    """给 agent 的初始输入：任务描述 + 入口参数。"""
+    from src.agents.independent.planning.graph import build_goal
 
-
-async def _on_debug(run_id: str, chunk: dict, start_idx: int,
-                    started: dict[str, float]) -> None:
-    """把图的 debug 事件翻译成「正在做什么」。
-
-    ═══════════════════════════════════════════════════════════════════
-    为什么非要用 debug 模式 —— 只用 updates 时「运行中」是不存在的状态
-    ═══════════════════════════════════════════════════════════════════
-
-    `updates` 只在节点**跑完之后**才 yield。所以节点开始时没有任何信号，
-    等收到信号时活儿已经干完了 —— 界面上「进行中」那一行根本没有出现的
-    机会（gift 那边就是这么写的：running 与 done 在同一瞬间发出）。
-
-    实测最慢的两步是 MCP 检索（~9s）与模型取舍（~8s），这十几秒里界面
-    一动不动，看起来像卡死。debug 模式的 `task` 事件在节点**开始执行前**
-    发出，这是唯一能拿到「现在在干什么」的时点。
-
-    耗时不用 `task_result`（它在 updates 之后才到）：直接用 updates 到达
-    时刻减去 task 时刻。两者都在节点尾部，差值就是真实执行时长。
-    """
-    if (chunk or {}).get("type") != "task":
-        return
-    node = (chunk.get("payload") or {}).get("name") or ""
-    if node not in STAGE_LABEL:
-        return
-    if node in STAGE_KEYS and STAGE_KEYS.index(node) < start_idx:
-        return   # 续跑时跳过的阶段，不发「正在做」
-    started[node] = time.monotonic()
-    await emit(run_id, "phase", {
-        "phase": node, "label": STAGE_LABEL[node],
-        "state": "running", "hint": RUNNING_HINT.get(node, ""),
-    })
-
-
-def _state_of(run: PlanningRun) -> dict:
+    state = _state_of(run)
     return {
-        "scene": run.scene, "budget": run.budget, "duration": run.duration,
-        "constraints": run.constraints or [], "subject": run.subject,
-        "run_id": run.id, "user_id": run.user_id,
+        "messages": [{"role": "user", "content": build_goal(state)}],
+        **state,
     }
 
 
-# 图节点名 → 阶段 key（与 STAGES 对齐）
-async def _on_node(run_id: str, node: str, delta: dict, state: dict,
-                   t_start: float | None = None) -> dict | None:
-    """一个图节点跑完 → 落它的事件与图变更。
+def _answer_text(run: PlanningRun) -> str:
+    """用户对上一次提问的回答，转成一句话喂回模型。"""
+    q = run.question or {}
+    picked = run.answer_pick or ""
+    label = next(
+        (o.get("label") for o in (q.get("options") or []) if o.get("key") == picked),
+        picked,
+    )
+    return f"关于「{q.get('text') or ''}」，我选：{label}。请据此继续。"
 
-    返回非 None 表示「要停下来问用户」（值是 question 对象）。
 
-    事件顺序跟着 `astream` 的逐节点产出走，不用自己排 ——
-    这是把流程交给图的直接好处。
+# ── 工具名 → 展示用的事件 ────────────────────────────────────
+# 事件不再是「第几阶段」，而是「模型决定做什么」。这张表把工具名翻成人话，
+# 并决定归到哪个阶段标签下（标签只用于分组，不再代表流程顺序）。
+_TOOL_META: dict[str, tuple[str, str]] = {
+    # 工具名: (阶段标签, 动作措辞)
+    "check_category_standards": ("澄清约束", "查品类标准"),
+    "search_products": ("搜索候选", "搜索商品"),
+    "check_risks": ("风险排查", "查风险与售后"),
+    "drop_candidates": ("筛选硬约束", "排除不符合的"),
+    "make_decision": ("横向对比", "定下选哪件"),
+    "ask_user": ("生成交付", "向你确认"),
+}
 
-    t_start 是该节点开始执行的 `time.monotonic()`（由 `_on_debug` 记下）。
-    有它就发一条带真实耗时的 phase；没有（比如续跑跳过了 debug）就不发，
-    宁可没有时长也不编一个。
+
+async def _on_model_token(run_id: str, chunk: Any, pump: DeltaPump) -> None:
+    """模型逐 token 输出 → 喂进节流泵。
+
+    `stream_mode="messages"` 给的是 `(message_chunk, metadata)`。只取正文与
+    推理两种文本，工具调用的参数片段（JSON）不播 —— 那是程序不是思考。
     """
-    if node not in STAGE_LABEL:
-        return None
-    done_evt = {"phase": node, "label": STAGE_LABEL[node], "state": "done"}
-    if t_start is not None:
-        done_evt["ms"] = int((time.monotonic() - t_start) * 1000)
-    await emit(run_id, "phase", done_evt)
+    from src.agents.independent.common_llm import _chunk_parts
 
-    if node == "intake":
-        needs = delta.get("needs") or []
-        # detail 直接列出这几条需求本身，而不是「N 条约束待落到可筛选字段」——
-        # 后者是 len() 拼出来的系统腔，用户看不出它到底读懂了什么。
-        await emit(run_id, "think", {
-            "title": f"读懂这次要买什么",
-            "detail": "、".join(str(n.get("name") or "") for n in needs) or "没有解析出明确需求",
-        })
-        await _merge_graph(
-            run_id,
-            [_node(n["id"], n["name"], "需求", n["importance"], "candidate") for n in needs],
-            [_edge("task", n["id"], "需要") for n in needs],
-        )
+    msg = chunk[0] if isinstance(chunk, (list, tuple)) else chunk
+    content, reason = _chunk_parts(msg)
+    if reason:
+        pump.feed(reason, "reasoning")
+    elif content:
+        # 只在没有工具调用时才播正文（有 tool_calls 时正文往往是空转的说明）
+        if not (getattr(msg, "tool_call_chunks", None) or []):
+            pump.feed(content, "content")
 
-    elif node == "clarify":
-        dims = delta.get("dimensions") or []
-        from_kb = delta.get("dims_from_kb")
-        # 措辞必须跟着来源变：知识库真命中才说「命中」，否则如实说用的是
-        # 通用维度 —— 不然「命中」二字会被读成「知识库里收录了这个品类」。
-        #
-        # by 用 "kb" 而不是 "llm"：知识库命中是**检索**结果，不是模型判断。
-        # 三种来源要能分辨：kb 知识库 / llm 模型 / rule 规则兜底。
-        await emit(run_id, "retrieve", {
-            "title": f"{state.get('subject') or state.get('scene') or '这个品类'}该看哪些维度",
-            # 列出维度本身，而不是「命中 N 条评估维度」
-            "detail": ("、".join(dims) + ("（来自知识库）" if from_kb else "（知识库未收录，用通用维度）")),
-            "by": "kb" if from_kb else "rule",
-        })
-        await _merge_graph(
-            run_id,
-            [_node(f"ev-{i}", d, "决策依据", 3, "candidate") for i, d in enumerate(dims)],
-            [_edge("task", f"ev-{i}", "依据") for i in range(len(dims))],
-        )
 
-    elif node == "search":
-        cands = delta.get("candidates") or []
-        base = state.get("subject") or state.get("scene") or "好物"
-        # 逐关键词的进度已由 stages 的 on_progress 回调实时发过 call 事件，
-        # 这里只补一条收尾汇总：把搜到的**真实商品**列出来（名字 + 价格），
-        # 而不是「返回 N 个真实 SKU」。
-        await emit(run_id, "call", {
-            "title": f"搜索完成 ·「{base}」",
-            "detail": (f"共 {len(cands)} 件可用候选" if cands else "没有结果 —— 不中断流程"),
-            "sample": [
-                {"name": st.cand_name(c), "price": st.cand_yuan(c)} for c in cands[:5]
-            ],
-            "ok": bool(cands),
-        })
-        if cands:
-            await _merge_graph(
-                run_id,
-                [_node("obj-1", base, "采购对象", 5, "candidate")],
-                [_edge("task", "obj-1", "拆解为")],
-            )
-            nodes = [_node(
-                f"cand-{i}", str(c.get("title") or "未命名")[:40], "候选商品", 3, "candidate",
-                {"price": st.yuan(c.get("price")), "item_id": c.get("item_id")},
-            ) for i, c in enumerate(cands)]
-            await _merge_graph(run_id, nodes, [_edge("obj-1", n["id"], "候选") for n in nodes])
+async def _on_agent_step(
+    run_id: str, chunk: dict, seen_tools: set[str], pump: DeltaPump,
+    acc: dict,
+) -> dict | None:
+    """agent 跑完一步（模型节点或工具节点）→ 落事件、累积产物。
 
-    elif node == "filter":
-        kept = delta.get("candidates") or []
-        dropped = delta.get("excluded") or []
-        await emit(run_id, "think", {
-            "title": "按硬约束筛一遍",
-            # 列出被排除的**具体哪几件、为什么**，而不是「排除 N 个」
-            "detail": ("；".join(
-                f"{st.cand_name(d)}（{d.get('_reason') or '不满足硬约束'}）"
-                for d in dropped[:3]
-            ) or f"{len(kept)} 件都符合预算等硬约束"),
-        })
-        if dropped:
-            nodes = [_node(
-                f"drop-{i}", st.cand_name(d)[:40], "已排除", 2, "dropped",
-                {"reason": d.get("_reason") or "", "price": st.yuan(d.get("price"))},
-            ) for i, d in enumerate(dropped[:6])]
-            await _merge_graph(run_id, nodes, [])
+    `acc` 是**跨步累积**的产物字典（candidates/excluded/selected/risks/…）。
+    ⚠️ 必须自己累积：`stream_mode="updates"` 只给**本步的增量**，不是完整
+    状态。这些产物要落库（`_persist_products`），否则收尾生成交付物时
+    读不到 —— 交付物会全是空的（实测踩过）。
 
-    elif node == "compare":
-        best = delta.get("selected") or {}
-        # 候选数从图上取（compare 节点只返回 selected，不带候选列表）
-        cands = [n for n in await _current_nodes(run_id) if n.get("type") == "候选商品"]
-        if best.get("name"):
-            await emit(run_id, "think", {
-                "title": f"选定「{str(best['name'])[:24]}」",
-                # why 不再截断到 80 字：那是模型真正在比较什么，砍掉只剩结论。
-                # 「AI 味」有一半来自这种被压扁的措辞。
-                "detail": str(best.get("why") or ""),
-                "by": best.get("by") or "rule",
-            })
-            nodes = await _current_nodes(run_id)
-            target = next((n for n in nodes if n.get("name") == best.get("name")), None)
-            if target:
-                # ⚠️ 把「为什么选它」和「判断来源」**一起写进图节点**。
-                # 交付物是在收尾时生成的，那时 state 早已不在内存里，只能
-                # 从落库的图反推 —— 只标 state=selected 的话，「依据」那一栏
-                # 永远是空的，来源也会被当成默认值（实测交付物里显示
-                # 「规则兜底」，而模型其实答得好好的）。
-                await _merge_graph(run_id, [{
-                    **target, "state": "selected",
-                    "meta": {**(target.get("meta") or {}),
-                             "why": str(best.get("why") or ""),
-                             "by": best.get("by") or "rule"},
-                }], [])
+    返回非 None 表示要停下来问用户。
+    """
+    for _node, delta in (chunk or {}).items():
+        d = delta or {}
+        # 累积工具写进 state 的产物（列表追加、标量后写覆盖，与图的 reducer 一致）
+        for k in ("dimensions", "candidates", "excluded", "risks"):
+            if d.get(k):
+                acc.setdefault(k, [])
+                acc[k] = acc[k] + list(d[k])
+        for k in ("selected", "dims_from_kb", "risks_from_kb"):
+            if d.get(k) is not None:
+                acc[k] = d[k]
 
-    elif node == "risk":
-        risks = delta.get("risks") or []
-        from_kb = delta.get("risks_from_kb")
-        await emit(run_id, "retrieve", {
-            "title": "查了这类东西的售后与风险",
-            # 列出风险本身，而不是「命中 N 条待确认项」
-            "detail": ("、".join(risks) if risks else "没有查到明确风险项")
-                      + ("" if from_kb else "（知识库未收录，按通用项提示）"),
-            "by": "kb" if from_kb else "rule",
-        })
-        await _merge_graph(
-            run_id,
-            [_node(f"risk-{i}", t, "风险", 3, "candidate") for i, t in enumerate(risks)],
-            [_edge("task", f"risk-{i}", "存在") for i in range(len(risks))],
-        )
+        for m in (d.get("messages") or []):
+            # ── 模型决定调工具 ──
+            for call in (getattr(m, "tool_calls", None) or []):
+                name = call.get("name") or ""
+                args = call.get("args") or {}
+                # 同一个工具可能被调多次（多轮搜索），用「名字+参数」去重，
+                # 只用来避免重复的 phase 事件；调用本身每次都发。
+                key = f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+                first = key not in seen_tools
+                seen_tools.add(key)
+                await _emit_tool_call(run_id, name, args, first)
 
-    elif node == "deliver":
-        return delta.get("question")
+            # ── 工具返回 ──
+            if isinstance(m, ToolMessage):
+                await _emit_tool_result(run_id, m)
+
+        # ── 工具写了 question → 停下来等用户 ──
+        if d.get("question"):
+            await _persist_products(run_id, acc)
+            return d["question"]
 
     return None
+
+
+async def _emit_tool_call(run_id: str, name: str, args: dict, first: bool) -> None:
+    """模型决定调某个工具 → 一条事件。**带真实入参**。"""
+    stage, verb = _TOOL_META.get(name, ("执行", name))
+    if first:
+        await emit(run_id, "phase", {
+            "phase": stage, "label": stage, "state": "running",
+            "hint": verb,
+        })
+
+    title, detail, sample = _describe_call(name, args)
+    await emit(run_id, "call", {
+        "title": title,
+        "detail": detail,
+        "args": args,
+        "sample": sample,
+        "tool": name,
+        "stage": stage,
+    })
+
+
+def _describe_call(name: str, args: dict) -> tuple[str, str, list]:
+    """把工具调用翻成人话。标题写模型**要做什么**，不是工具名。"""
+    if name == "search_products":
+        return (f"搜索「{args.get('keyword') or ''}」", "在淘宝找真实商品", [])
+    if name == "check_category_standards":
+        return (f"查「{args.get('category') or ''}」的选购标准", "看这个品类该比什么", [])
+    if name == "check_risks":
+        return (f"查「{args.get('subject') or ''}」的风险", "看售后与已知问题", [])
+    if name == "drop_candidates":
+        names = args.get("names") or []
+        return (f"排除 {len(names)} 件", str(args.get("reason") or ""), [])
+    if name == "make_decision":
+        return (f"定下「{args.get('picked') or ''}」", str(args.get("why") or ""), [])
+    if name == "ask_user":
+        return ("向你确认一件事", str(args.get("question") or ""), [])
+    return (name, "", [])
+
+
+async def _emit_tool_result(run_id: str, m: ToolMessage) -> None:
+    """工具返回 → 补一条事件，带**真实返回**（商品名+价格）。
+
+    ⚠️ 这里要按 tool_call_id 找到对应那条 call 事件并**补全它**，而不是
+    再发一条 —— 否则界面上「调用」和「返回」会分成两行，看着像调了两次。
+    """
+    content = str(getattr(m, "content", "") or "")
+    await emit(run_id, "call_result", {
+        "tool_call_id": getattr(m, "tool_call_id", "") or "",
+        "text": content[:600],
+    })
 
 
 async def _finish(run_id: str, user_id: str) -> None:
@@ -647,6 +595,40 @@ async def _finish(run_id: str, user_id: str) -> None:
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
 
 
+def _state_of(run: PlanningRun) -> dict:
+    """run 的入口参数 → agent 的初始 state。"""
+    return {
+        "scene": run.scene or "",
+        "budget": run.budget or "",
+        "duration": run.duration or "",
+        "constraints": run.constraints or [],
+        "subject": run.subject or "",
+        "run_id": run.id,
+        "user_id": run.user_id,
+    }
+
+
+async def _persist_products(run_id: str, acc: dict) -> None:
+    """把 agent 累积的产物落进 `run.products`。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-26：为什么需要它
+    ═══════════════════════════════════════════════════════════════════
+    旧实现从 `run.graph` 的节点反推候选与选中项 —— 因为那时流程固定，
+    图里必然有「候选商品」节点。
+
+    现在走法由模型定：它可能搜了 3 轮、排除了 4 件、选了 1 件，这些都在
+    **agent state** 里，不在图上（图只记关键节点）。收尾生成交付物时
+    agent 早跑完了、state 也没了 —— 所以必须边跑边落库。
+
+    落的是 `run.products`（JSONB），收尾时 `_state_from_run` 优先读它。
+    """
+    try:
+        await _patch_run(run_id, products=acc)
+    except Exception as e:
+        logger.warning(f"[planning] 落产物失败（忽略）: {e}")
+
+
 async def _emit_think_delta(run_id: str, text: str, kind: str = "content") -> None:
     """把模型推理的一段增量发出去。
 
@@ -663,12 +645,41 @@ async def _emit_think_delta(run_id: str, text: str, kind: str = "content") -> No
 def _state_from_run(run: PlanningRun) -> dict:
     """把 run 还原成 stages 需要的 state。
 
-    交付物在**收尾时**生成，那时图已经跑完、state 早已不在内存里 ——
-    只能从落库的东西反推。可用的两处：
-      · run 的入口参数（scene/budget/…）
-      · run.graph 的节点（候选商品带 price/item_id，已排除的带 reason）
-    候选池与排除项都能从图上重建，因为图里本来就记着它们。
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-26：主数据源从「图」改成「run.products」
+    ═══════════════════════════════════════════════════════════════════
+
+    旧实现从 `run.graph` 的节点反推候选与选中项 —— 那时流程固定，
+    图里必然有「候选商品」「已排除」这些节点。
+
+    现在走法由模型定，候选/排除/选中都在 **agent state** 里，图只记关键
+    节点。agent 跑完 state 就没了，所以推演过程中边跑边落进 `run.products`
+    （见 `_persist_products`），这里优先读它。
+
+    图仍然有用：它是给**界面**看的决策图。两者分工不同 ——
+    products 是「结论的数据」，graph 是「过程的可视化」。
+    读不到 products 时（旧 run）回退到从图反推。
     """
+    p = run.products or {}
+    if p.get("candidates") or p.get("selected"):
+        cands = _dedup(p.get("candidates") or [])
+        excluded = p.get("excluded") or []
+        out_names = {st.cand_name(e) for e in excluded}
+        return {
+            "scene": run.scene, "budget": run.budget, "duration": run.duration,
+            "constraints": run.constraints or [], "subject": run.subject,
+            "run_id": run.id, "user_id": run.user_id,
+            # 已排除的从候选里剔掉 —— 排除工具只往 excluded 里追加，
+            # 不回头改 candidates（改了会让候选翻倍，见 tools._to_stage_state）
+            "candidates": [c for c in cands if st.cand_name(c) not in out_names],
+            "excluded": excluded,
+            "selected": p.get("selected") or {},
+            "risks": p.get("risks") or [],
+            "dimensions": p.get("dimensions") or [],
+            "needs": [],
+        }
+
+    # ── 回退：从图反推（2026-09-26 之前建的 run）──
     nodes = (run.graph or {}).get("nodes") or []
     candidates, excluded = [], []
     for n in nodes:
@@ -678,7 +689,6 @@ def _state_from_run(run: PlanningRun) -> dict:
                 "name": n.get("name"),
                 "price_yuan": meta.get("price"),
                 "item_id": meta.get("item_id"),
-                # 选中的那件带着 why / by（见 _on_node 的 compare 分支）
                 "why": meta.get("why") or "",
                 "by": meta.get("by") or "",
                 "_selected": n.get("state") == "selected",
@@ -690,7 +700,6 @@ def _state_from_run(run: PlanningRun) -> dict:
                 "_reason": meta.get("reason") or "",
             })
 
-    # 选中的那件：图上被标成 selected 的候选
     selected = next((c for c in candidates if c.pop("_selected", False)), None) or {}
 
     return {
@@ -702,6 +711,18 @@ def _state_from_run(run: PlanningRun) -> dict:
         "dimensions": [n.get("name") for n in nodes if n.get("type") == "决策依据"],
         "needs": [n.get("name") for n in nodes if n.get("type") == "需求"],
     }
+
+
+def _dedup(items: list[dict]) -> list[dict]:
+    """按 item_id / 名字去重 —— 模型会多轮搜索，同一件可能出现多次。"""
+    seen, out = set(), []
+    for c in items:
+        key = str(c.get("item_id") or st.cand_name(c))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
 
 
 async def get_deliverable(run_id: str, user_id: str, did: str) -> dict | None:

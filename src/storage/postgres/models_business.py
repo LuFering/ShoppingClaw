@@ -456,6 +456,19 @@ class PlanningRun(Base):
     # ── 当前待确认的问题（右栏浮出的那张卡）──
     question = Column(JSONB, nullable=True)                     # {text, options: [{key,label,primary}]}
 
+    # 用户对上一次提问选了哪个选项（option 的 key）。
+    # 续跑时 `advance` 把它翻成一句话喂回 agent —— agent 是 ReAct 循环，
+    # 多给一条输入它自己接着判断，不需要算「从哪一步接」。
+    answer_pick = Column(String(64), nullable=True)
+
+    # agent 累积的产物：{candidates, excluded, selected, risks, dimensions}
+    #
+    # ⚠️ 为什么单独存一份，而不是从 graph 反推：
+    # 走法由模型定，候选/排除/选中都在 agent state 里，图只记关键节点。
+    # agent 跑完 state 就没了，收尾生成交付物时读不到 —— 交付物会全是空的。
+    # 所以推演过程中边跑边落这里（见 planning_service._persist_products）。
+    products = Column(JSONB, nullable=False, default=dict)
+
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
@@ -473,6 +486,8 @@ class PlanningRun(Base):
             "graph": self.graph or {"nodes": [], "edges": []},
             "meta": self.meta or {},
             "question": self.question,
+            "answer_pick": self.answer_pick,
+            "products": self.products or {},
             "error": self.error,
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at) if self.updated_at else None,

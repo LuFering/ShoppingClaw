@@ -82,6 +82,24 @@ def get_model():
                 "[llm] 独立 agent 模型 %s 不可用（%s），回退到 %s", spec, e, fallback
             )
             _model = load_chat_model(fallback)
+
+        # 限流自动重试。
+        # ═══════════════════════════════════════════════════════════════
+        # 2026-09-26：为什么必须配这个
+        # ═══════════════════════════════════════════════════════════════
+        # ReAct 循环一轮要发好几个请求（模型→工具→模型→…），很容易撞上
+        # TPM 限流。实测跑一次完整的规划会中途吃 429，而**一次 429 就让
+        # 整个 run 落 failed** —— 用户看到的是「任务失败」，其实只是
+        # 几秒后重试就能过去。
+        #
+        # max_retries 交给 SDK 自己退避重试（指数退避，尊重 Retry-After）。
+        # 只对可重试的错误生效（429/5xx/超时），参数错误照样立刻抛。
+        for attr, val in (("max_retries", 5), ("timeout", 90)):
+            try:
+                if hasattr(_model, attr):
+                    setattr(_model, attr, val)
+            except Exception:
+                pass
     return _model
 
 
@@ -404,10 +422,14 @@ class DeltaPump:
         flush: Callable[..., Any],
         interval: float = 0.22,
         max_chars: int = 90,
+        filter_reasoning_text: bool = False,
     ) -> None:
         self._flush = flush
         self._interval = interval
         self._max_chars = max_chars
+        # 推理是否过噪音过滤（见 filter_reasoning）。
+        # 过滤要**按整句**判，所以开了这个开关时 reasoning 会攒到句末才发。
+        self._filter_reason = filter_reasoning_text
         # 按 kind 分桶：reasoning 与 content 是两种不同的东西，混在一个
         # 缓冲里会拼出「推理正文」这种四不像的段落，前端也没法区别渲染。
         self._buf: dict[str, list[str]] = {}
@@ -420,6 +442,13 @@ class DeltaPump:
             return
         bucket = self._buf.setdefault(kind, [])
         bucket.append(piece)
+
+        # 推理过滤要按**整句**判（见 filter_reasoning），所以句末没到就先攒着，
+        # 不然「We need」和「answer in Chinese」会被拆成两段、都判不出是噪音。
+        if self._filter_reason and kind == "reasoning":
+            if _last_sentence_end("".join(bucket)) <= 0:
+                return   # 还没凑够一句，等下一批
+
         if sum(len(x) for x in bucket) >= self._max_chars:
             # 攒够了就立刻起一个 flush，不等下一个 tick
             self._schedule()
@@ -453,18 +482,33 @@ class DeltaPump:
             bucket.clear()
             if not text:
                 continue
-            try:
-                res = self._flush(text, kind)
-                if asyncio.iscoroutine(res):
-                    await res
-            except TypeError:
-                # 兼容只收一个参数的回调
-                res = self._flush(text)
-                if asyncio.iscoroutine(res):
-                    await res
-            except Exception as e:
-                # 发事件失败不该中断模型生成 —— 少显示几个字可以接受
-                logger.warning("[DeltaPump] flush 失败（忽略）: %s", e)
+            if self._filter_reason and kind == "reasoning":
+                # 只发到最后一个句末，剩下的留到下次（半句判不出噪音）
+                cut = _last_sentence_end(text)
+                if cut <= 0:
+                    bucket.append(text)
+                    continue
+                tail, text = text[cut:], text[:cut]
+                if tail:
+                    bucket.append(tail)
+                text = filter_reasoning(text)
+                if not text:
+                    continue
+            await self._flush_text(text, kind)
+
+    async def _flush_text(self, text: str, kind: str) -> None:
+        try:
+            res = self._flush(text, kind)
+            if asyncio.iscoroutine(res):
+                await res
+        except TypeError:
+            # 兼容只收一个参数的回调
+            res = self._flush(text)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception as e:
+            # 发事件失败不该中断模型生成 —— 少显示几个字可以接受
+            logger.warning("[DeltaPump] flush 失败（忽略）: %s", e)
 
     def _drain_now(self) -> None:
         for kind, bucket in list(self._buf.items()):
@@ -477,7 +521,12 @@ class DeltaPump:
                     pass
 
     async def close(self) -> None:
-        """收尾：停掉后台任务，把剩下的一起发出去。"""
+        """收尾：停掉后台任务，把剩下的一起发出去。
+
+        ⚠️ 不能只调 `_drain()`：开了推理过滤时 `_drain` 会把「还没到句末」
+        的尾巴留在缓冲里（那是设计如此，避免半句判不出噪音）。收尾时必须
+        把残句也发掉，否则最后一段推理永远不显示。
+        """
         self._closed = True
         task, self._task = self._task, None
         if task is not None and not task.done():
@@ -487,6 +536,17 @@ class DeltaPump:
             except (asyncio.CancelledError, Exception):
                 pass
         await self._drain()
+        # 残句：过滤后仍要发（按整段判一次，能过滤就过滤，不能就原样发）
+        for kind, bucket in list(self._buf.items()):
+            text = "".join(bucket)
+            bucket.clear()
+            if not text:
+                continue
+            if self._filter_reason and kind == "reasoning":
+                text = filter_reasoning(text)
+                if not text:
+                    continue
+            await self._flush_text(text, kind)
 
 
 def parse_json_block(text: str) -> dict | None:

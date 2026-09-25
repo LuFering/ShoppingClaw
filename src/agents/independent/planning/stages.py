@@ -164,31 +164,33 @@ async def retrieve_dimensions(subject: str) -> tuple[list[str], bool]:
 
 async def search_candidates(
     state: dict,
+    keyword: str | None = None,
     on_progress: Callable[[dict], None] | None = None,
 ) -> list[dict]:
-    """search：**真调淘宝 MCP**，拿真实 SKU 与价格。
+    """**真调淘宝 MCP**，拿真实 SKU 与价格。
 
     复用 task_executors.common.parse_search_result —— 它已处理真实淘宝的
     嵌套结构（`result_list.map_data`，见 B6 修复）并把价格统一转成**分**。
     绝不再写第二套解析：两套必然漂。
 
-    `on_progress` 每个关键词查完回调一次。
     ═══════════════════════════════════════════════════════════════════
-    2026-09-25：为什么要按关键词报进度
+    2026-09-26：关键词从「代码拼」改成「模型给」
     ═══════════════════════════════════════════════════════════════════
-    两个关键词串行、每个约 4~5 秒，合起来是一整块 9 秒的静默 —— 界面上
-    就是「搜索候选」那一行干等。拆成「第 1 个词 → 返回 N 件」后，
-    9 秒变成两次 4.5 秒，中间有东西可看。
+    原先这里是 `base = subject or scene` 加一条约束拼出来的两个词 ——
+    搜什么由代码决定。现在 `keyword` 由模型传（它能看到返回结果，
+    不合适就换个词再搜）。`keyword` 不传时才回退到旧的拼法，供测试与
+    降级路径使用。
 
-    回调里带的是**真实入参与真实返回**（关键词、返回件数、前几件的
-    名字与价格），不是「返回 N 个 SKU」这种由 len() 拼出来的话 ——
-    用户能核对「它真去搜了，搜回来的是这些」。
+    `on_progress` 每次搜索回调一次，带**真实入参与真实返回**。
     """
-    base = state.get("subject") or state.get("scene") or "好物"
-    keywords = [base]
-    if (state.get("constraints") or []):
-        keywords.append(f"{base} {state['constraints'][0]}")
-    keywords = keywords[:SEARCH_KEYWORDS]
+    if keyword:
+        keywords = [keyword]
+    else:
+        base = state.get("subject") or state.get("scene") or "好物"
+        keywords = [base]
+        if (state.get("constraints") or []):
+            keywords.append(f"{base} {state['constraints'][0]}")
+        keywords = keywords[:SEARCH_KEYWORDS]
 
     from src.services.task_executors.common import parse_search_result
 
@@ -550,10 +552,10 @@ def build_compare_doc(state: dict) -> dict:
             "price": cand_yuan(c),
             "picked": picked,
             "tag": "入选" if picked else "候选",
-            # 入选的那行给模型的完整理由；其余行如实说明它**为什么没被选**
-            # —— 留空的话「依据」列整列是空白，表就成了摆设。
-            "reason": (str(selected.get("why") or "")[:80] if picked
-                       else ("未入选" if sel_name else "")),
+            # 入选的那行给模型的完整理由。
+            # 未入选的**不写「未入选」**：那是废话，用户看得出来。
+            # 空着比写废话好 —— 模型没给落选理由时不该由我们编一句。
+            "reason": str(selected.get("why") or "")[:80] if picked else "",
         })
     for c in excluded:
         rows.append({

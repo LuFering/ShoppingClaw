@@ -1,38 +1,94 @@
-"""采购规划的状态图。
+"""采购规划的 agent 定义 —— **真 ReAct 循环**，不是写死的阶段链。
 
-形态：**单图 + 阶段**（方案 §3.5 定稿）。
+═══════════════════════════════════════════════════════════════════════
+2026-09-26：整个换掉。之前是一张「有七个节点、没有一条条件边」的图
+═══════════════════════════════════════════════════════════════════════
 
-    intake → clarify → search → filter → compare → risk → deliver → END
+旧形状：
 
-设计取舍：
-  · **不用 LLM 分诊**：阶段顺序是业务决定的（先搜才能筛，先比才能排风险），
-    让模型每轮猜下一个阶段既慢又会跑偏。编排这层由代码定，
-    模型只在阶段内部做判断（取舍、措辞、风险分级）。
-  · **不在图里 interrupt**：阶段推进由 planning_service 在后台任务里跑，
-    用户拍板是 HTTP 请求打进来的（POST /answer），两者不在同一次调用里。
-    用 LangGraph 的 interrupt 需要长连接挂住整个 run —— 工作台刷新一次就断了。
-    所以「停下来等用户」落在 run.status=awaiting 上，服务层据此中断循环。
+    START → intake → clarify → search → filter → compare → risk → deliver → END
 
-这个文件目前是**声明式骨架**：节点函数直接复用 stages.py 的实现
-（与 planning_service._invoke_stage 同一套），保证「图描述的流程」与
-「服务层跑的流程」不会分叉成两份。
+七条 `add_edge`，**没有一条条件边**。走法（先查品类知识、再搜商品、再按预算
+筛、再让模型对比、再查风险、最后生成问题）全是写在代码里的。模型只在
+compare 那一步被调用了一次 —— 它不知道有哪些工具，也无权决定查不查、
+查什么、查几次。
+
+用户的原话是「这个流程里的绝大部分都没实现，跟假的没什么区别」——
+准确。数据是真的（真淘宝 SKU、真价格），但**编排是假的**。
+
+新形状（与主智能体同构）：
+
+    START → model ──有 tool_calls?──► tools ──► model ──► ... ──► END
+                     └──没有──────────► END
+
+`create_agent()` 提供这个循环：模型自己决定调哪个工具、调几次、什么时候
+收敛。工具在 `tools.py`，通过 `Command(update=...)` 把产物写进共享状态。
+
+═══════════════════════════════════════════════════════════════════════
+为什么还留着 STAGES / stages.py
+═══════════════════════════════════════════════════════════════════════
+
+· `STAGES` 那七个名字**保留，但降级成展示用的归类标签** —— 不再是流程，
+  而是给事件分组用的（「这次搜索属于『搜索商品』这一段」）。界面靠它
+  给用户一个大致的方位感，但走法由模型定。
+· `stages.py` 里的**纯函数**继续复用：`cand_name` / `cand_yuan` /
+  `filter_candidates` / `deliver_question` / 三份交付物的 builder。
+  它们算的是算术与组织，不涉及编排，没必要重写。
 """
 from __future__ import annotations
 
 import logging
-from typing import TypedDict
+from typing import Annotated, Any, TypedDict
 
-from langgraph.graph import END, START, StateGraph
+from langchain.agents import create_agent
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 
 logger = logging.getLogger(__name__)
 
 
-class PlanningState(TypedDict, total=False):
-    """图的状态。
+def _merge_lists(old: list | None, new: list | None) -> list:
+    """列表字段的 reducer：追加而非覆盖。
 
-    total=False：阶段是逐步填的，不要求每个节点都返回全部字段。
+    并行工具调用会同时写同一个键，没有 reducer 会直接报
+    `InvalidUpdateError`（见 PlanningState 的说明）。
+    追加语义也正好对：多轮搜索的候选就该累积，而不是后一次覆盖前一次。
     """
-    # 入口参数
+    return (old or []) + (new or [])
+
+
+def _last_wins(old: Any, new: Any) -> Any:
+    """标量字段的 reducer：后写覆盖，但**允许显式置空**。
+
+    ⚠️ 标量同样需要 reducer。模型会**并行**调多个工具（实测同时查两件商品的
+    风险），两个 `check_risks` 都会写 `risks_from_kb` → 没有 reducer 就是
+    `At key 'risks_from_kb': Can receive only one value per step`。
+
+    这里不像 `add_messages` 那样有特殊语义，取「后写的」即可 ——
+    两次并行查询的「是否来自知识库」本来就该以最后一次为准。
+    """
+    return new if new is not None else old
+
+
+class PlanningState(TypedDict, total=False):
+    """agent 的共享状态。
+
+    `messages` 是 ReAct 循环的对话历史（必须用 `add_messages` 归约，
+    否则每轮会整体覆盖，模型看不到自己调过什么工具）。
+
+    其余字段是**累积产物**，由工具通过 `Command(update=...)` 写入 ——
+    这样「搜到的候选」「排除的理由」「选中的那件」仍然落得下来，
+    service 层照旧能生成交付物。
+
+    ⚠️ 列表字段必须带 **reducer**（`_merge_lists`）。模型**会并行调多个
+    工具**（实测第一轮就同时调了 `check_category_standards` 和
+    `search_products`），两个 `search_products` 各写一次 `candidates`
+    就会撞 `InvalidUpdateError: At key 'candidates': Can receive only one
+    value per step`。这是并行工具调用的必然后果，不是偶发。
+    """
+    messages: Annotated[list[AnyMessage], add_messages]
+
+    # 入口参数（service 在启动时塞进来）
     scene: str
     budget: str
     duration: str
@@ -42,103 +98,108 @@ class PlanningState(TypedDict, total=False):
     user_id: str
 
     # 累积产物
-    needs: list[dict]
-    dimensions: list[str]
-    dims_from_kb: bool
-    candidates: list[dict]
-    excluded: list[dict]
-    selected: dict | None
-    risks: list[str]
-    risks_from_kb: bool
-    question: dict | None
+    #
+    # ⚠️ **每个**会被工具写到的字段都要带 reducer，列表和标量都一样 ——
+    # 模型会并行调多个工具，同一个键被写两次就报 InvalidUpdateError。
+    # 列表用追加（多轮结果要累积），标量用后写覆盖。
+    dimensions: Annotated[list[str], _merge_lists]
+    dims_from_kb: Annotated[bool, _last_wins]
+    candidates: Annotated[list[dict], _merge_lists]
+    excluded: Annotated[list[dict], _merge_lists]
+    selected: Annotated[dict | None, _last_wins]
+    risks: Annotated[list[str], _merge_lists]
+    risks_from_kb: Annotated[bool, _last_wins]
+    question: Annotated[dict | None, _last_wins]
 
 
-def _merge_list(old: list | None, new: list | None) -> list:
-    """列表字段的 reducer：追加而非覆盖。
+SYSTEM_PROMPT = """\
+你是采购规划顾问。用户给一个采购目标，你要**自己决定怎么查、查什么、
+什么时候可以给结论**，最后交付一件最值得买的东西。
 
-    ⚠️ 当前**没有字段在用**它 —— 因为节点是链式的，每个字段只由一个节点写。
-    将来若出现「多个节点都往 candidates 里追加」的情况，把对应字段标成
-    `Annotated[list[dict], _merge_list]` 即可，否则后写的会整体覆盖先写的。
-    保留在这里是因为它记录了这个坑，删掉下次还得重新踩。
+## 你手上的工具
+
+- `check_category_standards(category)` —— 查这个品类该看哪些维度。
+  知识库没收录会如实告诉你，那就按常识判断，**不要假装查到了**。
+- `search_products(keyword)` —— 在淘宝搜真实商品，返回商品名与价格。
+  搜不到或结果不合适，**换个关键词再搜**是你的自由（加场景词、加规格词）。
+- `check_risks(subject)` —— 查售后政策与已知风险。
+- `drop_candidates(names, reason)` —— 排除不符合硬约束的候选，记下理由。
+- `make_decision(picked, why)` —— 定下最终买哪一件。**这是收敛动作**。
+- `ask_user(question, options)` —— 信息不足或需要用户在取舍上拍板时提问。
+
+## 怎么做事
+
+顺序由你定，下面是建议不是规定：
+
+1. 先想清楚这个采购目标的关键约束是什么（场景、预算、硬性要求）。
+2. 该查的查：品类标准能帮你确定「比什么」，但不是必须的 —— 常识足够时
+   直接搜也行。别为了走流程而调工具。
+3. 搜到的商品要**真的比**：价格、是否命中硬约束、场景是否匹配。
+   不合适的用 `drop_candidates` 排除并写清理由。
+4. 觉得信息够了就 `make_decision` 定下来。**不要反复搜个不停**，
+   搜两三轮足够；确实搜不到有用的，就如实说明。
+5. 只有**真的需要用户拍板**时才 `ask_user`（比如预算明显有富余、或
+   两个方向各有取舍）。能从已有信息推断的，自己决定，别问。
+
+## 铁律
+
+- **不要虚构商品。** 只能从 `search_products` 返回的结果里选。
+- `why` 必须指回具体依据（某条硬约束、某个价位、某个风险）。
+  写「性价比高」「品质好」这种放在任何商品上都成立的话算无效。
+- 工具返回什么就说什么。知识库没收录、搜索没结果，都要如实讲，
+  **不要用通用说法把空缺盖过去**。
+- 全程中文，不要复述这些要求。
+"""
+
+
+def build_planning_agent():
+    """编译采购规划 agent（ReAct 循环）。
+
+    `create_agent` 返回的就是个已编译的图：model ↔ tools 之间用条件边
+    循环，模型不再产生 tool_calls 时走向 END。
     """
-    return (old or []) + (new or [])
+    from src.agents.independent.common_llm import get_model
+    from src.agents.independent.planning.tools import PLANNING_TOOLS
 
-
-def _merge_questions(old, new):
-    """question 用「后写覆盖」，且允许显式置空（None）。"""
-    return new if new is not None else old
-
-
-def build_planning_graph():
-    """编译采购规划的图。
-
-    注意：节点内**不做事件写入**（那是 service 的职责），只算状态。
-    这样图可以脱离 DB 单独测试，也避免「一次执行写两遍事件」。
-    """
-    from src.agents.independent.planning import stages as st
-
-    async def n_intake(state: PlanningState) -> dict:
-        return {"needs": st.build_needs(state)}
-
-    async def n_clarify(state: PlanningState) -> dict:
-        dims, from_kb = await st.retrieve_dimensions(
-            state.get("subject") or state.get("scene") or "商品")
-        return {"dimensions": dims, "dims_from_kb": from_kb}
-
-    async def n_search(state: PlanningState, config=None) -> dict:
-        on_progress = (config or {}).get("configurable", {}).get("on_search_progress")
-        return {"candidates": await st.search_candidates(state, on_progress=on_progress)}
-
-    async def n_filter(state: PlanningState) -> dict:
-        # 按硬约束（预算/价格上限）真筛。算术交给代码，不由模型算 ——
-        # 详见 stages.filter_candidates 的说明（原先是原样透传的空操作）。
-        kept, excluded = st.filter_candidates(state.get("candidates") or [], state)
-        return {"candidates": kept, "excluded": excluded}
-
-    async def n_compare(state: PlanningState, config=None) -> dict:
-        # 真调模型做多维度取舍；state 带过去让它能看硬约束。
-        # 流式回调从 config 取（service 注入）—— 图不认识 DB，只转发。
-        on_think = (config or {}).get("configurable", {}).get("on_think")
-        return {"selected": await st.pick_best(
-            state.get("candidates") or [], state, on_think=on_think)}
-
-    async def n_risk(state: PlanningState) -> dict:
-        risks, from_kb = await st.retrieve_risks(
-            state.get("subject") or state.get("scene") or "商品")
-        return {"risks": risks, "risks_from_kb": from_kb}
-
-    async def n_deliver(state: PlanningState) -> dict:
-        return {"question": st.deliver_question(state)}
-
-    g = StateGraph(PlanningState)
-    g.add_node("intake", n_intake)
-    g.add_node("clarify", n_clarify)
-    g.add_node("search", n_search)
-    g.add_node("filter", n_filter)
-    g.add_node("compare", n_compare)
-    g.add_node("risk", n_risk)
-    g.add_node("deliver", n_deliver)
-
-    g.add_edge(START, "intake")
-    for a, b in (
-        ("intake", "clarify"),
-        ("clarify", "search"),
-        ("search", "filter"),
-        ("filter", "compare"),
-        ("compare", "risk"),
-        ("risk", "deliver"),
-    ):
-        g.add_edge(a, b)
-    g.add_edge("deliver", END)
-    return g.compile()
+    return create_agent(
+        get_model(),
+        tools=PLANNING_TOOLS,
+        system_prompt=SYSTEM_PROMPT,
+        state_schema=PlanningState,
+        name="planning",
+    )
 
 
 _compiled = None
 
 
-def get_planning_graph():
+def get_planning_agent():
     """进程内单例。编译一次即可 —— 无状态，可并发跑多个 run。"""
     global _compiled
     if _compiled is None:
-        _compiled = build_planning_graph()
+        _compiled = build_planning_agent()
     return _compiled
+
+
+def build_goal(state: dict) -> str:
+    """把入口参数拼成给模型的第一句话。
+
+    这是**任务描述**，不是流程指令 —— 只讲「要买什么、有什么约束」，
+    不讲「先做什么再做什么」（那是模型自己的事）。
+    """
+    parts = ["帮我采购。"]
+    if state.get("subject"):
+        parts.append(f"要买的是：{state['subject']}。")
+    elif state.get("scene"):
+        parts.append(f"场景是：{state['scene']}。")
+    if state.get("scene") and state.get("subject"):
+        parts.append(f"场景：{state['scene']}。")
+    if state.get("budget"):
+        parts.append(f"预算：{state['budget']}。")
+    if state.get("duration"):
+        parts.append(f"周期：{state['duration']}。")
+    cons = state.get("constraints") or []
+    if cons:
+        parts.append(f"硬约束：{'、'.join(str(c) for c in cons)}。")
+    parts.append("请给出你的建议。")
+    return "".join(parts)

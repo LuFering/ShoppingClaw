@@ -19,16 +19,16 @@ from pathlib import Path
 
 from src.agents.common.base import BaseAgent
 from src.agents.independent.planning.context import PlanningContext
-from src.agents.independent.planning.graph import get_planning_graph
+from src.agents.independent.planning.graph import get_planning_agent
 
 logger = logging.getLogger(__name__)
 
 
 class PlanningAgent(BaseAgent):
-    """采购规划顾问：把组合采购拆成清单、排好顺序、盯住依赖。
+    """采购规划顾问：自己编排工具、自己决定什么时候给结论。
 
     与主智能体的关系是**并列**的，不是上下级：
-      · 有独立的图与阶段（`graph.py`）
+      · 有独立的 agent（ReAct 循环）与工具集（`tools.py`）
       · 有独立的技能库（`skills/`，经 SkillsMiddleware 挂载）
       · 复用底层工具与 MCP/RAG 机制（不重复造取数链路）
     """
@@ -49,14 +49,14 @@ class PlanningAgent(BaseAgent):
         super().__init__(**kwargs)
 
     async def get_graph(self, **kwargs):
-        """返回编译好的图。
+        """返回编译好的 agent（ReAct 循环）。
 
         图是**无状态**的（不挂 checkpointer）：run 的状态落在
-        `planning_runs` 表里，断点续跑由 `planning_service` 按阶段推进，
-        不依赖 LangGraph 的 thread 机制 —— 那样刷新页面就断了。
+        `planning_runs` 表里，中断/续跑由 `planning_service` 管
+        —— 挂 thread 机制的话刷新页面就断了。
         """
         if self.graph is None:
-            self.graph = get_planning_graph()
+            self.graph = get_planning_agent()
         return self.graph
 
     async def get_info(self) -> dict:
