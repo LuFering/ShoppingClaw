@@ -1,11 +1,14 @@
 """采购规划 agent —— 服务层。
 
 职责边界：
-  · 只管**任务实例的生命周期**：建 run、推进阶段、写事件、维护决策图快照、
-    收用户拍板。**不碰工具实现、不碰判断逻辑** —— 那些在
+  · 只管**任务实例的生命周期**：建 run、订阅图的推进、写事件、维护决策图
+    快照、收用户拍板。**不碰工具实现、不碰判断逻辑** —— 那些在
     `src/agents/independent/planning/stages.py`（纯函数）。
-  · 阶段推进由本模块驱动（不是由 LangGraph 的图驱动），因为要落事件、
-    要在「等用户拍板」处中断 —— 这些是 HTTP/DB 关注点，不该混进图。
+  · 阶段推进**由图驱动**（`graph.astream`），本模块只订阅它的逐节点产出。
+    ⚠️ 2026-09-25 之前这里是一个自己串流程的 for 循环，而 `graph.py` 里的
+    LangGraph **从未被执行过** —— 两份实现并存，改一处另一处不动。现在图是
+    唯一推进路径：落事件、中断等用户这些 HTTP/DB 关注点通过 `_on_node` 挂在
+    图的产出上，而不是另写一条流程。
 
 与主动助理（assistant_service）的分工：
   · assistant 是**派生视图**，全部实时聚合、不落库
@@ -28,6 +31,7 @@ from sqlalchemy import desc, func, select
 
 from src.agents.independent.planning import stages as st
 from src.storage.postgres.manager import pg_manager
+from src.agents.independent.planning.graph import get_planning_graph
 from src.storage.postgres.models_business import PlanningEvent, PlanningRun
 
 logger = logging.getLogger(__name__)
@@ -273,13 +277,13 @@ async def answer_question(run_id: str, user_id: str, key: str) -> dict | None:
 # ══════════════════════════════════════════════════════════
 
 async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
-    """按 STAGES 顺序推进。**永不抛异常**（失败落 run.error）。
+    """推进这次 run。**永不抛异常**（失败落 run.error）。
 
     start_at 是**起始阶段本身**（包含），语义与 answer_question 的续跑一致。
 
-    为什么不用 graph.py 的 LangGraph 跑：图是**流程骨架的声明**
-    （可单测、可视化），而真实推进要写事件、要在等用户处中断 ——
-    这些是 HTTP/DB 关注点。两者共用 stages.py 的纯函数，逻辑不会分叉。
+    推进靠 `graph.astream()`：图的每个节点产出经 `_on_node` 转成事件与图变更，
+    返回 question 就落 awaiting 并跳出 —— 这就是「等用户拍板」的中断点。
+    流程本身只有图那一份定义，这里不再自己排阶段顺序。
     """
     try:
         run = await get_run(run_id, user_id)
@@ -296,18 +300,32 @@ async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
         start_idx = STAGE_KEYS.index(start_at) if start_at in STAGE_KEYS else 0
         state = _state_of(run)
 
-        for key in STAGE_KEYS[start_idx:]:
+        # ═══ 跑图，而不是自己串流程 ═══
+        # 2026-09-25 修正：这里原先是一个 for 循环调 `_run_stage`，
+        # 而 `graph.py` 里的 LangGraph **从未被执行过** —— 两份实现并存。
+        # 现在图是唯一推进路径，service 只订阅它的逐节点产出。
+        graph = get_planning_graph()
+        await _patch_run(run_id, status="running")
+
+        async for chunk in graph.astream(state, stream_mode="updates"):
             if await get_run(run_id, user_id) is None:
                 return   # run 被删了
-
-            await _patch_run(run_id, status="running")
-            await emit(run_id, "phase", {"phase": key, "label": STAGE_LABEL[key]})
-
-            stop = await _run_stage(key, run_id, state)
-            if stop:
-                await _patch_run(run_id, status="awaiting", question=stop)
-                await emit(run_id, "question", stop)
-                return
+            for node, delta in (chunk or {}).items():
+                # ⚠️ 必须自己累积。`stream_mode="updates"` 只给**本节点的增量**，
+                # 不是累积状态 —— 早先直接把初始 `state` 传下去，于是
+                # deliver 阶段看到的 selected/excluded 永远是空的
+                # （问题文案据此编造，见 stages.deliver_question 的说明）。
+                for k, v in (delta or {}).items():
+                    if v is not None:
+                        state[k] = v
+                # 续跑时跳过 start_at 之前的节点（answer 之后从下一阶段接上）
+                if node in STAGE_KEYS and STAGE_KEYS.index(node) < start_idx:
+                    continue
+                stop = await _on_node(run_id, node, delta or {}, state)
+                if stop:
+                    await _patch_run(run_id, status="awaiting", question=stop)
+                    await emit(run_id, "question", stop)
+                    return
 
         await _finish(run_id, user_id)
 
@@ -325,13 +343,21 @@ def _state_of(run: PlanningRun) -> dict:
     }
 
 
-async def _run_stage(key: str, run_id: str, state: dict) -> dict | None:
-    """跑一个阶段：调纯函数拿数据 → 写事件 + 改图。
+# 图节点名 → 阶段 key（与 STAGES 对齐）
+async def _on_node(run_id: str, node: str, delta: dict, state: dict) -> dict | None:
+    """一个图节点跑完 → 落它的事件与图变更。
 
-    返回非 None 表示「要停下来问用户」，值是 question 对象。
+    返回非 None 表示「要停下来问用户」（值是 question 对象）。
+
+    事件顺序跟着 `astream` 的逐节点产出走，不用自己排 ——
+    这是把流程交给图的直接好处。
     """
-    if key == "intake":
-        needs = st.build_needs(state)
+    if node not in STAGE_LABEL:
+        return None
+    await emit(run_id, "phase", {"phase": node, "label": STAGE_LABEL[node]})
+
+    if node == "intake":
+        needs = delta.get("needs") or []
         await emit(run_id, "think", {
             "title": f"解析需求：{state.get('scene') or '未指定场景'}"
                      + (f" · {state['budget']}" if state.get("budget") else ""),
@@ -343,11 +369,10 @@ async def _run_stage(key: str, run_id: str, state: dict) -> dict | None:
             [_edge("task", n["id"], "需要") for n in needs],
         )
 
-    elif key == "clarify":
-        subject = state.get("subject") or state.get("scene") or "商品"
-        dims = await st.retrieve_dimensions(subject)
+    elif node == "clarify":
+        dims = delta.get("dimensions") or []
         await emit(run_id, "retrieve", {
-            "title": f"品类知识 · {subject}",
+            "title": f"品类知识 · {state.get('subject') or state.get('scene') or '商品'}",
             "detail": f"命中 {len(dims)} 条评估维度",
         })
         await _merge_graph(
@@ -356,15 +381,14 @@ async def _run_stage(key: str, run_id: str, state: dict) -> dict | None:
             [_edge("task", f"ev-{i}", "依据") for i in range(len(dims))],
         )
 
-    elif key == "search":
-        cands = await st.search_candidates(state)
+    elif node == "search":
+        cands = delta.get("candidates") or []
         base = state.get("subject") or state.get("scene") or "好物"
         await emit(run_id, "call", {
             "title": f"搜索商品 ·「{base}」",
-            "detail": f"返回 {len(cands)} 个真实 SKU" if cands else "无结果 —— 不中断流程，继续走完",
+            "detail": f"返回 {len(cands)} 个真实 SKU" if cands else "无结果 —— 不中断流程",
         })
         if cands:
-            # 采购对象是图的主干：先把它画出来，候选再挂上去
             await _merge_graph(
                 run_id,
                 [_node("obj-1", base, "采购对象", 5, "candidate")],
@@ -376,38 +400,39 @@ async def _run_stage(key: str, run_id: str, state: dict) -> dict | None:
             ) for i, c in enumerate(cands)]
             await _merge_graph(run_id, nodes, [_edge("obj-1", n["id"], "候选") for n in nodes])
 
-    elif key == "filter":
-        # 候选取自图快照（search 阶段刚写进去的），不从 state 传 ——
-        # 阶段之间靠图这一份真相衔接，避免两条数据通路。
-        nodes = await _current_nodes(run_id)
-        cands = [n for n in nodes if n.get("type") == "候选商品"]
+    elif node == "filter":
+        kept = delta.get("candidates") or []
+        dropped = delta.get("excluded") or []
         await emit(run_id, "think", {
-            "title": f"按硬约束筛选 {len(cands)} 个候选",
-            "detail": "不满足的标记为已排除，保留在图上可回看",
+            "title": f"按硬约束筛选：保留 {len(kept)} 个"
+                     + (f"，排除 {len(dropped)} 个" if dropped else ""),
+            "detail": ("；".join(str(d.get("_reason") or "") for d in dropped[:2])
+                       or "没有候选违反预算等硬约束"),
         })
-        # 本轮不做真判断（需要 LLM）：状态保持 candidate，为 pruned 留好位置
-        await _merge_graph(run_id, [{**n, "state": "candidate"} for n in cands], [])
+        if dropped:
+            nodes = [_node(
+                f"drop-{i}", st.cand_name(d)[:40], "已排除", 2, "dropped",
+                {"reason": d.get("_reason") or "", "price": st.yuan(d.get("price"))},
+            ) for i, d in enumerate(dropped[:6])]
+            await _merge_graph(run_id, nodes, [])
 
-    elif key == "compare":
-        nodes = await _current_nodes(run_id)
-        cands = [
-            {"name": n.get("name"), "price_yuan": (n.get("meta") or {}).get("price"),
-             "state": n.get("state")}
-            for n in nodes if n.get("type") == "候选商品"
-        ]
-        best = st.pick_best(cands)
-        if best:
+    elif node == "compare":
+        best = delta.get("selected") or {}
+        # 候选数从图上取（compare 节点只返回 selected，不带候选列表）
+        cands = [n for n in await _current_nodes(run_id) if n.get("type") == "候选商品"]
+        if best.get("name"):
             await emit(run_id, "think", {
-                "title": f"对比 {len(cands)} 款，暂定「{str(best.get('name'))[:20]}」",
-                "detail": "按价格排序取首（占位规则，后续接入多维度评分）",
+                "title": f"对比 {len(cands) or '若干'} 款，选定「{str(best['name'])[:20]}」",
+                "detail": str(best.get("why") or "")[:80],
+                "by": best.get("by") or "rule",
             })
+            nodes = await _current_nodes(run_id)
             target = next((n for n in nodes if n.get("name") == best.get("name")), None)
             if target:
                 await _merge_graph(run_id, [{**target, "state": "selected"}], [])
 
-    elif key == "risk":
-        subject = state.get("subject") or state.get("scene") or "商品"
-        risks = await st.retrieve_risks(subject)
+    elif node == "risk":
+        risks = delta.get("risks") or []
         await emit(run_id, "retrieve", {
             "title": "风险与售后政策",
             "detail": f"命中 {len(risks)} 条待确认项",
@@ -418,10 +443,8 @@ async def _run_stage(key: str, run_id: str, state: dict) -> dict | None:
             [_edge("task", f"risk-{i}", "存在") for i in range(len(risks))],
         )
 
-    elif key == "deliver":
-        q = st.deliver_question(state)
-        if q:
-            return q
+    elif node == "deliver":
+        return delta.get("question")
 
     return None
 

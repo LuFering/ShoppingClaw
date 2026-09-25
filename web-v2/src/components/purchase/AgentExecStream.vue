@@ -19,6 +19,15 @@
         </div>
         <div class="es-body">
           <span class="es-kind" :class="'k-' + item.kind">{{ KIND_LABEL[item.kind] || item.kind }}</span>
+          <!--
+            来源标记：这一步的判断是模型做的，还是降级成规则了。
+            后端在 think 事件里带 `by: "llm" | "rule"`。**必须显示出来** ——
+            之前规则兜底的输出在界面上和模型判断长得一模一样，用户无从分辨，
+            这正是「用假推理忽悠」的观感来源。宁可显示「规则兜底」也不假装。
+          -->
+          <span v-if="item.by" class="es-by" :class="'by-' + item.by">
+            {{ item.by === 'llm' ? '模型判断' : '规则兜底' }}
+          </span>
           <p class="es-text" :class="{ dim: item.state === 'todo' }">{{ item.title }}</p>
           <p v-if="item.detail" class="es-detail" :class="{ dim: item.state === 'todo' }">{{ item.detail }}</p>
           <p v-if="item.time" class="es-time mono">{{ item.time }}</p>
@@ -188,14 +197,27 @@ onBeforeUnmount(() => {
   &.k-call { color: var(--text-muted); }
   &.k-produce { color: var(--pos); }
 }
+
+/* 来源标记：模型判断 / 规则兜底。刻意做得比 es-kind 更弱 ——
+   它是注脚，不该抢判断本身的注意力；但降级时用警示色，确保看得见。 */
+.es-by {
+  display: inline-block;
+  margin-left: 5px;
+  margin-bottom: 3px;
+  font-size: 0.62rem;
+  padding: 1px 5px;
+  border-radius: 4px;
+  &.by-llm { color: var(--text-faint); background: transparent; }
+  /* 降级用警示色 + 底色，确保在一屏「思考」里能一眼扫到 */
+  &.by-rule { color: var(--warn); background: var(--bg-sunken); }
+}
 .es-text {
   margin: 0;
   font-size: 0.76rem;
   line-height: 1.5;
   color: var(--text);
   &.dim { color: var(--text-faint); }
-}
-.es-detail {
+}.es-detail {
   margin: 2px 0 0;
   font-size: 0.7rem;
   line-height: 1.5;

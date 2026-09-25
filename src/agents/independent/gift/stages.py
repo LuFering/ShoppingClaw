@@ -1,18 +1,21 @@
-"""送礼推演各阶段的**纯实现** —— 无事件、无 DB、无副作用。
+"""送礼推演各阶段的**实现**。
 
-与 planning 的 stages.py 同一套设计（见 planning 那份的 docstring）：
-同一段逻辑有两个消费方（service 的推进、graph 的节点声明），
-所以只在纯函数里写一遍，「写事件 / 改档案」交给调用方。
+设计：**取数与计算用工具，判断与措辞用模型。**
 
-本轮范围同样是**取数是真的、推理是薄的**：
-  · `search_candidates` 真调淘宝 MCP 拿真实 SKU 与价格
-  · `read_recipient_context` 真读该用户的购物档案与历史（RAG/记忆工具）
-  · 组合与寄语的**判断**先用可解释的规则，后续接 LLM 时只改这几个函数
+  · `read_recipient_context` / `search_candidates` —— 真调工具（档案、淘宝 MCP）
+  · `decide_understanding` / `decide_combination` / `write_message` —— 真调模型
 
-送礼与采购的根本差别（决定了这里的阶段划分）：
-  采购是「N 个候选收敛到 1 个方案」，送礼是「1 个意图建构出一段意义」。
-  所以这里没有「筛选/对比」这种收敛动作，而是
-  「读人 → 定主题 → 选构成 → 说清为什么」。
+═══════════════════════════════════════════════════════════════════════
+2026-09-25 修正：这里原先**一行模型调用都没有**
+═══════════════════════════════════════════════════════════════════════
+
+初版把「推理薄」做成了「推理零」：理解是拼字符串、选件是 `min(price)`、
+寄语是 f-string 模板。阶段间隔只有 3–11 毫秒 —— 那是函数调用，不是思考。
+界面上却呈现成「对比 6 款，暂定…」这种像推理的措辞，等于用文案掩盖了
+没有推理这件事。
+
+现在每个「判断」节点都真的问模型，并保留**可解释性**：
+模型必须连 `why`（为什么是它）一起给出，理由指不回依据的一律不采纳。
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ logger = logging.getLogger(__name__)
 MCP_TIMEOUT = 90
 RAG_TIMEOUT = 30
 SEARCH_PAGE_SIZE = 6
+
 
 # ── 中栏档案五组：key 固定（前端 ProfileCard 按 key 取图标与分区）──
 PROFILE_KEYS = ("relation", "life", "likes", "taboo", "giftpref")
@@ -109,6 +113,27 @@ async def _call(tool, args: dict, timeout: int) -> Any | None:
     except Exception as e:
         logger.warning(f"[gift] 工具 {getattr(tool,'name','?')} 失败: {e}")
         return None
+
+
+# ══════════════════════════════════════════════════════════
+# 模型调用
+# ══════════════════════════════════════════════════════════
+#
+# 胶水代码（取模型 / 问一次 / 抠 JSON / 收敛编号）统一放在
+# `src/agents/independent/common_llm.py` —— 与规划 agent 共用一份。
+# 这里只保留本 agent 的用法。
+
+from src.agents.independent.common_llm import (  # noqa: E402
+    as_idx,
+    degrade_note,
+    parse_json_block,
+)
+from src.agents.independent.common_llm import ask_model as _ask
+
+
+async def ask_model(system: str, user: str) -> str:
+    """问一次模型。失败返回空串，由调用方降级到规则。"""
+    return await _ask(system, user, tag="gift")
 
 
 def _parse_jsonish(raw: Any) -> Any:
@@ -306,48 +331,63 @@ def build_profile_head(state: dict, profile: list[dict]) -> dict:
 # ② 提取需求 / ③ 检索 / ④ 比价 / ⑤ 排除
 # ══════════════════════════════════════════════════════════
 
-def build_understanding(state: dict, profile: list[dict]) -> dict:
-    """「当前理解」—— 一句话说清这次送礼要落在什么上。
+async def build_understanding(state: dict, profile: list[dict], ctx: dict) -> dict:
+    """「当前理解」—— 用模型归纳这次送礼该落在什么上。
 
-    这句话是右栏寄语的素材来源，所以必须指得回具体依据
-    （`.impeccable.md` 的「禁黑箱」：不是参数可解释，是心意可解释）。
+    这是**真推理**：把真实读到的档案 + 用户勾的在意点交给模型，
+    让它归纳出一句判断。不是拼字符串。
 
-    刻意**不用 relation 组**做依据 —— 它是「母亲 · 妈妈 · 生日」这类
-    身份交代，读起来和句首的「{recipient}的这次{occasion}」重复。
-    有信息量的是喜好与偏好这两组。
+    硬约束（写进 prompt）：只能用给你的档案项，读不到就说没有 ——
+    这一步最容易出现「编一条偏好」（送礼场景代价最高）。
     """
     recipient = str(state.get("recipient") or "对方")
     occasion = str(state.get("occasion") or "这次")
-    signals = state.get("signals") or []
-
-    # 只有「有内容」的确认项才算依据：排除身份组、排除占位文案。
-    # giftpref 是用户自己勾的标签，句尾已经单独写了一遍，这里不重复引用。
-    PLACEHOLDER = ("未记录", "暂无记录", "暂无足够依据", "待确认", "")
-    basis_items = [
-        g["text"] for g in profile
-        if g.get("state") == "confirmed"
-        and g.get("key") in ("likes", "life")
-        and str(g.get("text") or "").strip() not in PLACEHOLDER
+    signals = [str(s) for s in (state.get("signals") or [])]
+    confirmed = [
+        f"- {g.get('label')}：{g.get('text')}（来源：{g.get('source')}）"
+        for g in profile if g.get("state") == "confirmed"
+        and g.get("key") in ("likes", "life", "taboo")
+        and str(g.get("text") or "").strip() not in ("未记录", "暂无记录", "暂无足够依据", "待确认", "")
+    ]
+    pending = [
+        f"- {g.get('label')}" for g in profile if g.get("state") == "pending"
     ]
 
-    if basis_items:
-        basis = "、".join(basis_items[:2])
-        text = (
-            f"这次的重点不是贵不贵，而是「{basis}」这几条能不能真的用上 —— "
-            f"所以挑的每一件都要落在她日常会碰到的地方。"
-        )
-        src = "来自中栏已确认的档案项"
+    system = (
+        "你是送礼顾问。任务：把已知信息归纳成**一句**判断，说明这次送礼"
+        "应该落在什么上。\n\n"
+        "铁律：\n"
+        "1. 只用给你的信息，**不要补充任何没给的偏好或事实** —— 编造一条"
+        "偏好会让用户照着买错东西。\n"
+        "2. 没有可用信息时，就直说没有，并说明你会按什么通用方式处理。\n"
+        "3. 这句话要能指回具体依据，不写空泛祝愿。\n"
+        "4. **只输出一句话，60 字以内**。不要解释你为什么这么判断，"
+        "不要罗列待补充项 —— 那些界面另有位置显示。"
+    )
+    user = (
+        f"收礼人：{recipient}\n场合：{occasion}\n"
+        f"用户更在意：{'、'.join(signals) if signals else '（未指定）'}\n\n"
+        f"已确认的档案项：\n" + ("\n".join(confirmed) if confirmed else "（无）") + "\n\n"
+        f"仍待确认的项：\n" + ("\n".join(pending) if pending else "（无）")
+    )
+
+    text = await ask_model(system, user)
+    if text:
+        return {"text": text[:200], "from": "模型归纳自中栏已确认的档案项", "by": "llm"}
+
+    # ── 降级：模型不可用时用规则拼，并如实标注是规则给的 ──
+    basis = "、".join(
+        g["text"] for g in profile
+        if g.get("state") == "confirmed" and g.get("key") in ("likes", "life")
+        and str(g.get("text") or "").strip() not in ("未记录", "暂无记录", "暂无足够依据", "待确认", "")
+    )
+    if basis:
+        t = f"这次重点不在贵不贵，而是「{basis}」能不能真的用上。"
+        src = "规则兜底（模型不可用）"
     else:
-        text = (
-            f"关于{recipient}，我手上还没有可用的偏好记录。"
-            f"这次先按{occasion}的一般习惯来搭；你补充一句她的喜好，我就能收窄。"
-        )
-        src = "无档案依据 · 按场景通用处理"
-
-    if signals:
-        text += f"（你更在意：{'、'.join(str(s) for s in signals)}）"
-
-    return {"text": text, "from": src}
+        t = f"关于{recipient}暂无可用偏好记录，先按{occasion}的一般习惯来搭。"
+        src = "无档案依据 · 规则兜底"
+    return {"text": t, "from": src, "by": "rule"}
 
 
 def build_search_keywords(state: dict) -> list[str]:
@@ -546,21 +586,19 @@ def verify_candidates(cands: list[dict], state: dict) -> tuple[list[dict], list[
 # ⑥ 组合礼盒 / ⑦ 寄语
 # ══════════════════════════════════════════════════════════
 
-def combine(picked: list[dict], state: dict) -> tuple[dict, list[dict], dict]:
-    """⑥ 组合礼盒：挑 3 件凑成一个说得通的整体。
+async def combine(picked: list[dict], state: dict, understanding: dict) -> tuple[dict, list[dict], dict]:
+    """⑥ 组合礼盒：**让模型挑并说明理由**。
 
-    与采购的「选最优单品」不同 —— 送礼的判据是**同时被用到**
-    （三件落在同一个使用场景里），而不是各自最优。
+    分工：
+      · 模型负责「选哪几件、各承担什么角色、为什么是它」
+      · 代码负责「预算不能超、品类不能重复」这类硬约束
 
-    选件规则（本轮，可解释）—— 迭代过三轮，两条都是实测教训：
-      · **不按价格降序**。试过，结果给「给妈妈的生日」选出 ¥336 的
-        电钻工具套装当主力（它是候选里最贵的）。MCP 的返回**本身就是
-        按相关性排序的**，第一条比「最贵的那条」靠谱得多。
-      · **每个品类最多取一件**。这是「组合」能成立的前提 ——
-        关键词含「保温杯」时，纯按相关性会连着挑 3 个保温杯，
-        那不是礼盒，是同一样东西买三遍。
+    为什么硬约束不交给模型：它会算错预算，也会连着挑三个同类东西。
+    为什么选与说必须交给模型：这是这份礼物的全部价值 ——
+    规则排出来的顺序回答不了「为什么最后是这几件」。
 
-    返回 (方案, 预算行, 订单)。
+    降级：模型不可用时退回「按品类轮流取」，并且理由如实写成规则口径，
+    不假装是模型判断的。
     """
     budget = int(state.get("budget") or 0)
     recipient = str(state.get("recipient") or "对方")
@@ -575,61 +613,121 @@ def combine(picked: list[dict], state: dict) -> tuple[dict, list[dict], dict]:
         }
         return plan, [], {"total": 0, "budget": budget, "eta": "", "steps": []}
 
-    # 选件：按品类轮流取（与检索截断共用同一个 helper —— 这段逻辑
-    # 曾经在两处各写一遍，其中一处漏了 `_kw` 透传，结果「代码看着有分组、
-    # 实际全是同一品类」。只留一份就不会再分叉）。
-    #
-    # 为什么必须按品类轮流：同一关键词的结果天然同质（搜「保温杯」
-    # 前 6 条全是保温杯）。顺序取会挑出「三个保温杯」—— 那不是礼盒，
-    # 是同一样东西买三遍。
-    #
-    # 先按预算筛掉超支的，再轮流取，最后按预算收口。
-    affordable = [
-        it for it in picked
-        if not budget or int(it.get("price") or 0) <= budget
-    ] or picked
+    # ── 硬约束先行：预算内、品类去重后的候选池 ──
+    affordable = [it for it in picked if not budget or int(it.get("price") or 0) <= budget] or picked
+    pool = _round_robin_by_kw(affordable, min(len(affordable), 8))
+
+    # ── 交给模型挑 ──
+    listing = "\n".join(
+        f"{i}. {it.get('name')} ¥{it.get('price')}（来自检索「{it.get('_kw') or '—'}」）"
+        for i, it in enumerate(pool)
+    )
+    confirmed = [
+        f"- {g.get('label')}：{g.get('text')}"
+        for g in (state.get("_profile") or [])
+        if g.get("state") == "confirmed" and str(g.get("text") or "").strip()
+        not in ("未记录", "暂无记录", "暂无足够依据", "待确认", "")
+    ]
+
+    system = (
+        "你是送礼顾问。从候选里挑出**最多 3 件**组成一份礼物，并说明理由。\n\n"
+        "判据是「**同时被用到**」—— 几件要落在同一个使用场景里，"
+        "而不是各自最好。三件说得通胜过六件堆着。\n\n"
+        "铁律：\n"
+        "1. 只能从给定候选里挑，**不要虚构商品**，价格也不许改。\n"
+        "2. 总数不得超过预算；不得超过 3 件。\n"
+        "3. 每件都要给 `why`，且必须指回具体依据（收礼人的偏好 / 场景）。"
+        "写「品质好」「性价比高」这类放在任何商品上都成立的话算无效。\n"
+        "4. 若候选都不合适，就少挑几件，宁可 1 件也不要凑数。\n\n"
+        "只输出 JSON，不要解释文字：\n"
+        '{"title":"这份礼物的名字","thesis":"一句话说清这几件如何构成一体",'
+        '"items":[{"idx":0,"role":"主力|搭配|点缀","why":"为什么是它"}]}'
+    )
+    user = (
+        f"收礼人：{recipient}\n场合：{occasion}\n预算：{budget or '未指定'} 元\n"
+        f"对这次的理解：{understanding.get('text') or '（无）'}\n"
+        f"已确认的偏好：\n" + ("\n".join(confirmed) if confirmed else "（无）") + "\n\n"
+        f"候选（编号：名称 价格）：\n{listing}"
+    )
+
+    raw = await ask_model(system, user)
+    obj = parse_json_block(raw)
 
     chosen: list[dict] = []
-    spent = 0
-    for it in _round_robin_by_kw(affordable, 3):
-        price = int(it.get("price") or 0)
-        if budget and spent + price > budget:
-            continue
-        chosen.append(it)
-        spent += price
+    items: list[dict] = []
+    used_llm = False
 
-    if not chosen:                      # 预算太小，至少给最便宜的一件
-        chosen = [min(picked, key=lambda x: int(x.get("price") or 0))]
-        spent = int(chosen[0].get("price") or 0)
-
-    roles = ["主力", "搭配", "点缀"]
-    seen_kw: set[str] = set()
-    items = []
-    for i, it in enumerate(chosen):
-        kw = str(it.get("_kw") or "")
-        # 理由要指得回来源，且**不能自称「相关性最高」两次** ——
-        # 品类不足 3 个时会从同一品类取第二件，那时说「最相关的一件」是假的。
-        if kw and kw not in seen_kw:
-            why = f"检索「{kw}」时相关性最高的一件"
-        elif kw:
-            why = f"与「{kw}」主力同类，作备选补充"
+    if obj and isinstance(obj.get("items"), list) and obj["items"]:
+        # 校验模型输出：编号合法、不超预算、不超件数。任一条不满足就整体降级 ——
+        # 半信半疑地采纳一半，会产出「价格对不上」的方案，比纯规则更糟。
+        spent_try = 0
+        ok = True
+        for i, it in enumerate(obj["items"][:3]):
+            idx = as_idx(it.get("idx"))
+            if idx is None or not (0 <= idx < len(pool)):
+                ok = False
+                break
+            src = pool[idx]
+            price = int(src.get("price") or 0)
+            if budget and spent_try + price > budget:
+                ok = False
+                break
+            spent_try += price
+            chosen.append(src)
+            items.append({
+                "role": str(it.get("role") or ["主力", "搭配", "点缀"][i])[:8],
+                "name": src["name"],
+                "price": price,
+                "why": str(it.get("why") or "")[:120],
+            })
+        if ok and items and all(x["why"] for x in items):
+            used_llm = True
         else:
-            why = "同一批检索结果里相关性最高的一件"
-        if kw:
-            seen_kw.add(kw)
-        items.append({
-            "role": roles[i] if i < len(roles) else "补充",
-            "name": it["name"],
-            "price": it.get("price") or 0,
-            "why": why,
-        })
+            chosen, items = [], []
 
+    if not used_llm:
+        # 降级必须看得见（见 common_llm.degrade_note 的说明）
+        degrade_note(raw, obj, "gift/combine")
+        # ── 降级：按品类轮流取（可解释、可复现）──
+        spent = 0
+        for it in pool:
+            if len(chosen) >= 3:
+                break
+            price = int(it.get("price") or 0)
+            if budget and spent + price > budget:
+                continue
+            chosen.append(it)
+            spent += price
+        if not chosen:
+            chosen = [min(picked, key=lambda x: int(x.get("price") or 0))]
+        seen_kw: set[str] = set()
+        items = []
+        for i, it in enumerate(chosen):
+            kw = str(it.get("_kw") or "")
+            if kw and kw not in seen_kw:
+                why = f"检索「{kw}」时相关性最高的一件"
+            elif kw:
+                why = f"与「{kw}」主力同类，作备选补充"
+            else:
+                why = "同一批检索结果里相关性最高的一件"
+            if kw:
+                seen_kw.add(kw)
+            items.append({
+                "role": ["主力", "搭配", "点缀"][i] if i < 3 else "补充",
+                "name": it["name"],
+                "price": it.get("price") or 0,
+                "why": why,
+            })
+
+    spent = sum(int(i.get("price") or 0) for i in items)
     plan = {
-        "title": f"给{recipient}的{occasion}",
-        "thesis": f"{len(items)} 件落在同一个使用场景：她每天都会碰到的那几样。",
+        "title": str((obj or {}).get("title") or f"给{recipient}的{occasion}")[:40],
+        "thesis": str((obj or {}).get("thesis") or
+                      f"{len(items)} 件落在同一个使用场景。")[:160],
         "items": items,
+        "by": "llm" if used_llm else "rule",
     }
-    budget_rows = [{"label": it["role"], "value": int(it.get("price") or 0)} for it in items]
+    budget_rows = [{"label": i["role"], "value": int(i.get("price") or 0)} for i in items]
     order = {
         "total": spent,
         "budget": budget,
@@ -655,25 +753,48 @@ def build_compare(picked: list[dict], excluded: list[dict]) -> list[dict]:
     return rows
 
 
-def build_message(state: dict, plan: dict, understanding: dict) -> dict:
-    """⑦ 寄语文案。
+async def build_message(state: dict, plan: dict, understanding: dict) -> dict:
+    """⑦ 寄语文案 —— 由模型写，素材必须是前面每一步的真实判断。
 
-    素材必须来自前面每一步的判断，不是通用祝福
-    （`.impeccable.md` 的「禁黑箱」在情感语境的翻译）。
-    本轮按规则拼 —— 它引用的是真实入选项与真实「当前理解」。
+    `.impeccable.md` 的「禁黑箱」在情感语境的翻译：
+    寄语里每一句都要能指回某一步的依据，不是通用祝福。
+
+    降级（模型不可用）时退回模板，并标注来源 —— 不假装是模型写的。
     """
     recipient = str(state.get("recipient") or "你")
+    occasion = str(state.get("occasion") or "这次")
     items = plan.get("items") or []
-    names = "、".join([i["name"][:10] for i in items[:3]]) or "这份礼物"
+    item_lines = "\n".join(f"- {i['role']}：{i['name']}（{i['why']}）" for i in items)
+    signals = "、".join(str(x) for x in (state.get("signals") or []))
 
-    text = (
-        f"{recipient}：\n\n"
-        f"这次挑的是{names}。\n\n"
-        f"{understanding.get('text') or ''}\n\n"
-        f"挑它们的时候我想的不是贵不贵，是你会不会真的用上。"
-        f"如果哪件你不需要，告诉我，我换。"
+    system = (
+        f"你要替用户给「{recipient}」写一张送礼卡片（{occasion}）。\n\n"
+        "要求：\n"
+        "1. 三段结构：称呼 → 挑了什么 → 为什么。收尾一句轻的，不要升华。\n"
+        "2. **素材只能用给你的这些**，不要编造共同经历或对方的事。\n"
+        "3. 语气按关系来：给长辈平实、少形容词；给伴侣具体；给同事克制。\n"
+        "4. 禁止「感恩」「一路有你」「未来可期」这类放在任何人身上都成立的模板句。\n"
+        "5. 不要提价格、折扣、购买渠道。\n"
+        "6. 只输出卡片正文，不要标题、不要解释。"
     )
-    return {"tone": "真诚", "text": text}
+    user = (
+        f"收礼人：{recipient}\n场合：{occasion}\n"
+        f"用户更在意：{signals or '（未指定）'}\n"
+        f"这次的理解：{understanding.get('text') or '（无）'}\n\n"
+        f"挑了这些：\n{item_lines}"
+    )
+
+    text = await ask_model(system, user)
+    if text:
+        return {"tone": "真诚", "text": text[:800], "by": "llm"}
+
+    names = "、".join([i["name"][:10] for i in items[:3]]) or "这份礼物"
+    t = (
+        f"{recipient}：\n\n这次挑的是{names}。\n\n"
+        f"{understanding.get('text') or ''}\n\n"
+        f"挑它们时想的不是贵不贵，是你会不会真的用上。"
+    )
+    return {"tone": "真诚", "text": t, "by": "rule"}
 
 
 def build_supply(picked: list[dict], plan: dict) -> list[dict]:

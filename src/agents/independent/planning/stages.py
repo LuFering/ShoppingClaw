@@ -1,17 +1,17 @@
-"""采购规划各阶段的**纯实现** —— 无事件、无 DB、无副作用。
+"""采购规划各阶段的实现。
 
-为什么要拆成纯函数（方案 §3.5 的落地方式）：
-  同一套阶段逻辑有两个消费方 ——
-    · `planning_service._advance()` —— 驱动流程、写事件、维护图快照
-    · `graph.py` 的 LangGraph 节点 —— 声明流程骨架，可用于单测/可视化
-  若两处各写一份，必然分叉。所以逻辑只在这里写一遍：纯函数进、纯数据出，
-  「写事件」和「改图」留给调用方。
+设计：**取数与计算用工具，判断与措辞用模型。**
 
-本轮的范围是**取数是真的、推理是薄的**：
-  · `search_candidates` 真调淘宝 MCP
-  · `retrieve_dimensions` / `retrieve_risks` 真查 RAG
-  · 取舍与排序先用可解释的占位规则（见 `pick_best`），
-    后续把 LLM 判断接进来时**只改这几个函数**，事件契约与前端都不用动。
+  · `search_candidates` / `retrieve_dimensions` / `retrieve_risks` —— 真调工具
+  · `pick_best` —— 真调模型做多维度取舍
+
+═══════════════════════════════════════════════════════════════════════
+2026-09-25 修正：这里原先**一行模型调用都没有**
+═══════════════════════════════════════════════════════════════════════
+
+初版把「推理薄」做成了「推理零」：选件是 `min(price)`，阶段间隔 3–11 毫秒
+—— 那是函数调用，不是思考。现在 `pick_best` 真问模型，并要求它给出
+理由；模型不可用时降级到价格规则，并**如实标注**是哪一种。
 """
 from __future__ import annotations
 
@@ -27,6 +27,27 @@ SEARCH_KEYWORDS = 2
 SEARCH_PAGE_SIZE = 6
 MCP_TIMEOUT = 90      # stdio MCP 冷启动已由 lifespan 预热，这里只防长尾
 RAG_TIMEOUT = 30
+
+
+# ══════════════════════════════════════════════════════════
+# 模型调用
+# ══════════════════════════════════════════════════════════
+#
+# 胶水代码（取模型 / 问一次 / 抠 JSON / 收敛编号）统一放在
+# `src/agents/independent/common_llm.py` —— 与送礼 agent 共用一份。
+# 这里只保留本 agent 的用法。
+
+from src.agents.independent.common_llm import (
+    as_idx,
+    degrade_note,
+    parse_json_block,
+)
+from src.agents.independent.common_llm import ask_model as _ask
+
+
+async def ask_model(system: str, user: str) -> str:
+    """问一次模型。失败返回空串，由调用方降级。"""
+    return await _ask(system, user, tag="planning")
 
 
 # ══════════════════════════════════════════════════════════
@@ -168,16 +189,80 @@ def yuan(cents: Any) -> str:
     return f"{v / 100:.0f}" if v else ""
 
 
-def pick_best(cands: list[dict]) -> dict | None:
-    """compare：选首要候选。
+# ⚠️ 候选在链路上有**两种形状**，凡是读候选的地方都必须两种都认：
+#   · `search_candidates` 直接吐的**原始 MCP 结果**：title / price(分)
+#   · 事件层归一的：name / price_yuan(元)
+# 只认后者会导致真实链路里 name 恒为 None —— 模型选出来了，事件里却
+# 什么都没显示（踩过：compare 阶段只有 phase、没有 think）。
+# 这两个函数放模块级（原先嵌在 pick_best 里），因为 filter 与 deliver
+# 也要用同一套判定，嵌在里面就得抄第二份。
 
-    占位规则：价格最低者 —— 可解释、可复现，且不会因为模型抖动而变化。
-    后续接多维度评分时改这里，图与事件契约都不动。
+def cand_name(c: dict) -> str:
+    return str(c.get("name") or c.get("title") or "未命名")
+
+
+def cand_yuan(c: dict) -> float | None:
+    """取「元」价。认不出返回 None —— 与「价格为 0」区分开。"""
+    if c.get("price_yuan") is not None:
+        try:
+            return float(c["price_yuan"])
+        except (TypeError, ValueError):
+            return None
+    p = c.get("price")
+    try:
+        return float(int(p) / 100) if p else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def pick_best(cands: list[dict], state: dict | None = None) -> dict:
+    """compare：**让模型做多维度取舍**，并给出理由。
+
+    返回 {"name", "why", "by"}；`by` 标明这次是模型判断还是规则兜底 ——
+    界面与事件都如实呈现，不把规则输出说成模型判断。
+
+    为什么不让模型自由发挥：它会挑一个候选池里不存在的商品。
+    所以只让它**从给定编号里选**，编号越界整体降级。
     """
-    priced = [c for c in cands if c.get("price_yuan")]
-    if not priced:
-        return cands[0] if cands else None
-    return min(priced, key=lambda c: float(c["price_yuan"]))
+    if not cands:
+        return {}
+
+    listing = "\n".join(
+        f"{i}. {cand_name(c)} ¥{cand_yuan(c) or '—'}" for i, c in enumerate(cands)
+    )
+    st = state or {}
+    system = (
+        "你是采购顾问。从候选里选出**最值得买的那一件**，并说明理由。\n\n"
+        "判据按重要性：① 是否满足用户的硬约束（场景/预算/用途）"
+        "② 价格与口碑的相对位置 ③ 有没有踩到已知风险。\n\n"
+        "铁律：\n"
+        "1. 只能从给定编号里选，**不要虚构商品**。\n"
+        "2. `why` 必须指回具体依据（某条约束、某个价位、某个风险），"
+        "写「性价比高」「品质好」这种放在任何商品上都成立的话算无效。\n\n"
+        '只输出 JSON：{"idx": 编号, "why": "为什么是它"}'
+    )
+    user = (
+        f"采购场景：{st.get('scene') or '未指定'}\n"
+        f"预算：{st.get('budget') or '未指定'}\n"
+        f"硬约束：{'、'.join(str(c) for c in (st.get('constraints') or [])) or '（无）'}\n\n"
+        f"候选：\n{listing}"
+    )
+
+    reply = await ask_model(system, user)
+    obj = parse_json_block(reply)
+    idx = as_idx((obj or {}).get("idx"))
+    why = str((obj or {}).get("why") or "").strip()
+    if idx is not None and 0 <= idx < len(cands) and why:
+        return {"name": cand_name(cands[idx]), "why": why[:120], "by": "llm"}
+
+    # 走到这儿说明模型**答了但没按契约答**（或压根没答上）。
+    # 降级本身没问题，但降级必须**看得见** —— 见 degrade_note 的说明。
+    degrade_note(reply, obj, "planning/pick_best")
+
+    # ── 降级：价格最低者（可解释、可复现）──
+    priced = [c for c in cands if cand_yuan(c) is not None]
+    best = min(priced, key=lambda c: float(cand_yuan(c))) if priced else cands[0]
+    return {"name": cand_name(best), "why": "价格最低（模型不可用，已降级为规则）", "by": "rule"}
 
 
 async def retrieve_risks(subject: str) -> list[str]:
@@ -187,17 +272,129 @@ async def retrieve_risks(subject: str) -> list[str]:
     return _as_str_list(raw) or ["长期持有成本待确认"]
 
 
+def filter_candidates(cands: list[dict], state: dict) -> tuple[list[dict], list[dict]]:
+    """filter：按**硬约束**筛掉不满足的候选，返回 (保留, 排除)。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-25：这里原先是 `return {"candidates": state.get("candidates")}`
+    ═══════════════════════════════════════════════════════════════════
+
+    原注释写着「本轮不真过滤（需 LLM 判断），原样透传以保持图与阶段数一致」
+    —— 也就是说这个阶段**只是为了让图上有七个节点而存在**，什么也没做。
+    与此同时 `_on_node` 却照样发了一条 think：「不满足的标记为已排除，
+    保留在图上可回看」。事件在描述一件没发生的事。
+
+    现在真过滤，但**只用能判定的硬约束**：预算与明确的价格上限。
+    为什么这部分不交给模型：超没超预算是算术，代码判定是确定的、可复现的，
+    交给模型反而会算错。模型该管的是「哪件更合适」——那是 compare 的事。
+
+    排除的项**不删掉**，单独返回：界面上要能看到「这些被排除了、为什么」，
+    直接丢弃会让用户以为搜索没搜到。
+    """
+    if not cands:
+        return [], []
+
+    # 预算可能是 "60000" / 60000 / "6万" 这类，取其中的数字
+    budget_yuan = _budget_yuan(state.get("budget"))
+
+    kept: list[dict] = []
+    excluded: list[dict] = []
+    for c in cands:
+        yuan = cand_yuan(c)
+        if budget_yuan and yuan is not None and yuan > budget_yuan:
+            excluded.append({**c, "_reason": f"超出预算（¥{yuan:g} > ¥{budget_yuan:g}）"})
+        else:
+            kept.append(c)
+
+    # 全被筛掉时不能返回空池 —— 后面 compare 会没得选，整个推演断在这。
+    # 此时如实保留全部，让 compare 去挑最接近的，并在风险阶段说明超预算。
+    if not kept and excluded:
+        return cands, []
+
+    return kept, excluded
+
+
+def _budget_yuan(raw: Any) -> float | None:
+    """把预算解析成「元」。认不出返回 None（不筛，而不是筛成空）。"""
+    if raw is None:
+        return None
+    s = str(raw).strip().replace(",", "").replace("¥", "")
+    mult = 1.0
+    if s.endswith("万"):
+        mult, s = 10000.0, s[:-1]
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return None
+    return v * mult if v > 0 else None
+
+
 def deliver_question(state: dict) -> dict:
     """deliver：**故意停一次**等用户拍板。
 
     工作台右栏浮出问题卡是它的核心体验 —— 全程不打断反而看不出
-    「agent 会停下来等你」。返回 None 表示不问（当前实现总是问）。
+    「agent 会停下来等你」。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-25：问题原先是一句写死的话，且**与事实不符**
+    ═══════════════════════════════════════════════════════════════════
+
+    原文案恒为「预算要不要放宽？现有候选都逼近 {budget}。」—— 不看结果。
+    实测跑「装修 / ¥60000 / 隔音材料」时，选中的是 ¥42 的隔声毡，
+    候选里没有任何一件逼近 60000，但界面上照样弹出「都逼近 60000」。
+
+    这是比降级更糟的一类问题：降级至少是诚实的，这个是**编**。
+    现在改成按实际结果分三种情形问，问的必须是这次推演里真实存在的取舍。
+
+    ⚠️ 第二版又踩了一次「拿错数据说话」：判断预算压力时我用了**保留下来**的
+    候选里最贵的那件，于是「预算 ¥100、最贵保留 ¥94」被算成有压力，
+    弹出「要把预算放宽到能一起拿下吗」—— 可那件 ¥94 本来就在预算内，
+    根本不需要放宽。**预算压力只可能来自被排除的候选**（filter 按预算剔掉的
+    那些），所以判据必须是 excluded，不是 kept。
     """
+    selected = state.get("selected") or {}
+    budget_yuan = _budget_yuan(state.get("budget"))
+    name = str(selected.get("name") or "").strip()
+    pick = f"「{name[:24]}」" if name else "当前选中的这件"
+
+    # 被硬约束剔掉的候选 —— 这才是「放宽预算」唯一的现实依据
+    excluded = state.get("excluded") or []
+    over = [(cand_yuan(c), cand_name(c)) for c in excluded]
+    over = [(p, n) for p, n in over if p is not None]
+
+    sel_price = cand_yuan(selected) if selected else None
+
+    if over and budget_yuan:
+        # 真有候选因超预算被剔掉：把「放开能拿到什么」摆出来让用户拍板
+        cheapest, cheapest_name = min(over, key=lambda x: x[0])
+        return {
+            "text": f"有 {len(over)} 件因超出 ¥{budget_yuan:g} 的预算被排除了，"
+                    f"其中最低的是「{cheapest_name[:20]}」（¥{cheapest:g}）。"
+                    f"要把预算放宽到能考虑它们吗？",
+            "phase": "deliver",
+            "options": [
+                {"key": "keep", "label": f"不放宽，就 {pick}", "primary": True},
+                {"key": "raise", "label": f"放宽到 ¥{cheapest:g} 以上", "primary": False},
+            ],
+        }
+
+    if sel_price is not None and budget_yuan and sel_price < budget_yuan * 0.5:
+        # 选中的远低于预算 —— 真正的取舍是「要不要把省下的花掉」
+        return {
+            "text": f"{pick}是 ¥{sel_price:g}，离预算 ¥{budget_yuan:g} 还差得远。"
+                    f"要不要加一件搭配的，把这份预算用足？",
+            "phase": "deliver",
+            "options": [
+                {"key": "keep", "label": "就这样，不凑数", "primary": True},
+                {"key": "add", "label": "再加一件搭配", "primary": False},
+            ],
+        }
+
     return {
-        "text": f"预算要不要放宽？现有候选都逼近 {(state.get('budget') or '上限')}。",
+        "text": f"按现在的信息，{pick}是最合适的。要就此定下来，还是再收窄一下条件？",
         "phase": "deliver",
         "options": [
-            {"key": "keep", "label": "不放宽", "primary": False},
-            {"key": "raise", "label": "放宽一档", "primary": True},
+            {"key": "keep", "label": "定下来", "primary": True},
+            {"key": "narrow", "label": "再收窄条件", "primary": False},
         ],
     }

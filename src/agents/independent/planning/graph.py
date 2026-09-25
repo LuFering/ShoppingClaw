@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any, TypedDict
+from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -45,13 +45,20 @@ class PlanningState(TypedDict, total=False):
     needs: list[dict]
     dimensions: list[str]
     candidates: list[dict]
+    excluded: list[dict]
     selected: dict | None
     risks: list[str]
     question: dict | None
 
 
 def _merge_list(old: list | None, new: list | None) -> list:
-    """列表字段的 reducer：追加而非覆盖（多个阶段都会往 candidates 里写）。"""
+    """列表字段的 reducer：追加而非覆盖。
+
+    ⚠️ 当前**没有字段在用**它 —— 因为节点是链式的，每个字段只由一个节点写。
+    将来若出现「多个节点都往 candidates 里追加」的情况，把对应字段标成
+    `Annotated[list[dict], _merge_list]` 即可，否则后写的会整体覆盖先写的。
+    保留在这里是因为它记录了这个坑，删掉下次还得重新踩。
+    """
     return (old or []) + (new or [])
 
 
@@ -78,11 +85,14 @@ def build_planning_graph():
         return {"candidates": await st.search_candidates(state)}
 
     async def n_filter(state: PlanningState) -> dict:
-        # 本轮不真过滤（需 LLM 判断），原样透传以保持图与阶段数一致
-        return {"candidates": state.get("candidates") or []}
+        # 按硬约束（预算/价格上限）真筛。算术交给代码，不由模型算 ——
+        # 详见 stages.filter_candidates 的说明（原先是原样透传的空操作）。
+        kept, excluded = st.filter_candidates(state.get("candidates") or [], state)
+        return {"candidates": kept, "excluded": excluded}
 
     async def n_compare(state: PlanningState) -> dict:
-        return {"selected": st.pick_best(state.get("candidates") or [])}
+        # 真调模型做多维度取舍；state 带过去让它能看硬约束
+        return {"selected": await st.pick_best(state.get("candidates") or [], state)}
 
     async def n_risk(state: PlanningState) -> dict:
         return {"risks": await st.retrieve_risks(state.get("subject") or state.get("scene") or "商品")}

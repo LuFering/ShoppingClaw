@@ -20,6 +20,7 @@ from sqlalchemy import desc, func, select
 
 from src.agents.independent.gift import stages as st
 from src.storage.postgres.manager import pg_manager
+from src.agents.independent.gift.graph import get_gift_graph
 from src.storage.postgres.models_business import GiftEvent, GiftRun
 
 logger = logging.getLogger(__name__)
@@ -159,120 +160,147 @@ async def _step(run_id: str, key: str, status: str, **extra) -> None:
 
 
 async def advance(run_id: str, user_id: str) -> None:
-    """按 STEPS 顺序推演。**永不抛异常**（失败落 run.error）。"""
+    """跑**图**推进这次推演。**永不抛异常**（失败落 run.error）。
+
+    ═══════════════════════════════════════════════════════════════
+    2026-09-25 修正：这里之前是一个 for 循环自己串流程
+    ═══════════════════════════════════════════════════════════════
+    那时 `graph.py` 里的 LangGraph **从未被执行过** —— 两份实现并存，
+    读者会以为跑的是图。现在图是**唯一**推进路径。
+
+    用什么方式订阅：`astream(stream_mode="updates")`。
+    节点只管算状态，service 按「哪个节点产出了什么」翻译成事件 ——
+    这样事件顺序天然跟着图的执行顺序，不需要往里塞回调
+    （塞回调还要处理同步/异步转换，顺序反而不好保证）。
+    """
     try:
         run = await get_run(run_id, user_id)
         if run is None:
             return
+
         state = {
             "recipient": run.recipient, "occasion": run.occasion,
             "budget": run.budget, "signals": run.signals or [],
             "run_id": run.id, "user_id": run.user_id,
         }
 
-        # ① 理解关系 —— 真读档案，中栏在这里被写活
-        await emit(run_id, "stage", {"key": "understand"})
-        await _step(run_id, "understand", "running")
-        ctx = await st.read_recipient_context(state)
-        profile = st.build_profile(state, ctx)
-        head = st.build_profile_head(state, profile)
-        await _patch_run(run_id, profile=profile, profile_head=head)
-        for g in profile:
-            await emit(run_id, "profile", {
-                "key": g["key"], "state": g["state"],
-                "text": g["text"], "note": g.get("note"),
-            })
-        await _say(run_id, "understand",
-                   f"从档案里读到你与{run.recipient or '对方'}的关系与历史记录；"
-                   f"{'命中 ' + str(len(ctx.get('history') or [])) + ' 条历史' if ctx.get('history') else '暂无历史记录，已如实标注'}。")
-        await _step(run_id, "understand", "done",
-                    evidence=f"读了 {len(ctx.get('history') or [])} 条历史决策、"
-                             f"{len(ctx.get('prefs') or [])} 条偏好记录",
-                    why="只取与本次送礼相关的字段，其余过滤掉")
+        graph = get_gift_graph()
+        async for chunk in graph.astream(state, stream_mode="updates"):
+            # chunk 形如 {"节点名": 该节点返回的 state 增量}
+            for node, delta in (chunk or {}).items():
+                await _on_node(run_id, node, delta or {})
 
-        # ② 提取需求 —— 写下最终版「当前理解」
-        await emit(run_id, "stage", {"key": "extract"})
-        await _step(run_id, "extract", "running")
-        understanding = st.build_understanding(state, profile)
-        await _patch_run(run_id, understanding=understanding)
-        await emit(run_id, "understanding", understanding)
-        await _say(run_id, "extract", "把偏好翻译成一条可执行的挑选标准，后面的检索与排除都以它为准。")
-        await _step(run_id, "extract", "done",
-                    evidence=understanding["from"],
-                    why="硬指标来自已确认项，不是通用祝福")
-
-        # ③ 检索商品 —— 真调 MCP
-        await emit(run_id, "stage", {"key": "search"})
-        await _step(run_id, "search", "running")
-        await emit(run_id, "deliverable", {"key": "compare", "state": "building"})
-        kws = st.build_search_keywords(state)
-        cands = await st.search_candidates(state)
-        await _say(run_id, "search", f"用「{'、'.join(kws)}」这组品类词检索，命中 {len(cands)} 件。")
-        await _step(run_id, "search", "done",
-                    evidence=f"{len(kws)} 组品类词，命中 {len(cands)} 件",
-                    why="关键词是品类词而不是「礼物」—— 后者只会搜出礼盒包装")
-
-        # ④ 比价验货 + ⑤ 排除候选
-        picked, excluded = st.verify_candidates(cands, state)
-        compare = st.build_compare(picked, excluded)
-        await _step(run_id, "verify", "running")
-        await _say(run_id, "verify", f"按预算与商品类型核验，{len(picked)} 件入选、{len(excluded)} 件排除。")
-        await _step(run_id, "verify", "done",
-                    evidence=f"入选 {len(picked)} 件，排除 {len(excluded)} 件",
-                    why="单价超预算 60% 的排除 —— 送礼要留组合空间")
-        await emit(run_id, "deliverable", {"key": "compare", "state": "ready", "data": compare})
-
-        await emit(run_id, "stage", {"key": "exclude"})
-        await _step(run_id, "exclude", "running")
-        for e in excluded:
-            await emit(run_id, "excluded", {"name": e["name"], "why": e["why"]})
-        await _say(run_id, "exclude", "被排除的保留理由、不删除 —— 否则无法回答「为什么最后只剩这几件」。")
-        await _step(run_id, "exclude", "done",
-                    evidence=f"排除 {len(excluded)} 件，理由已留档",
-                    why="不删除、不隐藏")
-
-        if not picked:
-            # 没候选也要走完流程并如实说明，不能卡在中间
-            await _say(run_id, "combine", "候选池是空的，这次凑不出方案 —— 不是失败，是数据没到位。")
-            await _step(run_id, "combine", "skipped", evidence="无可用候选")
-            await _step(run_id, "message", "skipped", evidence="无方案可写寄语")
-            await _patch_run(run_id, status="converged")
-            await emit(run_id, "done", {})
-            return
-
-        # ⑥ 组合礼盒
-        await emit(run_id, "stage", {"key": "combine"})
-        await _step(run_id, "combine", "running")
-        await emit(run_id, "deliverable", {"key": "plan", "state": "building"})
-        plan, budget_rows, order = st.combine(picked, state)
-        await emit(run_id, "deliverable", {"key": "plan", "state": "ready", "data": plan})
-        await emit(run_id, "deliverable", {"key": "budget", "state": "ready", "data": budget_rows})
-        await _say(run_id, "combine", f"挑 {len(plan.get('items') or [])} 件凑成一个整体 —— 判据是「同时被用到」，不是各自最优。")
-        await _step(run_id, "combine", "done",
-                    evidence=f"合计 ¥{order.get('total')} / 预算 ¥{order.get('budget')}",
-                    why="单件最优不等于组合最优")
-
-        # ⑦ 生成寄语
-        await emit(run_id, "stage", {"key": "message"})
-        await _step(run_id, "message", "running")
-        await emit(run_id, "deliverable", {"key": "message", "state": "building"})
-        message = st.build_message(state, plan, understanding)
-        supply = st.build_supply(picked, plan)
-        await emit(run_id, "deliverable", {"key": "message", "state": "ready", "data": message})
-        await emit(run_id, "deliverable", {"key": "supply", "state": "ready", "data": supply})
-        await emit(run_id, "deliverable", {"key": "order", "state": "needs", "data": order})
-        await _say(run_id, "message", "寄语的素材是前面每一步的判断，不是通用祝福。")
-        await _step(run_id, "message", "done",
-                    evidence="素材＝前面每一步的判断",
-                    why="每一句都能指回上面某一步的依据")
-
-        await _patch_run(run_id, status="converged")
+        # 收尾：profile_head 是展示层字段，图不产出；这里补齐
+        fresh = await get_run(run_id, user_id)
+        if fresh is not None:
+            head = st.build_profile_head(
+                {"recipient": fresh.recipient, "occasion": fresh.occasion,
+                 "budget": fresh.budget},
+                fresh.profile or [],
+            )
+            await _patch_run(run_id, profile_head=head, status="converged")
         await emit(run_id, "done", {})
 
     except Exception as e:
         logger.error(f"[gift] run {run_id} 推演失败: {e}", exc_info=True)
         await _patch_run(run_id, status="failed", error=str(e)[:500])
         await emit(run_id, "done", {})
+
+
+# 节点名 → 左栏那一步的 key / 中文名（与 STEPS 对齐）
+_NODE_META = {
+    "understand": ("understand", "理解关系"),
+    "extract": ("extract", "提取需求"),
+    "search": ("search", "检索商品"),
+    "verify": ("verify", "比价验货"),
+    "combine": ("combine", "组合礼盒"),
+    "message": ("message", "生成寄语"),
+}
+
+
+async def _on_node(run_id: str, node: str, delta: dict) -> None:
+    """一个节点跑完 → 落它对应的过程事件与产物事件。
+
+    事件顺序跟着图走（astream 逐节点 yield），不用自己排。
+    """
+    if node not in _NODE_META:
+        return
+    key, label = _NODE_META[node]
+    await emit(run_id, "stage", {"key": key})
+    await _step(run_id, key, "running")
+
+    try:
+        if node == "understand":
+            profile = delta.get("profile") or []
+            ctx = delta.get("context") or {}
+            await _patch_run(run_id, profile=profile)
+            for g in profile:
+                await emit(run_id, "profile", {
+                    "key": g["key"], "state": g["state"],
+                    "text": g["text"], "note": g.get("note"),
+                })
+            await _step(run_id, "understand", "done",
+                        evidence=f"读了 {len(ctx.get('history') or [])} 条历史、"
+                                 f"{len(ctx.get('prefs') or [])} 条偏好")
+            await _say(run_id, "understand",
+                       "从档案取到与本次送礼相关的字段，其余过滤掉。")
+
+        elif node == "extract":
+            u = delta.get("understanding") or {}
+            await _patch_run(run_id, understanding=u)
+            await emit(run_id, "understanding", u)
+            await _step(run_id, "extract", "done",
+                        evidence=u.get("from") or "",
+                        why="由模型归纳自真实档案项" if u.get("by") == "llm"
+                            else "规则兜底（模型不可用）")
+            await _say(run_id, "extract", "把偏好归纳成一条判断，后面的取舍以它为准。")
+
+        elif node == "search":
+            picked = delta.get("picked") or []
+            await emit(run_id, "deliverable", {"key": "compare", "state": "building"})
+            await _step(run_id, "search", "done",
+                        evidence=f"检索到 {len(picked)} 个真实候选")
+            await _say(run_id, "search", "用品类词检索（不是「礼物」——那只会搜出礼盒包装）。")
+
+        elif node == "verify":
+            excluded = delta.get("excluded") or []
+            picked = delta.get("picked") or []
+            for e in excluded:
+                await emit(run_id, "excluded", {"name": e["name"], "why": e["why"]})
+            await emit(run_id, "deliverable",
+                       {"key": "compare", "state": "ready",
+                        "data": st.build_compare(picked, excluded)})
+            await _step(run_id, "verify", "done",
+                        evidence=f"{len(picked)} 件入选、{len(excluded)} 件排除")
+            await _say(run_id, "verify", "排除的保留理由、不删除 —— 否则答不出「为什么只剩这几件」。")
+
+        elif node == "combine":
+            plan = delta.get("plan") or {}
+            rows = delta.get("budget_rows") or []
+            await emit(run_id, "deliverable", {"key": "plan", "state": "ready", "data": plan})
+            await emit(run_id, "deliverable", {"key": "budget", "state": "ready", "data": rows})
+            by_llm = plan.get("by") == "llm"
+            await _step(run_id, "combine", "done",
+                        evidence=f"{len(plan.get('items') or [])} 件，由模型挑选并给出理由"
+                                 if by_llm else "按品类轮流取（模型不可用，已降级）")
+            await _say(run_id, "combine",
+                       "组合由模型决策（判据是「同时被用到」），预算与品类去重由代码校验。"
+                       if by_llm else "模型不可用，已降级为规则选件。")
+
+        elif node == "message":
+            msg = delta.get("message") or {}
+            supply = delta.get("supply") or []
+            await emit(run_id, "deliverable", {"key": "message", "state": "ready", "data": msg})
+            await emit(run_id, "deliverable", {"key": "supply", "state": "ready", "data": supply})
+            await emit(run_id, "deliverable",
+                       {"key": "order", "state": "needs", "data": {}})
+            by_llm = msg.get("by") == "llm"
+            await _step(run_id, "message", "done",
+                        evidence="由模型生成，素材指回前面的判断" if by_llm
+                                 else "模板兜底（模型不可用）")
+            await _say(run_id, "message", "寄语里的每句都指回上面某一步的依据。")
+    except Exception as e:
+        logger.warning(f"[gift] 节点 {node} 事件落库失败（忽略）: {e}")
 
 
 async def get_deliverable(run_id: str, user_id: str, key: str) -> dict | None:

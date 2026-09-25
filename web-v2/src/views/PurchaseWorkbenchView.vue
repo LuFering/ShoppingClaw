@@ -191,6 +191,9 @@ const applyEvent = (kind, payload) => {
         kind,
         title: payload.title || '',
         detail: payload.detail || '',
+        // 判断来源：llm 模型判断 / rule 规则兜底。原样透传给 AgentExecStream
+        // 显示出来 —— 不显示的话，降级输出和模型输出在界面上无从分辨。
+        by: payload.by || '',
         state: 'done',
         time: nowClock()
       })
