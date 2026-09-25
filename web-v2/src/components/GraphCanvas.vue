@@ -34,9 +34,11 @@ const props = defineProps({
   /** (edgeData) => { stroke, lineDash, opacity, labelFill } */
   resolveEdge: { type: Function, default: null },
   /**
-   * 需要置于视口正中的节点 id。
-   * fitView 居中的是整图包围盒，而「以某节点为核心」的图（如决策图的核心任务）
-   * 需要焦点节点本身居中，所以 fitView 之后再补一次平移。
+   * 「以哪个节点为核心」。
+   *
+   * 用途只有一个：radial 布局的 `focusNode`，决定同心环按到谁的距离来排。
+   * **不参与相机定位** —— 相机一律按内容包围盒居中，否则左重右轻的图
+   * 会被推偏（详见 centerOnFocus 的说明）。
    */
   focusId: { type: [String, Number], default: '' }
 })
@@ -49,6 +51,9 @@ const containerEl = ref(null)
 let graph = null
 let resizeObserver = null
 let resizeTimer = null
+let centerTimer = null
+let syncing = false
+let syncPending = false
 let renderRetries = 0
 const MAX_RETRIES = 8
 
@@ -152,8 +157,13 @@ const buildConfig = (width, height) => {
     container: containerEl.value,
     width,
     height,
-    autoFit: props.autoFit,
+    // ⚠️ 关掉 G6 的内置自适应。它的 fitView 读 `canvas.getBounds()`（绘制后
+    // 的包围盒），而 render() 里 fitView 与 postLayout 并发，会拿到尚未布局
+    // 完的范围，算出随机且离谱的 zoom。自适应改由 centerOnFocus 自己做。
+    autoFit: false,
     autoResize: props.autoResize,
+    // padding 仍要留着：G6 的 paddingOffset 参与其它变换
+    padding: 34,
     layout,
     node: {
       type: 'circle',
@@ -198,6 +208,11 @@ const buildConfig = (width, height) => {
 
 const destroyGraph = () => {
   if (!graph) return
+  // 重建实例前取消待执行的居中：那个定时器捕获的是**旧实例**，
+  // 让它跑完会对着已经销毁的图调 API（静默失败，但会掩盖真正的居中）
+  if (centerTimer) { clearTimeout(centerTimer); centerTimer = null }
+  // 同步循环里持有的是旧实例，清掉待办标记避免它在新实例上再跑一轮
+  syncPending = false
   try {
     graph.destroy()
   } catch {
@@ -236,123 +251,221 @@ const initGraph = () => {
     if (!evt?.target) emit('canvas-click')
   })
 
+  // 布局真正跑完的时点。力导向在此之前取到的都是中途坐标，
+  // 据此居中必然偏 —— 这是主路径，syncData 里的定时器只是兜底。
+  graph.on('afterlayout', () => scheduleCenter())
+
   emit('ready', graph)
   syncData()
 }
 
 /**
- * 把焦点节点尽量推向视口中心。
+ * 自适应：把整张图缩放并居中到视口。
  *
- * 为什么不是「推到正中心」：fitView 之后内容包围盒已居中，
- * 若内容相对焦点严重不对称（决策图里左侧分支远多于右侧），
- * 强行把焦点移到正中心必须大幅缩小，整张图会变得很小、反而更难读。
+ * ═══════════════════════════════════════════════════════════════════
+ * 2026-09-25 重写：不再用 G6 的 fitView，也不再自己混坐标系
+ * ═══════════════════════════════════════════════════════════════════
  *
- * 所以采用有界折中：允许最多损失 ZOOM_BUDGET 的缩放，
- * 在这个约束下求出能推多远（k ∈ [0,1]），按 k 做部分平移。
- * 任何一步取不到值就放弃，保留 fitView 结果。
+ * 症状是「图老是偏左 / 偏右，一边被裁、另一边一大片空白」。
+ * 实测（真实 Chrome + CDP 量 G6 实例）抓到两个独立的原因：
+ *
+ * **原因一：G6 的 fitView 在 zoom 上不可靠。**
+ * 同一个 run 反复加载，zoom 会在 1.46 / 4.24 / 7.63 之间跳。原因是
+ * `fitView` 读的是 `canvas.getBounds()` —— 那是**绘制后**的包围盒，
+ * 而 `render()` 里 `fitView` 与 `postLayout()` 是并发的
+ * （`Promise.all([draw(), postLayout()])` 之后才 autoFit）。
+ * 拿到尚未布局完的包围盒（实测只有 67×68 世界单位），就会算出 7.5 倍
+ * 这种离谱的放大，整张图被放大到画布外，看起来就是「偏了、被裁了」。
+ *
+ * **原因二：原来的 centerOnFocus 在世界/视口坐标之间混用。**
+ * `translateTo` 收的是视口位移（G6 内部按 `delta = -translate / zoom`
+ * 作用到相机），旧代码却传 `targetFx - px * z2`，把世界坐标乘个 zoom
+ * 当屏幕坐标用，偏差恰好是 `w/2 × (z2 - 1)`。
+ *
+ * 所以整段重写为**自己算、只用两个稳定原语**：
+ *   · `zoomTo(z)`      —— 只改缩放，不动相机位置
+ *   · `translateBy(t)` —— 只平移，t 就是视口位移
+ * 内容范围用**节点位置**（`getElementPosition`，布局产物，稳定）而不是
+ * 绘制包围盒；缩放系数一次算准，再在视口坐标里做一次居中平移。
+ * 全程不依赖任何「绘制完没有」的时序，因此可复现。
+ *
+ * 居中的是**内容包围盒**，不是 focusId 那个节点 —— 后者只决定 radial
+ * 布局怎么排环。这一点单独踩过坑，见下面注释。
  */
 const centerOnFocus = async () => {
-  if (!graph || !props.focusId) return
+  if (!graph) return
   try {
     const nodes = props.graphData?.nodes || []
     if (!nodes.length) return
-
-    const at = (id) => {
-      const p = graph.getElementPosition(id)
-      const x = Array.isArray(p) ? p[0] : p?.x
-      const y = Array.isArray(p) ? p[1] : p?.y
-      return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null
-    }
-
-    const focus = at(props.focusId)
-    if (!focus) return
-    const [px, py] = focus
-
-    let minX = Infinity
-    let maxX = -Infinity
-    let minY = Infinity
-    let maxY = -Infinity
-    for (const n of nodes) {
-      const p = at(String(n.id))
-      if (!p) continue
-      minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0])
-      minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1])
-    }
-    if (!Number.isFinite(minX)) return
 
     const w = containerEl.value?.offsetWidth || 0
     const h = containerEl.value?.offsetHeight || 0
     if (!w || !h) return
 
     const PAD = 34
-    const MARGIN = 26 // 节点半径 + 下方标签的余量
-    const ZOOM_BUDGET = 0.86 // 允许的最大缩放损失
-    const cx = w / 2
-    const cy = h / 2
-    const halfW = Math.max(1, cx - PAD)
-    const halfH = Math.max(1, cy - PAD)
+    // 节点下方的标签、节点半径不在节点坐标里，按最大节点尺寸留余量
+    const EXTRA_W = 92
+    const EXTRA_H = 104
 
-    const z = Number(graph.getZoom?.()) || 1
-    const bcx = (minX + maxX) / 2
-    const bcy = (minY + maxY) / 2
-
-    // 完全居中所需的屏幕位移
-    const dx = -(px - bcx) * z
-    const dy = -(py - bcy) * z
-
-    // 内容半宽/半高（屏幕像素，含节点与标签余量）
-    const ax = ((maxX - minX) / 2 + MARGIN) * z
-    const ay = ((maxY - minY) / 2 + MARGIN) * z
-
-    // 位移 |d|×k 后需要缩放 s ≤ half/(k|d| + a)；令 s ≥ ZOOM_BUDGET 反解 k
-    const kOf = (half, a, d) => {
-      if (Math.abs(d) < 0.5) return 1
-      const k = (half / ZOOM_BUDGET - a) / Math.abs(d)
-      return Math.max(0, Math.min(1, k))
-    }
-    const k = Math.min(kOf(halfW, ax, dx), kOf(halfH, ay, dy))
-    if (!Number.isFinite(k) || k <= 0.01) return
-
-    // 这个 k 下必须的缩放（≤1）。少了这一步，位移后的内容会被画布裁掉。
-    const needW = k * Math.abs(dx) + ax
-    const needH = k * Math.abs(dy) + ay
-    const s = Math.min(1, needW > 0 ? halfW / needW : 1, needH > 0 ? halfH / needH : 1)
-    const z2 = z * s
-    if (!Number.isFinite(z2) || z2 <= 0) return
-
-    if (Math.abs(s - 1) > 0.005) {
+    // ── 1. 世界坐标下的内容范围（节点位置，布局产物） ──
+    const posOf = (id) => {
       try {
-        await graph.zoomTo?.(z2)
+        const p = graph.getElementPosition(String(id))
+        const x = Array.isArray(p) ? p[0] : p?.x
+        const y = Array.isArray(p) ? p[1] : p?.y
+        return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null
       } catch {
-        /* 缩放不可用时退回纯平移，宁可少移一点也不裁内容 */
-        return
+        return null
       }
     }
 
-    // 焦点应落到「视口中心再往回退 (1-k)·s·|d|」的位置
-    const targetFx = cx - (1 - k) * dx * s
-    const targetFy = cy - (1 - k) * dy * s
-    graph.translateTo([targetFx - px * z2, targetFy - py * z2])
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const n of nodes) {
+      const p = posOf(n.id)
+      if (!p) continue
+      minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0])
+      minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1])
+    }
+    if (!Number.isFinite(minX)) return
+
+    const worldW = Math.max(1, maxX - minX) + EXTRA_W
+    const worldH = Math.max(1, maxY - minY) + EXTRA_H
+
+    // ── 2. 一次算准缩放：整图要装进 (w-2PAD, h-2PAD) ──
+    // 上限 1：不放大超过原始尺寸（放大只会让图更糊，信息量不变）
+    const fitZoom = Math.min(1, (w - 2 * PAD) / worldW, (h - 2 * PAD) / worldH)
+    if (!Number.isFinite(fitZoom) || fitZoom <= 0) return
+
+    // zoomTo 只改缩放，不动相机位置 —— 此时内容的视口坐标可以直接读出来
+    await graph.zoomTo(fitZoom)
+
+    // ── 3. 在视口坐标里居中 ──
+    // 优先让 focus 节点居中；若那样会把内容推出画布，则退到「内容居中」。
+    const toVp = (p) => {
+      try {
+        const v = graph.getViewportByCanvas(p)
+        const x = Array.isArray(v) ? v[0] : v?.x
+        const y = Array.isArray(v) ? v[1] : v?.y
+        return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null
+      } catch {
+        return null
+      }
+    }
+
+    let vminX = Infinity, vmaxX = -Infinity, vminY = Infinity, vmaxY = -Infinity
+    for (const n of nodes) {
+      const p = posOf(n.id)
+      if (!p) continue
+      const v = toVp(p)
+      if (!v) continue
+      vminX = Math.min(vminX, v[0]); vmaxX = Math.max(vmaxX, v[0])
+      vminY = Math.min(vminY, v[1]); vmaxY = Math.max(vmaxY, v[1])
+    }
+    if (!Number.isFinite(vminX)) return
+
+    const cx = w / 2
+    const cy = h / 2
+    const contentCx = (vminX + vmaxX) / 2
+    const contentCy = (vminY + vmaxY) / 2
+
+    // ═══════════════════════════════════════════════════════════════
+    // 居中「内容」，不是居中「焦点节点」
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // 原先这里会让 focusId 优先居中，只要内容还能塞进画布就这么做。
+    // 结果就是用户反复说的「图老是偏左」：决策图天然左重右轻
+    // （左边挂着一串候选商品，右边只有几条依据），把中间那个核心任务
+    // 摆到正中央，整张图必然被推向左 —— 实测左留白 146px、右留白 328px。
+    //
+    // 用户要的是**整张图看着居中**，不是「核心节点在正中」。所以改成
+    // 一律按内容包围盒居中。focusId 仍然有用 —— 它是 radial 布局的
+    // focusNode（决定同心环怎么排），只是不再参与相机定位。
+    let tx = cx - contentCx
+    let ty = cy - contentCy
+
+    // 兜底夹取：内容必须完整可见。极端情况下（内容仍比画布大）取中点，
+    // 让两侧超出量均等，而不是硬贴一边。
+    const clamp = (t, lo, hi) => (lo > hi ? (lo + hi) / 2 : Math.max(lo, Math.min(hi, t)))
+    tx = clamp(tx, PAD - vminX, (w - PAD) - vmaxX)
+    ty = clamp(ty, PAD - vminY, (h - PAD) - vmaxY)
+
+    if (Math.abs(tx) < 0.5 && Math.abs(ty) < 0.5) return   // 已经到位，别白动一次
+
+    await graph.translateBy([tx, ty])
   } catch {
-    /* API 形状不符时保持 fitView 结果 */
+    /* API 形状不符时保持当前视口，不做任何事 —— 宁可不动，也不要乱动 */
   }
 }
 
+/**
+ * 安排一次居中（防抖）。
+ *
+ * 时机是这里最容易出错的地方：布局是**异步**的，`await graph.render()`
+ * 返回时力导向还在跑，此刻取到的节点坐标是中途值，据此算出的平移必然偏。
+ * 所以居中不能只做一次，要在布局收敛之后再补一次。
+ *
+ * 两条触发路径，都汇进同一个防抖定时器，只有最后一次生效：
+ *   · `afterlayout` —— G6 布局真正跑完时发的事件（主路径）
+ *   · syncData 里的兜底调用 —— 万一某布局不发该事件
+ */
+const CENTER_DEBOUNCE = 80
+const scheduleCenter = (delay = CENTER_DEBOUNCE) => {
+  if (!props.autoFit) return
+  if (centerTimer) clearTimeout(centerTimer)
+  centerTimer = setTimeout(() => {
+    centerTimer = null
+    centerOnFocus()
+  }, delay)
+}
+
+/**
+ * 把最新数据同步到图上。
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * 2026-09-25 修正：并发调用会丢节点
+ * ═══════════════════════════════════════════════════════════════════
+ *
+ * 症状：17 个节点的数据，画布上只画出前 6 个（第一批 intake 的），
+ * 后面 SSE 推来的全都不见了。
+ *
+ * 原因：`render()` 是异步的，而 deep watcher 每收到一次 graphData 变化就
+ * 调一次 syncData。工作台在推演期间会连续推 7 次图变更，于是多个
+ * `setData()` + `render()` **重叠执行** —— 前一次的渲染还没走完，数据就被
+ * 下一次 `setData` 换掉了。G6 的更新流程在动画回调里按 id 取元素
+ * （`elementMap[id].onUpdate`），元素已被后一次操作销毁 → 抛
+ * `TypeError: Cannot read properties of undefined (reading 'onUpdate')`，
+ * 那批元素就此丢失。
+ *
+ * 修法：**串行化**。同一时刻只允许一次同步在跑；期间到达的新数据只记一个
+ * 「有待办」标记，等当前这次跑完再补一次（latest-wins）。这样既不会重叠，
+ * 也不会因为节流而漏掉最后一次数据。
+ *
+ * `syncing` / `syncPending` 声明在文件顶部，与其它实例级状态放一起。
+ */
 const syncData = async () => {
   if (!graph) return
-  graph.setData(toG6Data())
-  await graph.render()
-  if (props.autoFit && typeof graph.fitView === 'function') {
-    try {
-      // 留出内边距：fitView 的包围盒不含节点下方的标签，不留边会被画布裁掉
-      await graph.fitView({ direction: 'both', padding: 34 })
-    } catch {
-      /* 空图或参数不支持时忽略 */
-    }
+  if (syncing) {
+    // 正在渲染：记下「有新数据」，等它跑完再同步一次（只保留最后一次）
+    syncPending = true
+    return
   }
-  // 力导向布局要等模拟收敛后再定位，否则拿到的是中途坐标
-  if (props.focusId) {
-    setTimeout(() => { centerOnFocus() }, props.layoutOptions?.type === 'radial' ? 120 : 700)
+  syncing = true
+  try {
+    do {
+      syncPending = false
+      if (!graph) return          // 循环期间可能被销毁
+      graph.setData(toG6Data())
+      await graph.render()
+      if (!graph) return
+      // 自适应统一交给 centerOnFocus（自己算缩放 + 居中，可复现）。
+      // 不再调 graph.fitView()：它读的是**绘制后**的包围盒，而 render() 里
+      // fitView 与 postLayout 是并发的，会拿到尚未布局完的范围，算出离谱的
+      // zoom（实测 1.46 / 4.24 / 7.63 随机跳）。详见 centerOnFocus 的说明。
+      // 兜底：radial 布局很快收敛，力导向要多等一会儿
+      scheduleCenter(props.layoutOptions?.type === 'radial' ? 160 : 700)
+    } while (syncPending)
+  } finally {
+    syncing = false
   }
   emit('data-rendered', props.graphData)
 }
@@ -370,6 +483,8 @@ onMounted(async () => {
         const h = containerEl.value?.offsetHeight
         if (!w || !h) return
         graph.setSize(w, h)
+        // 画布尺寸变了，之前算的缩放/居中就不再适用 —— 重新适配一次
+        scheduleCenter()
       }, 120)
     })
     resizeObserver.observe(rootEl.value)
@@ -378,6 +493,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   clearTimeout(resizeTimer)
+  if (centerTimer) { clearTimeout(centerTimer); centerTimer = null }
   resizeObserver?.disconnect()
   resizeObserver = null
   destroyGraph()
@@ -402,12 +518,9 @@ watch(
 defineExpose({
   /** 供外部（如「跟随执行」开关）在数据变化后重新居中 */
   fitView: async () => {
-    try {
-      await graph?.fitView?.({ direction: 'both', padding: 34 })
-    } catch {
-      /* ignore */
-    }
-    centerOnFocus()
+    // 不再走 G6 的 fitView（原因见 buildConfig 的 autoFit 说明），
+    // 直接走自己的调度：布局可能还在收敛，等它结束再算
+    scheduleCenter()
   },
   getGraph: () => graph
 })
