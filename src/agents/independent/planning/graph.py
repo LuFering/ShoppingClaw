@@ -44,10 +44,12 @@ class PlanningState(TypedDict, total=False):
     # 累积产物
     needs: list[dict]
     dimensions: list[str]
+    dims_from_kb: bool
     candidates: list[dict]
     excluded: list[dict]
     selected: dict | None
     risks: list[str]
+    risks_from_kb: bool
     question: dict | None
 
 
@@ -79,7 +81,9 @@ def build_planning_graph():
         return {"needs": st.build_needs(state)}
 
     async def n_clarify(state: PlanningState) -> dict:
-        return {"dimensions": await st.retrieve_dimensions(state.get("subject") or state.get("scene") or "商品")}
+        dims, from_kb = await st.retrieve_dimensions(
+            state.get("subject") or state.get("scene") or "商品")
+        return {"dimensions": dims, "dims_from_kb": from_kb}
 
     async def n_search(state: PlanningState) -> dict:
         return {"candidates": await st.search_candidates(state)}
@@ -95,7 +99,9 @@ def build_planning_graph():
         return {"selected": await st.pick_best(state.get("candidates") or [], state)}
 
     async def n_risk(state: PlanningState) -> dict:
-        return {"risks": await st.retrieve_risks(state.get("subject") or state.get("scene") or "商品")}
+        risks, from_kb = await st.retrieve_risks(
+            state.get("subject") or state.get("scene") or "商品")
+        return {"risks": risks, "risks_from_kb": from_kb}
 
     async def n_deliver(state: PlanningState) -> dict:
         return {"question": st.deliver_question(state)}

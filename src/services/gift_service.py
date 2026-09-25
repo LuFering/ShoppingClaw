@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -185,10 +186,18 @@ async def advance(run_id: str, user_id: str) -> None:
         }
 
         graph = get_gift_graph()
-        async for chunk in graph.astream(state, stream_mode="updates"):
+        started: dict[str, float] = {}   # 节点名 → 开始时刻
+
+        # 同时订阅 debug：只有它能在节点**开始执行前**给信号。
+        # 只用 updates 的话，「运行中」这一行没有出现的机会 ——
+        # updates 要等节点跑完才 yield（详见 _on_debug）。
+        async for mode, chunk in graph.astream(state, stream_mode=["updates", "debug"]):
+            if mode == "debug":
+                await _on_debug(run_id, chunk, started)
+                continue
             # chunk 形如 {"节点名": 该节点返回的 state 增量}
             for node, delta in (chunk or {}).items():
-                await _on_node(run_id, node, delta or {})
+                await _on_node(run_id, node, delta or {}, started.pop(node, None))
 
         # 收尾：profile_head 是展示层字段，图不产出；这里补齐
         fresh = await get_run(run_id, user_id)
@@ -217,17 +226,64 @@ _NODE_META = {
     "message": ("message", "生成寄语"),
 }
 
+# 每一步「正在做什么」。刻意写具体 —— 用户要知道它此刻是在等 MCP（慢）
+# 还是在等模型（慢），而不是以为界面卡住了。
+_RUNNING_HINT = {
+    "understand": "读收礼人的历史与偏好",
+    "extract": "把偏好归纳成一条判断",
+    "search": "用品类词检索真实商品",
+    "verify": "比对价格、排除不合适的",
+    "combine": "让模型决定这几件如何构成一体",
+    "message": "写一段指回依据的话",
+}
 
-async def _on_node(run_id: str, node: str, delta: dict) -> None:
+
+async def _on_debug(run_id: str, chunk: dict, started: dict[str, float]) -> None:
+    """图的 debug 事件 → 「这一步正在做」，并记下开始时刻算耗时。
+
+    ═══════════════════════════════════════════════════════════════════
+    为什么需要它 —— 只用 updates 时「运行中」不可能出现
+    ═══════════════════════════════════════════════════════════════════
+
+    `updates` 只在节点**跑完之后**才 yield。原实现在 `_on_node` 里先发
+    `running` 再发 `done`，两条事件同一瞬间落库 —— 前端 SSE 一次收到两条，
+    中间没有任何时间差，「进行中」那一行等于从没显示过。
+
+    debug 模式的 `task` 事件在节点**开始执行前**发出，是唯一能拿到
+    「现在在干什么」的时点。最慢的两步（检索 ~9s、模型组合 ~8s）都在这。
+
+    started 记的是 `time.monotonic()` —— 只用做**差值**，不是墙上时间，
+    所以不受系统时钟调整影响。
+    """
+    if (chunk or {}).get("type") != "task":
+        return
+    node = (chunk.get("payload") or {}).get("name") or ""
+    if node not in _NODE_META:
+        return
+    key, label = _NODE_META[node]
+    started[node] = time.monotonic()
+    await _step(run_id, key, "running", label=label,
+                hint=_RUNNING_HINT.get(node, ""))
+
+
+async def _on_node(run_id: str, node: str, delta: dict,
+                   t_start: float | None = None) -> None:
     """一个节点跑完 → 落它对应的过程事件与产物事件。
 
     事件顺序跟着图走（astream 逐节点 yield），不用自己排。
+
+    这里**不再发 `running`** —— 那由 `_on_debug` 在节点开始执行时发。
+    原先 running 与 done 在同一瞬间发出，界面上「进行中」那一行根本
+    没有出现的机会（这就是它一直不显示的原因）。
     """
     if node not in _NODE_META:
         return
     key, label = _NODE_META[node]
     await emit(run_id, "stage", {"key": key})
-    await _step(run_id, key, "running")
+
+    # 真实耗时：节点开始（_on_debug 记的）到此刻。没有就不带这个字段 ——
+    # 宁可没有时长，也不编一个出来。
+    ms = int((time.monotonic() - t_start) * 1000) if t_start is not None else None
 
     try:
         if node == "understand":
@@ -239,7 +295,7 @@ async def _on_node(run_id: str, node: str, delta: dict) -> None:
                     "key": g["key"], "state": g["state"],
                     "text": g["text"], "note": g.get("note"),
                 })
-            await _step(run_id, "understand", "done",
+            await _step(run_id, "understand", "done", ms=ms,
                         evidence=f"读了 {len(ctx.get('history') or [])} 条历史、"
                                  f"{len(ctx.get('prefs') or [])} 条偏好")
             await _say(run_id, "understand",
@@ -249,7 +305,7 @@ async def _on_node(run_id: str, node: str, delta: dict) -> None:
             u = delta.get("understanding") or {}
             await _patch_run(run_id, understanding=u)
             await emit(run_id, "understanding", u)
-            await _step(run_id, "extract", "done",
+            await _step(run_id, "extract", "done", ms=ms,
                         evidence=u.get("from") or "",
                         why="由模型归纳自真实档案项" if u.get("by") == "llm"
                             else "规则兜底（模型不可用）")
@@ -258,7 +314,7 @@ async def _on_node(run_id: str, node: str, delta: dict) -> None:
         elif node == "search":
             picked = delta.get("picked") or []
             await emit(run_id, "deliverable", {"key": "compare", "state": "building"})
-            await _step(run_id, "search", "done",
+            await _step(run_id, "search", "done", ms=ms,
                         evidence=f"检索到 {len(picked)} 个真实候选")
             await _say(run_id, "search", "用品类词检索（不是「礼物」——那只会搜出礼盒包装）。")
 
@@ -270,7 +326,7 @@ async def _on_node(run_id: str, node: str, delta: dict) -> None:
             await emit(run_id, "deliverable",
                        {"key": "compare", "state": "ready",
                         "data": st.build_compare(picked, excluded)})
-            await _step(run_id, "verify", "done",
+            await _step(run_id, "verify", "done", ms=ms,
                         evidence=f"{len(picked)} 件入选、{len(excluded)} 件排除")
             await _say(run_id, "verify", "排除的保留理由、不删除 —— 否则答不出「为什么只剩这几件」。")
 
@@ -280,7 +336,7 @@ async def _on_node(run_id: str, node: str, delta: dict) -> None:
             await emit(run_id, "deliverable", {"key": "plan", "state": "ready", "data": plan})
             await emit(run_id, "deliverable", {"key": "budget", "state": "ready", "data": rows})
             by_llm = plan.get("by") == "llm"
-            await _step(run_id, "combine", "done",
+            await _step(run_id, "combine", "done", ms=ms,
                         evidence=f"{len(plan.get('items') or [])} 件，由模型挑选并给出理由"
                                  if by_llm else "按品类轮流取（模型不可用，已降级）")
             await _say(run_id, "combine",
@@ -295,7 +351,7 @@ async def _on_node(run_id: str, node: str, delta: dict) -> None:
             await emit(run_id, "deliverable",
                        {"key": "order", "state": "needs", "data": {}})
             by_llm = msg.get("by") == "llm"
-            await _step(run_id, "message", "done",
+            await _step(run_id, "message", "done", ms=ms,
                         evidence="由模型生成，素材指回前面的判断" if by_llm
                                  else "模板兜底（模型不可用）")
             await _say(run_id, "message", "寄语里的每句都指回上面某一步的依据。")

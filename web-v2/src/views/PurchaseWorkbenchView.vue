@@ -173,16 +173,51 @@ const taskLabel = computed(() => {
 // ── 事件 → 界面 ───────────────────────────────────────────
 // 后端只发这 8 类（刻意不学 chat 的 15 种）：
 //   phase / think / retrieve / call / graph / question / deliverable / done
+//
+// phase 现在有两种状态（后端从图的 debug 流里取的）：
+//   state='running' → 这一步**正在做**，带 hint 说明在等什么
+//   state='done'    → 做完了，带 ms 真实耗时
+// 早先只有 done 一种，且没有耗时 —— 最慢的两步（检索 ~9s、模型对比 ~8s）
+// 期间界面一动不动，看起来像卡死。
 const applyEvent = (kind, payload) => {
   switch (kind) {
-    case 'phase':
-      stream.value.push({
-        kind: 'think',
-        title: payload.label || payload.phase,
-        state: 'done',
-        time: nowClock()
-      })
+    case 'phase': {
+      const phase = payload.phase
+      if (payload.state === 'running') {
+        // 同一步可能先 running 后 done；用 phase key 找到那一行就地改状态，
+        // 而不是再 push 一条（否则一步会占两行）
+        stream.value.push({
+          kind: 'phase',
+          phase,
+          title: payload.label || phase,
+          detail: payload.hint || '',
+          state: 'running',
+          startedAt: Date.now(),
+          time: nowClock()
+        })
+      } else {
+        const row = stream.value.find((x) => x.kind === 'phase' && x.phase === phase)
+        if (row) {
+          row.state = 'done'
+          row.ms = payload.ms ?? null
+          // 用后端给的真实耗时；后端没给就退回本地计时（仍是实测，不是编的）
+          if (row.ms == null && row.startedAt) row.ms = Date.now() - row.startedAt
+          row.time = nowClock()
+        } else {
+          // 没有对应的 running（比如续跑跳过了 debug）—— 如实落一条无时长的
+          stream.value.push({
+            kind: 'phase',
+            phase,
+            title: payload.label || phase,
+            detail: '',
+            state: 'done',
+            ms: payload.ms ?? null,
+            time: nowClock()
+          })
+        }
+      }
       break
+    }
     case 'think':
     case 'retrieve':
     case 'call':

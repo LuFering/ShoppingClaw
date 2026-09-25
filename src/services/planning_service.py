@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -304,12 +305,21 @@ async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
         # 2026-09-25 修正：这里原先是一个 for 循环调 `_run_stage`，
         # 而 `graph.py` 里的 LangGraph **从未被执行过** —— 两份实现并存。
         # 现在图是唯一推进路径，service 只订阅它的逐节点产出。
+        #
+        # 同时订阅 debug：只有它能给出「节点开始执行」的时点（见 _on_debug）。
         graph = get_planning_graph()
         await _patch_run(run_id, status="running")
 
-        async for chunk in graph.astream(state, stream_mode="updates"):
+        started: dict[str, float] = {}   # 节点名 → 开始时刻，用来算真实耗时
+
+        async for mode, chunk in graph.astream(state, stream_mode=["updates", "debug"]):
             if await get_run(run_id, user_id) is None:
                 return   # run 被删了
+
+            if mode == "debug":
+                await _on_debug(run_id, chunk, start_idx, started)
+                continue
+
             for node, delta in (chunk or {}).items():
                 # ⚠️ 必须自己累积。`stream_mode="updates"` 只给**本节点的增量**，
                 # 不是累积状态 —— 早先直接把初始 `state` 传下去，于是
@@ -321,7 +331,8 @@ async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
                 # 续跑时跳过 start_at 之前的节点（answer 之后从下一阶段接上）
                 if node in STAGE_KEYS and STAGE_KEYS.index(node) < start_idx:
                     continue
-                stop = await _on_node(run_id, node, delta or {}, state)
+                stop = await _on_node(run_id, node, delta or {}, state,
+                                      started.pop(node, None))
                 if stop:
                     await _patch_run(run_id, status="awaiting", question=stop)
                     await emit(run_id, "question", stop)
@@ -335,6 +346,53 @@ async def advance(run_id: str, user_id: str, start_at: str = "intake") -> None:
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
 
 
+# 每个阶段「正在做什么」。
+# 刻意不写「正在思考…」这种放之四海皆准的话：写具体了，用户才知道它此刻
+# 是在等 MCP（慢）还是在等模型（慢），而不是以为界面卡住了。
+RUNNING_HINT = {
+    "intake": "把入口参数摊成可筛选的需求",
+    "clarify": "查这个品类该看哪些维度",
+    "search": "向淘宝检索真实商品",
+    "filter": "按预算等硬约束筛选",
+    "compare": "让模型逐条对比取舍",
+    "risk": "查售后与风险政策",
+    "deliver": "整理成待你拍板的问题",
+}
+
+
+async def _on_debug(run_id: str, chunk: dict, start_idx: int,
+                    started: dict[str, float]) -> None:
+    """把图的 debug 事件翻译成「正在做什么」。
+
+    ═══════════════════════════════════════════════════════════════════
+    为什么非要用 debug 模式 —— 只用 updates 时「运行中」是不存在的状态
+    ═══════════════════════════════════════════════════════════════════
+
+    `updates` 只在节点**跑完之后**才 yield。所以节点开始时没有任何信号，
+    等收到信号时活儿已经干完了 —— 界面上「进行中」那一行根本没有出现的
+    机会（gift 那边就是这么写的：running 与 done 在同一瞬间发出）。
+
+    实测最慢的两步是 MCP 检索（~9s）与模型取舍（~8s），这十几秒里界面
+    一动不动，看起来像卡死。debug 模式的 `task` 事件在节点**开始执行前**
+    发出，这是唯一能拿到「现在在干什么」的时点。
+
+    耗时不用 `task_result`（它在 updates 之后才到）：直接用 updates 到达
+    时刻减去 task 时刻。两者都在节点尾部，差值就是真实执行时长。
+    """
+    if (chunk or {}).get("type") != "task":
+        return
+    node = (chunk.get("payload") or {}).get("name") or ""
+    if node not in STAGE_LABEL:
+        return
+    if node in STAGE_KEYS and STAGE_KEYS.index(node) < start_idx:
+        return   # 续跑时跳过的阶段，不发「正在做」
+    started[node] = time.monotonic()
+    await emit(run_id, "phase", {
+        "phase": node, "label": STAGE_LABEL[node],
+        "state": "running", "hint": RUNNING_HINT.get(node, ""),
+    })
+
+
 def _state_of(run: PlanningRun) -> dict:
     return {
         "scene": run.scene, "budget": run.budget, "duration": run.duration,
@@ -344,17 +402,25 @@ def _state_of(run: PlanningRun) -> dict:
 
 
 # 图节点名 → 阶段 key（与 STAGES 对齐）
-async def _on_node(run_id: str, node: str, delta: dict, state: dict) -> dict | None:
+async def _on_node(run_id: str, node: str, delta: dict, state: dict,
+                   t_start: float | None = None) -> dict | None:
     """一个图节点跑完 → 落它的事件与图变更。
 
     返回非 None 表示「要停下来问用户」（值是 question 对象）。
 
     事件顺序跟着 `astream` 的逐节点产出走，不用自己排 ——
     这是把流程交给图的直接好处。
+
+    t_start 是该节点开始执行的 `time.monotonic()`（由 `_on_debug` 记下）。
+    有它就发一条带真实耗时的 phase；没有（比如续跑跳过了 debug）就不发，
+    宁可没有时长也不编一个。
     """
     if node not in STAGE_LABEL:
         return None
-    await emit(run_id, "phase", {"phase": node, "label": STAGE_LABEL[node]})
+    done_evt = {"phase": node, "label": STAGE_LABEL[node], "state": "done"}
+    if t_start is not None:
+        done_evt["ms"] = int((time.monotonic() - t_start) * 1000)
+    await emit(run_id, "phase", done_evt)
 
     if node == "intake":
         needs = delta.get("needs") or []
@@ -371,9 +437,18 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict) -> dict | N
 
     elif node == "clarify":
         dims = delta.get("dimensions") or []
+        from_kb = delta.get("dims_from_kb")
+        # 措辞必须跟着来源变：知识库真命中才说「命中 N 条」，
+        # 否则如实说用的是通用维度 —— 不然「命中」二字会被读成
+        # 「知识库里收录了这个品类」，而实际可能一条都没有。
+        #
+        # by 用 "kb" 而不是 "llm"：知识库命中是**检索**结果，不是模型判断。
+        # 三种来源要能分辨：kb 知识库 / llm 模型 / rule 规则兜底。
         await emit(run_id, "retrieve", {
             "title": f"品类知识 · {state.get('subject') or state.get('scene') or '商品'}",
-            "detail": f"命中 {len(dims)} 条评估维度",
+            "detail": (f"命中 {len(dims)} 条评估维度" if from_kb
+                       else f"知识库未收录该品类，改用通用维度：{'、'.join(dims)}"),
+            "by": "kb" if from_kb else "rule",
         })
         await _merge_graph(
             run_id,
@@ -433,9 +508,12 @@ async def _on_node(run_id: str, node: str, delta: dict, state: dict) -> dict | N
 
     elif node == "risk":
         risks = delta.get("risks") or []
+        from_kb = delta.get("risks_from_kb")
         await emit(run_id, "retrieve", {
             "title": "风险与售后政策",
-            "detail": f"命中 {len(risks)} 条待确认项",
+            "detail": (f"命中 {len(risks)} 条待确认项" if from_kb
+                       else "知识库未收录该品类，按通用项提示"),
+            "by": "kb" if from_kb else "rule",
         })
         await _merge_graph(
             run_id,

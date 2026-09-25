@@ -69,9 +69,17 @@ async def _mcp_tool(name: str):
 
 
 async def _builtin_tool(name: str):
-    """按名取一个 buildin 工具（RAG 类在这里）。"""
+    """按名取一个 buildin 工具（RAG 类在这里）。
+
+    ⚠️ 必须从**包** `toolkits` 导入，不能从子模块 `toolkits.registry` 导入 ——
+    包 `__init__.py` 里的 `get_all_tool_instances()` 会先调 `_ensure_tools_loaded()`
+    去 import 各工具包（`@tool` 装饰器在 import 时才注册），子模块里那个不会。
+    从子模块导入拿到的是**空列表**，于是每个 RAG 调用都静默落到兜底分支
+    （实测：`query_category_knowledge` 恒取不到 → 「命中 3 条评估维度」
+    其实是硬编码的 `["价格","口碑","售后"]`）。
+    """
     try:
-        from src.agents.common.toolkits.registry import get_all_tool_instances
+        from src.agents.common.toolkits import get_all_tool_instances
 
         return next(
             (t for t in get_all_tool_instances() if getattr(t, "name", "") == name), None
@@ -138,14 +146,19 @@ def build_needs(state: dict) -> list[dict]:
     return out
 
 
-async def retrieve_dimensions(subject: str) -> list[str]:
+async def retrieve_dimensions(subject: str) -> tuple[list[str], bool]:
     """clarify：查品类知识，得到该品类该看的评估维度。
+
+    返回 `(维度, 是否来自知识库)`。第二个值**必须往上传** ——
+    界面上的措辞要跟着它变，否则「命中 3 条评估维度」会被读成
+    「知识库里有这个品类的资料」，而实际可能一条都没有、用的是通用兜底。
 
     查不到用通用维度兜底 —— 不能因为知识库没收录就卡住整条流程。
     """
     raw = await _call(await _builtin_tool("query_category_knowledge"),
                       {"category": subject}, RAG_TIMEOUT)
-    return _as_str_list(raw) or ["价格", "口碑", "售后"]
+    hits = _as_str_list(raw)
+    return (hits, True) if hits else (["价格", "口碑", "售后"], False)
 
 
 async def search_candidates(state: dict) -> list[dict]:
@@ -265,11 +278,20 @@ async def pick_best(cands: list[dict], state: dict | None = None) -> dict:
     return {"name": cand_name(best), "why": "价格最低（模型不可用，已降级为规则）", "by": "rule"}
 
 
-async def retrieve_risks(subject: str) -> list[str]:
-    """risk：查售后/风控政策。"""
+async def retrieve_risks(subject: str) -> tuple[list[str], bool]:
+    """risk：查售后/风控政策。返回 `(风险项, 是否来自知识库)`。
+
+    ⚠️ 参数名必须与 `QueryRiskPolicyInput` 对齐：它要的是
+    `product_name` + `category`，**没有 `query` 字段**。
+    早先传 `{"query": subject}` 会直接 pydantic 校验失败
+    （`2 validation errors ... product_name/category Field required`），
+    异常被 `_call` 吞成 None → 静默落到兜底的那一条「长期持有成本待确认」，
+    而界面上照样显示「命中 1 条待确认项」，看不出是失败了。
+    """
     raw = await _call(await _builtin_tool("query_risk_policy"),
-                      {"query": subject}, RAG_TIMEOUT)
-    return _as_str_list(raw) or ["长期持有成本待确认"]
+                      {"product_name": subject, "category": subject}, RAG_TIMEOUT)
+    hits = _as_str_list(raw)
+    return (hits, True) if hits else (["长期持有成本待确认"], False)
 
 
 def filter_candidates(cands: list[dict], state: dict) -> tuple[list[dict], list[dict]]:

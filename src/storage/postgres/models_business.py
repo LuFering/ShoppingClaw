@@ -40,7 +40,11 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_name = Column(String, nullable=False, unique=True, index=True)  # 用户名称
     user_id = Column(String, nullable=False, unique=True, index=True)  # 登录ID
-    phone_number = Column(String, nullable=False, unique=True, index=True)  # 手机号
+    # ⚠️ 必须 nullable。手机号是可选的，而 `unique=True` 的唯一索引在
+    # Postgres 里**允许多个 NULL、只允许一个空串** —— 若这列 NOT NULL，
+    # 注册时只能塞 ""，于是**第二个**没填手机号的用户永远注册不进来
+    # （撞 ix_users_phone_number 报 500，实测踩到）。
+    phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号（可空）
     config_json=Column(JSON,nullable=True,default={})
     shipping_address=Column(String,nullable=False)
     avatar = Column(String, nullable=True)  # 头像URL

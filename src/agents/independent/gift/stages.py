@@ -91,8 +91,15 @@ async def _mcp_tool(name: str):
 
 
 async def _builtin_tool(name: str):
+    """按名取一个 buildin 工具。
+
+    ⚠️ 从**包** `toolkits` 导入，不要从子模块 `toolkits.registry` ——
+    包 `__init__.py` 会先 import 各工具包触发 `@tool` 注册，子模块不会，
+    拿到的是空列表，于是每个 RAG 调用静默落到兜底分支。
+    （详见 planning/stages.py 同函数的说明。）
+    """
     try:
-        from src.agents.common.toolkits.registry import get_all_tool_instances
+        from src.agents.common.toolkits import get_all_tool_instances
 
         return next(
             (t for t in get_all_tool_instances() if getattr(t, "name", "") == name), None
@@ -163,23 +170,34 @@ async def read_recipient_context(state: dict) -> dict:
     out: dict[str, Any] = {"history": [], "prefs": [], "raw_ok": False}
 
     try:
-        from src.agents.common.middleware.user_scope import bind_user_id
-
-        recall = await _builtin_tool("recall_past_decisions")
-        ctx = await _builtin_tool("get_user_shopping_context")
         uid = str(state.get("user_id") or "")
 
+        # ═══════════════════════════════════════════════════════════════
+        # user_id 必须**显式传**，不能靠 with_user_id + bind_user_id 注入
+        # ═══════════════════════════════════════════════════════════════
+        #
+        # 这两个工具的 `user_id` **声明在 args_schema 里**（与
+        # `create_monitor_task` 那类「schema 里没有、靠 runtime 注入」的工具不同）。
+        # LangChain 的 StructuredTool 会**先按 args_schema 校验参数、再调用**，
+        # 所以无论怎么包装 coroutine，校验都在包装器之前发生 ——
+        # 实测报 `user_id Field required`，异常被 `_call` 吞掉返回 None，
+        # 于是「读档案」永远读不到东西，而界面照样显示「读了 0 条历史」，
+        # 看起来像档案本来就是空的。
+        #
+        # 我们是调用方，本来就该给出「这是谁」——显式传既过校验，也不涉及
+        # 模型编造 id 的问题（那是模型自己填参数时的风险）。
+        recall = await _builtin_tool("recall_past_decisions")
+        ctx = await _builtin_tool("get_user_shopping_context")
+
         if recall is not None and recipient:
-            with bind_user_id(uid):
-                raw = await _call(recall, {"topic": recipient}, RAG_TIMEOUT)
+            raw = await _call(recall, {"user_id": uid, "topic": recipient}, RAG_TIMEOUT)
             data = _parse_jsonish(raw)
             if isinstance(data, list):
                 out["history"] = data[:5]
             out["raw_ok"] = out["raw_ok"] or raw is not None
 
         if ctx is not None:
-            with bind_user_id(uid):
-                raw2 = await _call(ctx, {}, RAG_TIMEOUT)
+            raw2 = await _call(ctx, {"user_id": uid}, RAG_TIMEOUT)
             data2 = _parse_jsonish(raw2)
             if isinstance(data2, dict):
                 prefs = data2.get("preferences") or data2.get("long_term_preferences") or []

@@ -263,6 +263,15 @@ async def register(data: RegisterRequest):
     if len(data.password) < 6:
         raise HTTPException(400, "密码至少 6 位")
 
+    # ⚠️ 手机号可以不填，但**必须存 NULL 而不是空串**。
+    # `phone_number` 上有一条唯一索引，而 Postgres 的唯一索引允许**多个 NULL**、
+    # 却只允许**一个空串**。所以存 "" 的话：第一个没填手机号的用户能注册，
+    # 第二个就撞 `ix_users_phone_number` 报 500（实测踩到，报的是
+    # 「duplicate key value violates unique constraint」这种没法给用户看的话）。
+    phone = (data.phone_number or "").strip() or None
+    if phone and await user_repo.get_by_phone(phone):
+        raise HTTPException(409, "该手机号已被使用")
+
     # ⚠️ 两个唯一约束查的是**不同的列**：
     #   get_by_username → user_name（显示名）
     #   get_by_user_id  → user_id  （登录 ID）
@@ -276,7 +285,7 @@ async def register(data: RegisterRequest):
     user = await user_repo.create({
         "user_name": data.username,
         "user_id": data.user_id,
-        "phone_number": data.phone_number or "",
+        "phone_number": phone,
         "password_hash": AuthUtils.hash_password(data.password),
         "role": "user",                      # ← 固定，不接受入参
         "shipping_address": "",

@@ -83,6 +83,17 @@ export function useGiftWorkbench({ runId } = {}) {
         s.status = p.status
         if (p.evidence) s.evidence = p.evidence
         if (p.why) s.why = p.why
+        // 实时元素：running 时记下开始时刻，供 ExploreStream 显示**实时**秒数；
+        // done 时收下后端给的真实耗时（ms）。startedAt 只在进入 running 时设，
+        // 避免重复的 running 事件把计时重置。
+        if (p.status === 'running') {
+          if (!s.startedAt) s.startedAt = Date.now()
+          if (p.hint) s.hint = p.hint
+          if (p.label) s.label = s.label || p.label
+        } else if (p.status === 'done') {
+          s.ms = p.ms ?? (s.startedAt ? Date.now() - s.startedAt : null)
+          s.startedAt = null
+        }
         break
       }
 
