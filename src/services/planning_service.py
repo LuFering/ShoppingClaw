@@ -354,6 +354,10 @@ async def advance(run_id: str, user_id: str) -> None:
         await _patch_run(run_id, status="running")
 
         agent = get_planning_agent()
+        # 入口参数单独留一份：`_sync_graph` 重建图时要读它（需求节点、预算、
+        # 采购对象名都从这儿来）。`init` 是喂给 agent 的输入，会被追加消息，
+        # 不适合当「只读的入口参数」用。
+        state = _state_of(run)
         init = _agent_input(run)
         # 续跑：用户答过问，就把那条回答作为新消息接上 —— agent 是循环，
         # 多给一条输入它自己会接着判断，不需要我们算「从哪一步接」。
@@ -386,7 +390,7 @@ async def advance(run_id: str, user_id: str) -> None:
                     await _on_model_token(run_id, chunk, pump)
                     continue
 
-                stop = await _on_agent_step(run_id, chunk, seen_tools, pump, acc)
+                stop = await _on_agent_step(run_id, chunk, seen_tools, pump, acc, state)
                 if stop:
                     await pump.close()
                     await _patch_run(run_id, status="awaiting", question=stop)
@@ -395,8 +399,10 @@ async def advance(run_id: str, user_id: str) -> None:
         finally:
             await pump.close()
 
-        # 收尾前把产物落库 —— `_finish` 生成交付物时要读它
+        # 收尾前把产物落库 + 最后一次重建图 —— `_finish` 生成交付物时要读它，
+        # 界面也要看到「最终选中的那件」被标成 selected（而不是停在候选态）
         await _persist_products(run_id, acc)
+        await _sync_graph(run_id, acc, state)
         await _finish(run_id, user_id)
 
     except Exception as e:
@@ -461,7 +467,7 @@ async def _on_model_token(run_id: str, chunk: Any, pump: DeltaPump) -> None:
 
 async def _on_agent_step(
     run_id: str, chunk: dict, seen_tools: set[str], pump: DeltaPump,
-    acc: dict,
+    acc: dict, state: dict,
 ) -> dict | None:
     """agent 跑完一步（模型节点或工具节点）→ 落事件、累积产物。
 
@@ -472,6 +478,7 @@ async def _on_agent_step(
 
     返回非 None 表示要停下来问用户。
     """
+    changed = False
     for _node, delta in (chunk or {}).items():
         d = delta or {}
         # 累积工具写进 state 的产物（列表追加、标量后写覆盖，与图的 reducer 一致）
@@ -479,9 +486,11 @@ async def _on_agent_step(
             if d.get(k):
                 acc.setdefault(k, [])
                 acc[k] = acc[k] + list(d[k])
+                changed = True
         for k in ("selected", "dims_from_kb", "risks_from_kb"):
             if d.get(k) is not None:
                 acc[k] = d[k]
+                changed = True
 
         for m in (d.get("messages") or []):
             # ── 模型决定调工具 ──
@@ -503,8 +512,13 @@ async def _on_agent_step(
         # ── 工具写了 question → 停下来等用户 ──
         if d.get("question"):
             await _persist_products(run_id, acc)
+            await _sync_graph(run_id, acc, state)
             return d["question"]
 
+    # 产物有变化才重建图 —— 模型节点（只出 tool_calls、不改产物）不该触发，
+    # 否则每一步都重发一遍整图，白白刷屏。
+    if changed:
+        await _sync_graph(run_id, acc, state)
     return None
 
 
@@ -636,6 +650,99 @@ async def _persist_products(run_id: str, acc: dict) -> None:
         await _patch_run(run_id, products=acc)
     except Exception as e:
         logger.warning(f"[planning] 落产物失败（忽略）: {e}")
+
+
+async def _sync_graph(run_id: str, acc: dict, state: dict) -> None:
+    """把累积产物**重建成决策图**并下发。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-26：补上漏掉的一步 —— 决策图之前根本不长
+    ═══════════════════════════════════════════════════════════════════
+
+    改成 ReAct 之后，我只保留了「核心任务」那一个节点就再没动过图 ——
+    界面上永远是「1 / 1 节点」（实测截图可见）。原因是旧实现的建图代码
+    写在 `_on_node` 里，那个函数在重写时被整个替换掉了，而我没有把建图
+    这部分补回来。
+
+    现在改成**从产物重建整图**，而不是逐节点增量拼。理由：
+      · 产物本来就是完整的（候选/排除/选中/风险/维度都在 `acc` 里）
+      · 增量拼要处理「候选被排除后类型要变」这类状态迁移，容易拼出重复节点
+      · 重建成整图后 `_merge_graph` 按 id 覆盖，天然幂等
+
+    节点 id 用 **item_id**（不是下标）：同一件商品从「候选商品」变成
+    「已排除」时 id 不变，`_merge_graph` 就地把类型与状态改掉，
+    不会留下一个旧节点。
+    """
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    subject = state.get("subject") or state.get("scene") or "本次采购"
+
+    # 需求：把入口参数摊成依据节点（这些是模型的判据来源）
+    for i, c in enumerate(state.get("constraints") or []):
+        nodes.append(_node(f"need-{i}", str(c), "需求", 4, "candidate"))
+        edges.append(_edge("task", f"need-{i}", "需要"))
+    if state.get("budget"):
+        nodes.append(_node("need-budget", f"预算 {state['budget']}", "需求", 5, "candidate"))
+        edges.append(_edge("task", "need-budget", "需要"))
+
+    # 采购对象：搜到东西之后才立
+    cands = acc.get("candidates") or []
+    if cands:
+        nodes.append(_node("obj-1", subject, "采购对象", 5, "candidate"))
+        edges.append(_edge("task", "obj-1", "拆解为"))
+
+    # 品类标准（模型查到的评估维度）
+    for i, d in enumerate((acc.get("dimensions") or [])[:6]):
+        nodes.append(_node(f"ev-{i}", str(d), "决策依据", 3, "candidate"))
+        edges.append(_edge("task", f"ev-{i}", "依据"))
+
+    # 候选商品：被排除的用**同一个 id** 覆盖成「已排除」
+    excluded = acc.get("excluded") or []
+    out_names = {st.cand_name(e) for e in excluded}
+    selected = acc.get("selected") or {}
+    sel_name = str(selected.get("name") or "")
+    sel_item = str(selected.get("item_id") or "")
+
+    def _cid(c: dict) -> str:
+        raw = c.get("item_id") or st.cand_name(c)
+        # 去掉可能出现在 id 里的特殊字符，图 id 要能安全当 key 用
+        return "cand-" + "".join(ch for ch in str(raw) if ch.isalnum() or ch in "-_")[:40]
+
+    def _is_selected(c: dict) -> bool:
+        """是不是被选中的那件。
+
+        ⚠️ 优先按 **item_id** 比。同名商品可能有**多件**（不同店铺/规格），
+        只按名字比会把它们全标成「已采纳」—— 实测一次运行里 4 件同名商品
+        都被标上了。模型没给 item_id 时才退回按名字（此时只能接受歧义）。
+        """
+        if sel_item:
+            return str(c.get("item_id") or "") == sel_item
+        return bool(sel_name) and st.cand_name(c) == sel_name
+
+    for c in cands:
+        n = st.cand_name(c)
+        state_key = "selected" if _is_selected(c) else "candidate"
+        nodes.append(_node(_cid(c), n[:40], "候选商品", 3, state_key,
+                           {"price": st.yuan(c.get("price")), "item_id": c.get("item_id")}))
+        edges.append(_edge("obj-1", _cid(c), "候选"))
+
+    for e in excluded:
+        price = st.cand_yuan(e)
+        nodes.append(_node(_cid(e), st.cand_name(e)[:40], "已排除", 2, "pruned",
+                           {"price": st.yuan(e.get("price")), "item_id": e.get("item_id"),
+                            "reason": e.get("_reason") or "",
+                            # 前端详情条读的是 pruneReason
+                            "pruneReason": e.get("_reason") or ""}))
+
+    # 风险
+    for i, r in enumerate((acc.get("risks") or [])[:6]):
+        nodes.append(_node(f"risk-{i}", str(r), "风险", 3, "candidate"))
+        edges.append(_edge("task", f"risk-{i}", "存在"))
+
+    if not nodes:
+        return
+    await _merge_graph(run_id, nodes, edges)
 
 
 async def _emit_think_delta(run_id: str, text: str, kind: str = "content") -> None:

@@ -204,6 +204,7 @@ def make_decision(
     why: Annotated[str, "为什么是它。要指回具体依据：某条硬约束、某个价位、某个风险"],
     state: Annotated[dict, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
+    item_id: Annotated[str, "该商品的 item_id。同名商品有多件时必须给，用来消歧"] = "",
 ) -> Command:
     """定下最终买哪一件，并说明理由。
 
@@ -211,36 +212,48 @@ def make_decision(
     理由必须指回具体依据，写「性价比高」「品质好」这种放在任何商品上都
     成立的话算无效。
 
+    ⚠️ 同名商品可能有**多件**（不同店铺/规格，item_id 不同）。只给名字的话
+    系统只能猜一件 —— 实测一次运行里有 4 件同名商品，结果 4 个节点都被标成
+    「已采纳」。有歧义时请带上 `item_id`。
+
     Args:
         picked: 选中的商品名
         why: 选它的理由
+        item_id: 该商品的 item_id（同名多件时必填）
     """
     from src.agents.independent.planning import stages as st
 
     pool = (state.get("candidates") or []) + (state.get("excluded") or [])
-    hit = next((c for c in pool if st.cand_name(c) == picked), None)
+    if item_id:
+        hit = next((c for c in pool if str(c.get("item_id") or "") == item_id), None)
+    else:
+        hit = next((c for c in pool if st.cand_name(c) == picked), None)
+
     if hit is None:
+        # 名字对不上、或 item_id 不存在 —— 如实回报，别让模型以为定下来了
+        hint = f"（item_id={item_id}）" if item_id else ""
         return Command(update={
             "messages": [_note(
-                f"⚠️ 候选里没有叫「{picked}」的商品，请用搜索结果里的原名。",
+                f"⚠️ 候选里没找到「{picked}」{hint}，请用搜索结果里的原名或 item_id。",
                 tool_call_id,
             )],
         })
 
     price = st.cand_yuan(hit)
-    # ⚠️ 把**价格一起存进 selected**。交付物的预算表要算「花了多少」，
-    # 而收尾时只能从落库的 products 读 —— 只存 name/why 的话预算永远是 0
-    # （实测踩过：预算分配表显示「本次花费 ¥0」，而实际选中了 ¥165 的东西）。
+    # ⚠️ 把**价格与 item_id 一起存进 selected**：
+    #   · 价格 —— 交付物的预算表要算「花了多少」，只存 name/why 会恒显示 ¥0
+    #   · item_id —— 图里靠它精确定位是哪个节点该标「已采纳」；
+    #     只按名字匹配会把同名的其他商品也标上（实测 4 件同名全被标了）
     return Command(update={
         "selected": {
-            "name": picked,
+            "name": st.cand_name(hit),
             "why": why,
             "by": "llm",
             "price_yuan": price,
             "item_id": hit.get("item_id"),
         },
         "messages": [_note(
-            f"已定：{picked}" + (f"（¥{price:g}）" if price is not None else "")
+            f"已定：{st.cand_name(hit)}" + (f"（¥{price:g}）" if price is not None else "")
             + f"\n理由：{why}",
             tool_call_id,
         )],

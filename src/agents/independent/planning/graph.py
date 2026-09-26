@@ -124,7 +124,9 @@ SYSTEM_PROMPT = """\
   搜不到或结果不合适，**换个关键词再搜**是你的自由（加场景词、加规格词）。
 - `check_risks(subject)` —— 查售后政策与已知风险。
 - `drop_candidates(names, reason)` —— 排除不符合硬约束的候选，记下理由。
-- `make_decision(picked, why)` —— 定下最终买哪一件。**这是收敛动作**。
+- `make_decision(picked, why, item_id)` —— 定下最终买哪一件。**这是收敛动作**。
+  同名商品可能有多件（不同店铺/规格），此时**必须**带 `item_id` 消歧，
+  否则系统只能猜一件。
 - `ask_user(question, options)` —— 信息不足或需要用户在取舍上拍板时提问。
 
 ## 怎么做事
