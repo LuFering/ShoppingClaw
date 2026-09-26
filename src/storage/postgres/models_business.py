@@ -461,6 +461,22 @@ class PlanningRun(Base):
     # 多给一条输入它自己接着判断，不需要算「从哪一步接」。
     answer_pick = Column(String(64), nullable=True)
 
+    # 回答的**副本**：选项标签 + 当时的提问原文。
+    #
+    # ⚠️ 为什么不能只存 key、事后再去 question 里翻：
+    # 用户一点选项，`question` 就被清空了（那是「当前待确认」的字段）。
+    # 续跑时再读它只能拿到空对象，拼出「关于「」，我选：opt0」这种废话，
+    # 模型据此跑偏（实测：用户选「推隔音窗」，模型去查了「隔音门」）。
+    answer_label = Column(String(200), nullable=True)
+    answer_question = Column(Text, nullable=True)
+
+    # agent 的对话历史（可 JSON 化的精简形式）。
+    #
+    # 中断续跑时必须带上，否则 agent 从零开始 —— 搜过的、排除过的全部重做。
+    # 实测一次运行因此把 6 次搜索做成了 12 次，候选池从 ~20 膨胀到 42。
+    # 只留最后 60 条（见 planning_service._persist_history）。
+    messages = Column(JSONB, nullable=False, default=list)
+
     # agent 累积的产物：{candidates, excluded, selected, risks, dimensions}
     #
     # ⚠️ 为什么单独存一份，而不是从 graph 反推：
@@ -487,6 +503,8 @@ class PlanningRun(Base):
             "meta": self.meta or {},
             "question": self.question,
             "answer_pick": self.answer_pick,
+            "answer_label": self.answer_label,
+            "answer_question": self.answer_question,
             "products": self.products or {},
             "error": self.error,
             "created_at": format_utc_datetime(self.created_at),

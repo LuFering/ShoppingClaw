@@ -115,21 +115,51 @@
 
             <!-- ── 预算分配表：花多少 / 占几成 / 剩多少 ── -->
             <template v-else-if="d.data.kind === 'budget'">
-              <div class="bud">
-                <div class="bud-nums">
-                  <span class="bud-spent mono">¥{{ fmtPrice(d.data.spent) }}</span>
-                  <span v-if="d.data.budget" class="bud-of">/ 预算 ¥{{ fmtPrice(d.data.budget) }}</span>
+              <!--
+                ⚠️ 口径决定怎么显示（见后端 build_budget_doc 的说明）：
+                  caliber='total'     模型估了用量 → 显示估算总价 + 占比
+                  caliber='unit_only' 只有单价 → **如实标「单价」**，不给占比
+                早先不分口径，直接拿单价当花费，6 万的预算显示成
+                「花费 ¥165.64 · 占 0.3%」—— 算术没错但口径是错的，
+                用户看到的「6万只花几百」就是这么来的。
+              -->
+              <template v-if="d.data.caliber === 'total'">
+                <div class="bud">
+                  <div class="bud-nums">
+                    <span class="bud-spent mono">¥{{ fmtPrice(d.data.spent) }}</span>
+                    <span v-if="d.data.budget" class="bud-of">/ 预算 ¥{{ fmtPrice(d.data.budget) }}</span>
+                  </div>
+                  <div v-if="d.data.ratio != null" class="bud-bar">
+                    <i :style="{ width: Math.min(100, Math.round(d.data.ratio * 100)) + '%' }" />
+                  </div>
+                  <p class="bud-line">
+                    <span v-if="d.data.ratio != null">占预算 {{ Math.round(d.data.ratio * 100) }}%</span>
+                    <span v-if="d.data.remaining != null">· 结余 ¥{{ fmtPrice(d.data.remaining) }}</span>
+                  </p>
+                  <p v-if="d.data.quantity" class="bud-basis">
+                    用量约 {{ d.data.quantity }} 份<span v-if="d.data.quantity_basis"> · {{ d.data.quantity_basis }}</span>
+                  </p>
                 </div>
-                <div v-if="d.data.ratio != null" class="bud-bar">
-                  <i :style="{ width: Math.min(100, Math.round(d.data.ratio * 100)) + '%' }" />
+              </template>
+
+              <template v-else-if="d.data.caliber === 'unit_only'">
+                <div class="bud">
+                  <div class="bud-nums">
+                    <span class="bud-spent mono">¥{{ fmtPrice(d.data.unit_price) }}</span>
+                    <span class="bud-of">选中商品单价</span>
+                  </div>
+                  <p class="bud-note">
+                    未含用量估算 —— 这是<em>单价</em>，不是整件事的总花费。
+                    <span v-if="d.data.quantity_basis">{{ d.data.quantity_basis }}</span>
+                  </p>
+                  <p v-if="d.data.budget" class="bud-line">
+                    预算 ¥{{ fmtPrice(d.data.budget) }}（需知道用量才能算占用）
+                  </p>
                 </div>
-                <p class="bud-line">
-                  <span v-if="d.data.ratio != null">占预算 {{ Math.round(d.data.ratio * 100) }}%</span>
-                  <span v-if="d.data.remaining != null">
-                    · 结余 ¥{{ fmtPrice(d.data.remaining) }}
-                  </span>
-                </p>
-              </div>
+              </template>
+
+              <p v-else class="bud-note">这次没有选出商品，无法计算花费。</p>
+
               <p v-if="d.data.range" class="bud-range mono">
                 候选价格区间 ¥{{ fmtPrice(d.data.range.min) }} – ¥{{ fmtPrice(d.data.range.max) }}
               </p>
@@ -281,10 +311,15 @@ const brief = (d) => {
     return `${c.candidates || 0} 个候选，排除 ${c.excluded || 0} 个`
   }
   if (x.kind === 'budget') {
-    const parts = [`花费 ¥${fmtPrice(x.spent)}`]
-    if (x.ratio != null) parts.push(`占 ${Math.round(x.ratio * 100)}%`)
-    if (x.remaining != null) parts.push(`结余 ¥${fmtPrice(x.remaining)}`)
-    return parts.join(' · ')
+    // 口径不同，摘要也不同 —— 单价不能伪装成总花费
+    if (x.caliber === 'total') {
+      const parts = [`估算 ¥${fmtPrice(x.spent)}`]
+      if (x.ratio != null) parts.push(`占 ${Math.round(x.ratio * 100)}%`)
+      if (x.remaining != null) parts.push(`结余 ¥${fmtPrice(x.remaining)}`)
+      return parts.join(' · ')
+    }
+    if (x.caliber === 'unit_only') return `单价 ¥${fmtPrice(x.unit_price)}（未含用量）`
+    return '未选出商品'
   }
   return ''
 }
@@ -615,6 +650,21 @@ tr.is-picked .cmp-why { color: var(--text-muted); }
   margin: 5px 0 0;
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+/* 用量依据：比正文更弱，是「我怎么算的」 */
+.bud-basis {
+  margin: 4px 0 0;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+/* 口径说明：单价不是总花费时，这句必须看得见 */
+.bud-note {
+  margin: 5px 0 0;
+  font-size: 0.68rem;
+  line-height: 1.55;
+  color: var(--warn);
+  em { font-style: normal; font-weight: 600; }
 }
 .bud-range {
   margin: 0;

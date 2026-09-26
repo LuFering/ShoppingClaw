@@ -304,9 +304,24 @@ async def answer_question(run_id: str, user_id: str, key: str) -> dict | None:
         "detail": "把这条回答交给 agent，它接着往下判断",
     })
 
-    # 记下「回答了哪个选项」，advance 会把它转成一句话喂回模型。
-    # 不存完整消息历史：run 表已经够宽了，而且历史可以从事件流重建。
-    await _patch_run(run_id, question=None, answer_pick=key, status="running")
+    # ═══════════════════════════════════════════════════════════════════
+    # ⚠️ 2026-09-27 修 bug：存的是**解析后的 label**，不是 key
+    # ═══════════════════════════════════════════════════════════════════
+    # 原先存 `answer_pick=key`（如 "opt0"），而 `advance` 要读 `run.question`
+    # 才能把 key 翻回 label —— 但上一行刚把 question 置空，于是读到空对象，
+    # 拼出的是「关于「」，我选：opt0。请据此继续」这种**没有意义的话**。
+    #
+    # 实测后果：模型收到这句废话后没按用户的选择走（用户选了「推隔音窗」，
+    # 它却去查「隔音门」），整个方向跑偏。
+    #
+    # 顺带把问题原文也存下来：回答文本要能独立说清「在回答什么」，
+    # 不能依赖另一张表里的字段还在。
+    await _patch_run(
+        run_id, question=None, status="running",
+        answer_pick=key,
+        answer_label=label,
+        answer_question=str(q.get("text") or ""),
+    )
 
     asyncio.create_task(advance(run_id, user_id))
 
@@ -378,6 +393,9 @@ async def advance(run_id: str, user_id: str) -> None:
         # `stream_mode="updates"` 只给增量，得自己攒；攒出来的要落库，
         # 否则收尾生成交付物时读不到（见 _persist_products 的说明）。
         acc: dict = {}
+        # 累积对话历史，跑完存进 `run.messages` —— 中断续跑时要用它，
+        # 否则 agent 从零开始，把搜过的全重做一遍（见 _agent_input 的说明）。
+        history: list[dict] = list(init.get("messages") or [])
 
         try:
             async for mode, chunk in agent.astream(
@@ -390,9 +408,11 @@ async def advance(run_id: str, user_id: str) -> None:
                     await _on_model_token(run_id, chunk, pump)
                     continue
 
+                _collect_messages(chunk, history)
                 stop = await _on_agent_step(run_id, chunk, seen_tools, pump, acc, state)
                 if stop:
                     await pump.close()
+                    await _persist_history(run_id, history)
                     await _patch_run(run_id, status="awaiting", question=stop)
                     await emit(run_id, "question", stop)
                     return
@@ -401,6 +421,7 @@ async def advance(run_id: str, user_id: str) -> None:
 
         # 收尾前把产物落库 + 最后一次重建图 —— `_finish` 生成交付物时要读它，
         # 界面也要看到「最终选中的那件」被标成 selected（而不是停在候选态）
+        await _persist_history(run_id, history)
         await _persist_products(run_id, acc)
         await _sync_graph(run_id, acc, state)
         await _finish(run_id, user_id)
@@ -411,26 +432,103 @@ async def advance(run_id: str, user_id: str) -> None:
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
 
 
+def _collect_messages(chunk: dict, history: list[dict]) -> None:
+    """把 agent 这一步产出的消息追加进历史（供续跑用）。
+
+    只存**可序列化**的字段（role / content / tool_calls / tool_call_id）——
+    LangChain 的 message 对象不能直接进 JSONB，且我们也不需要它的全部细节。
+    """
+    for _node, delta in (chunk or {}).items():
+        for m in ((delta or {}).get("messages") or []):
+            role = getattr(m, "type", None) or getattr(m, "role", "") or ""
+            if role == "human":
+                role = "user"
+            elif role == "ai":
+                role = "assistant"
+            item: dict = {"role": role}
+            content = getattr(m, "content", None)
+            if isinstance(content, str):
+                item["content"] = content
+            elif content:
+                item["content"] = str(content)
+            calls = getattr(m, "tool_calls", None) or []
+            if calls:
+                # 只留能 JSON 化的三样；args 里可能有非基本类型，兜底转字符串
+                item["tool_calls"] = [
+                    {"id": c.get("id") or "", "name": c.get("name") or "",
+                     "args": _safe_args(c.get("args"))}
+                    for c in calls
+                ]
+            tid = getattr(m, "tool_call_id", None)
+            if tid:
+                item["tool_call_id"] = tid
+            # 空消息（既无正文也无工具调用）不存 —— 只会让历史变长
+            if item.get("content") or item.get("tool_calls"):
+                history.append(item)
+
+
+def _safe_args(args: Any) -> dict:
+    """工具入参转成可 JSON 化的 dict。"""
+    if not isinstance(args, dict):
+        return {}
+    out = {}
+    for k, v in args.items():
+        out[k] = v if isinstance(v, (str, int, float, bool, list, dict, type(None))) else str(v)
+    return out
+
+
+async def _persist_history(run_id: str, history: list[dict]) -> None:
+    """把对话历史落库（续跑时要用）。
+
+    ⚠️ 截断：一次运行的消息可能上百条，JSONB 会越写越大。留最后 60 条 ——
+    足够让 agent 知道「搜过什么、排除了什么、选了什么」，又不至于把
+    单行撑到几 MB。
+    """
+    try:
+        await _patch_run(run_id, messages=history[-60:])
+    except Exception as e:
+        logger.warning(f"[planning] 落对话历史失败（忽略）: {e}")
+
+
 def _agent_input(run: PlanningRun) -> dict:
-    """给 agent 的初始输入：任务描述 + 入口参数。"""
+    """给 agent 的初始输入：任务描述 + 入口参数 + **上一轮的对话历史**。
+
+    ═══════════════════════════════════════════════════════════════════
+    ⚠️ 2026-09-27 修 bug：续跑必须带上历史
+    ═══════════════════════════════════════════════════════════════════
+    原先只给「目标 + 一句回答」，agent 从零开始 —— 之前搜过的、排除过的
+    全部作废，重头再来一遍。
+
+    实测一次运行：用户在「推隔音窗还是静音门」处作答后续跑，agent 把前面
+    6 次搜索**重做了一遍**（总计 12 次搜索），候选池因此从 ~20 膨胀到 42，
+    决策图 82 个节点。用户看到的是「答完一句，它又开始从头搜」。
+
+    现在把上一轮的消息历史（`run.messages`）接上，agent 接着走。
+    """
     from src.agents.independent.planning.graph import build_goal
 
     state = _state_of(run)
-    return {
-        "messages": [{"role": "user", "content": build_goal(state)}],
-        **state,
-    }
+    history = list(run.messages or [])
+    if not history:
+        # 首轮：只有任务描述
+        history = [{"role": "user", "content": build_goal(state)}]
+    return {"messages": history, **state}
 
 
 def _answer_text(run: PlanningRun) -> str:
-    """用户对上一次提问的回答，转成一句话喂回模型。"""
-    q = run.question or {}
+    """用户对上一次提问的回答，转成一句话喂回模型。
+
+    ⚠️ 读的是 `answer_label` / `answer_question`（**存下来的副本**），
+    不是 `run.question` —— 后者在用户点选项时就被清空了（见
+    `answer_question` 的说明）。原先在这里读它，拼出来的是
+    「关于「」，我选：opt0」，模型收到一句废话，方向直接跑偏。
+    """
     picked = run.answer_pick or ""
-    label = next(
-        (o.get("label") for o in (q.get("options") or []) if o.get("key") == picked),
-        picked,
-    )
-    return f"关于「{q.get('text') or ''}」，我选：{label}。请据此继续。"
+    label = run.answer_label or picked
+    asked = run.answer_question or ""
+    if asked:
+        return f"关于「{asked}」，我选：{label}。请据此继续。"
+    return f"我选：{label}。请据此继续。"
 
 
 # ── 工具名 → 展示用的事件 ────────────────────────────────────

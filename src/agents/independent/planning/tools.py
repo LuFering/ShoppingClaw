@@ -118,13 +118,44 @@ async def search_products(
     else:
         body = f"关键词「{keyword}」没有返回结果，换个词试试"
 
-    # 只交**本次**搜到的：state 的 candidates 带 reducer（追加），
-    # 这里再合并一遍会让结果翻倍。去重交给 reducer 之后的读取方
-    # （`_state_from_run` 与交付物 builder 都按 item_id/名字去过重）。
+    # 池子满了就**明说**，让模型先去筛，而不是继续往里堆。
+    # ═══════════════════════════════════════════════════════════════════
+    # 2026-09-27：提示词写了「最多 10 件」但没人执行
+    # ═══════════════════════════════════════════════════════════════════
+    # 实测模型搜了 7 次、候选池涨到 30 个才去排除 —— 决策图上几十个节点，
+    # 界面被淹没。光在 system prompt 里写规矩不够，工具返回时要**当面提醒**，
+    # 它才会立刻处理（模型对工具返回的敏感度远高于对提示词的记忆）。
+    pool = _dedup_pool((state.get("candidates") or []) + found)
+    if len(pool) > CANDIDATE_CAP:
+        body += (
+            f"\n\n⚠️ 候选池已有 {len(pool)} 件，超过 {CANDIDATE_CAP} 件上限。"
+            f"请**先用 `drop_candidates` 排除明显不合适的**（配件类、场景不符、"
+            f"只吸音不隔声的），把池子收到 {CANDIDATE_CAP} 件以内，再继续搜或收敛。"
+        )
+
     return Command(update={
         "candidates": found,
         "messages": [_note(body, tool_call_id)],
     })
+
+
+# 候选池上限。与 system prompt 里的说法**必须一致** ——
+# 两处写不同的数字，模型会按提示词的来，工具提醒就成了噪音。
+CANDIDATE_CAP = 10
+
+
+def _dedup_pool(items: list[dict]) -> list[dict]:
+    """按 item_id / 名字去重 —— 模型会多轮搜索，同一件会重复出现。"""
+    from src.agents.independent.planning import stages as st
+
+    seen, out = set(), []
+    for c in items:
+        key = str(c.get("item_id") or st.cand_name(c))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
 
 
 @tool
@@ -205,6 +236,9 @@ def make_decision(
     state: Annotated[dict, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
     item_id: Annotated[str, "该商品的 item_id。同名商品有多件时必须给，用来消歧"] = "",
+    quantity: Annotated[float, "估算用量：这件东西要买几份（几卷/几片/几平米）"] = 0,
+    quantity_basis: Annotated[str, "用量怎么估出来的，一句话（如「90㎡户型需做隔音墙面约60㎡，每卷10㎡」）"] = "",
+    total_estimate: Annotated[float, "估算总价（单价 × 用量），单位元"] = 0,
 ) -> Command:
     """定下最终买哪一件，并说明理由。
 
@@ -216,10 +250,22 @@ def make_decision(
     系统只能猜一件 —— 实测一次运行里有 4 件同名商品，结果 4 个节点都被标成
     「已采纳」。有歧义时请带上 `item_id`。
 
+    ═══════════════════════════════════════════════════════════════════
+    ⚠️ 必须估算用量：预算是「整件事」的钱，商品是「一件」的价
+    ═══════════════════════════════════════════════════════════════════
+    用户说「预算 6 万装修」指的是整件事；淘宝返回的是单价。直接拿单价去比
+    预算会得出荒唐结论 —— 实测一次 6 万的预算算出「花费 ¥165、占用 0.3%」。
+
+    所以要给 `quantity`（几份）与 `total_estimate`（单价 × 用量）。
+    估不出来就把 `quantity_basis` 写成「无法估算，原因…」，**不要瞎填**。
+
     Args:
         picked: 选中的商品名
         why: 选它的理由
         item_id: 该商品的 item_id（同名多件时必填）
+        quantity: 估算用量（几卷/几片/几平米）
+        quantity_basis: 用量依据，一句话
+        total_estimate: 估算总价（元）
     """
     from src.agents.independent.planning import stages as st
 
@@ -244,6 +290,13 @@ def make_decision(
     #   · 价格 —— 交付物的预算表要算「花了多少」，只存 name/why 会恒显示 ¥0
     #   · item_id —— 图里靠它精确定位是哪个节点该标「已采纳」；
     #     只按名字匹配会把同名的其他商品也标上（实测 4 件同名全被标了）
+    #   · 用量与估算总价 —— 预算是「整件事」的钱、商品是「一件」的价，
+    #     只报单价会让 6 万预算显示成「花费 ¥165、占用 0.3%」（实测踩过）
+    est = {
+        "quantity": quantity or None,
+        "quantity_basis": (quantity_basis or "").strip(),
+        "total_estimate": total_estimate or None,
+    }
     return Command(update={
         "selected": {
             "name": st.cand_name(hit),
@@ -251,9 +304,12 @@ def make_decision(
             "by": "llm",
             "price_yuan": price,
             "item_id": hit.get("item_id"),
+            **est,
         },
         "messages": [_note(
             f"已定：{st.cand_name(hit)}" + (f"（¥{price:g}）" if price is not None else "")
+            + (f"\n用量：{quantity:g} 份" if quantity else "")
+            + (f"\n估算总价：¥{total_estimate:g}" if total_estimate else "")
             + f"\n理由：{why}",
             tool_call_id,
         )],

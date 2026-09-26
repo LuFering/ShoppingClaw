@@ -415,17 +415,60 @@ def _spawn_stdio_process(server_name: str, server_config: Dict[str, Any]) -> sub
 
 
 def _get_stdio_tool_specs(server_name: str, server_config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """从 stdio MCP 服务器拉取工具列表。"""
+    """从 stdio MCP 服务器拉取工具列表。
+
+    ═══════════════════════════════════════════════════════════════════
+    ⚠️ 2026-09-27 修 bug：单次 readline 会读到半行，整个工具清单丢失
+    ═══════════════════════════════════════════════════════════════════
+
+    原先这里是 `time.sleep(5)` 之后**只读一行**就 `json.loads`。工具清单
+    是个几十 KB 的大 JSON，子进程往管道里写时会被**分片**，`readline()`
+    可能只拿到前半截 —— 解析报 `Expecting ',' delimiter: line 1 column 5094`，
+    异常被吞掉返回 `[]`，于是**一个工具都加载不到**。
+
+    后果不是「少几个工具」而是**整条链路瘫掉**：`search_products` 拿不到
+    taobao 工具 → 每次搜索都返回「没有返回结果，换个词试试」→ agent 反复
+    换词重搜（实测换了 5 个词）→ 最后没有候选、没有选中、交付物全空。
+
+    而且这个空结果会被 `get_tools_from_all_servers` 的 TTL 缓存住 5 分钟，
+    期间怎么重试都是坏的。
+
+    修法与 `_call_stdio_tool` 一致：**按行读到能解析出 JSON 为止**，
+    而不是读一次就当真。同时持 IO 锁 —— 管道是单条的，并发读会串包。
+    """
     proc = _ensure_stdio_process(server_name, server_config)
     if proc is None or proc.stdin is None or proc.stdout is None:
         return []
     try:
         import time
-        proc.stdin.write(json.dumps({"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}) + "\n")
-        proc.stdin.flush()
-        time.sleep(5)
-        line = proc.stdout.readline()
-        r = json.loads(line)
+        req_id = next(_stdio_req_seq)
+        with _stdio_io_lock:
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": req_id,
+            }) + "\n")
+            proc.stdin.flush()
+
+            # 读到能解析出**匹配 id** 的 JSON 为止。半行/非 JSON 行（子进程
+            # 日志）跳过重试，直到超时上限 —— 与 _call_stdio_tool 同一套。
+            deadline = time.time() + MCP_CALL_TIMEOUT_S
+            r = None
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line or not line.strip():
+                    time.sleep(0.1)
+                    continue
+                try:
+                    candidate = json.loads(line)
+                except Exception:
+                    continue   # 半行或日志行，继续读
+                if candidate.get("id") == req_id:
+                    r = candidate
+                    break
+                logger.warning(f"[MCP] 丢弃孤儿响应 id={candidate.get('id')}（期望 {req_id}）")
+
+        if r is None:
+            logger.error(f"[MCP] {server_name} 的 tools/list 未收到匹配响应")
+            return []
         tools = r.get("result", {}).get("tools", [])
         specs = []
         seen_names: set[str] = set()
@@ -611,6 +654,14 @@ async def get_tools_from_all_servers(force: bool = False) -> List[Dict[str, Any]
             logger.error(f"从 MCP 服务器 {server_name} 拉取工具失败: {e}", exc_info=True)
             continue
 
-    _tools_cache["specs"] = all_tools_specs
-    _tools_cache["at"] = _time.time()
+    # ⚠️ **空结果不进缓存**。
+    # 拉取失败时各 server 会返回 []，若照常缓存，接下来 5 分钟（TTL）内
+    # 每次调用都拿到空清单 —— 实测一次解析失败后整条搜索链路瘫了 5 分钟，
+    # 界面表现为「agent 换了好几个词都搜不到东西」。
+    # 缓存的意义是省下重复拉取的 5 秒，不是把失败也固化下来。
+    if all_tools_specs:
+        _tools_cache["specs"] = all_tools_specs
+        _tools_cache["at"] = _time.time()
+    else:
+        logger.warning("[MCP] 工具清单为空，**不缓存**（下次调用重试）")
     return all_tools_specs

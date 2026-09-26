@@ -56,16 +56,27 @@ async def ask_model(system: str, user: str) -> str:
 # ══════════════════════════════════════════════════════════
 
 async def _mcp_tool(name: str):
-    """按名取一个 MCP 工具。取不到返回 None（调用方降级，不抛）。"""
+    """按名取一个 MCP 工具。取不到返回 None（调用方降级，不抛）。
+
+    ⚠️ 取不到时**打 error 而不是 warning**：这说明工具清单是空的，
+    整个搜索链路都不工作（实测 MCP 解析失败时会这样）。原先只 warning，
+    上层看到的是「搜不到结果」，排查时容易以为是搜索词的问题。
+    """
     try:
         from src.services.mcp_service import get_tools_from_all_servers
         from src.services.mcp_tool_adapter import adapt_mcp_tools
 
         specs = await get_tools_from_all_servers()
         tools = await adapt_mcp_tools(specs)
-        return next((t for t in tools if getattr(t, "name", "") == name), None)
+        hit = next((t for t in tools if getattr(t, "name", "") == name), None)
+        if hit is None:
+            logger.error(
+                "[planning] MCP 工具 %s 不存在（当前共 %d 个工具）—— "
+                "搜索链路不可用，检查 MCP 服务是否正常", name, len(tools)
+            )
+        return hit
     except Exception as e:
-        logger.warning(f"[planning] MCP 工具 {name} 加载失败: {e}")
+        logger.error(f"[planning] MCP 工具 {name} 加载失败: {e}")
         return None
 
 
@@ -521,6 +532,11 @@ def build_plan_doc(state: dict) -> dict:
             "price": price,
             "why": why,
             "by": by,
+            # 用量估算（模型给的）。方案里也要显示 —— 单价之外，
+            # 用户想知道「一共大概花多少」（见 build_budget_doc 的口径说明）
+            "quantity": _num(selected.get("quantity")),
+            "quantity_basis": str(selected.get("quantity_basis") or ""),
+            "total_estimate": _num(selected.get("total_estimate")),
         },
         "alternatives": [
             {"name": cand_name(c), "price": cand_yuan(c)} for c in alts
@@ -575,7 +591,25 @@ def build_compare_doc(state: dict) -> dict:
 
 
 def build_budget_doc(state: dict) -> dict:
-    """预算分配表：花多少、占几成、剩多少。"""
+    """预算分配表：花多少、占几成、剩多少。
+
+    ═══════════════════════════════════════════════════════════════════
+    ⚠️ 2026-09-27 修口径：预算是「整件事」的钱，商品是「一件」的价
+    ═══════════════════════════════════════════════════════════════════
+    原先直接拿**单价**当花费去比预算。实测一次「装修 / 6万」的运行，
+    选中一件 ¥165.64 的隔音毡，于是预算表显示：
+
+        本次花费：¥165.64　预算占用：0%
+
+    算术上没错，但**口径是错的** —— 6 万是整屋装修的预算，而 165 块是
+    一卷隔音毡的单价。这两件事不该相减。用户看到的「6 万只花几百」
+    就是这么来的。
+
+    现在优先用模型估算的**总价**（`selected.total_estimate`，单价 × 用量）。
+    估不出来时**如实标注口径**，而不是把单价伪装成总花费 ——
+    「不编造」在这里的意思是：宁可显示「单价 ¥165.64（未含用量）」，
+    也不显示「花费 ¥165.64 / 占用 0.3%」这种误导性的确定数字。
+    """
     selected = state.get("selected") or {}
     cands = state.get("candidates") or []
     budget = _budget_yuan(state.get("budget"))
@@ -583,18 +617,41 @@ def build_budget_doc(state: dict) -> dict:
     sel_price = cand_yuan(selected) if selected else None
     prices = [p for p in (_price_of(c) for c in cands) if p is not None]
 
-    spent = sel_price or 0.0
-    ratio = (spent / budget) if (budget and budget > 0) else None
+    # 模型给的估算总价优先；没有就退回单价（但下面会标成「单价」口径）
+    total = _num(selected.get("total_estimate"))
+    quantity = _num(selected.get("quantity"))
+    basis = str(selected.get("quantity_basis") or "").strip()
+
+    # 有总价才算「花费」，能算占比；只有单价时口径不明，不给占比
+    spent = total if total is not None else None
+    ratio = (spent / budget) if (spent is not None and budget and budget > 0) else None
 
     return {
         "kind": "budget",
         "budget": budget,
         "spent": spent,
-        "remaining": (budget - spent) if budget else None,
+        "remaining": (budget - spent) if (spent is not None and budget) else None,
         "ratio": ratio,
+        # 单价永远单独给出 —— 它是真实数据，只是不该当总价用
+        "unit_price": sel_price,
+        "quantity": quantity,
+        "quantity_basis": basis,
+        # 口径标记：前端据此决定显示「估算总价」还是「单价（未含用量）」
+        "caliber": "total" if spent is not None else ("unit_only" if sel_price else "none"),
         "range": {"min": min(prices), "max": max(prices)} if prices else None,
         "items": ([{"name": cand_name(selected), "price": sel_price}] if sel_price else []),
     }
+
+
+def _num(v: Any) -> float | None:
+    """宽松取数：模型可能给 "6" 这种字符串。取不到返回 None。"""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
 
 
 DELIVERABLE_BUILDERS = {
@@ -661,14 +718,26 @@ def deliverable_markdown(doc: dict, name: str) -> str:
 
     elif kind == "budget":
         b = doc.get("budget")
-        L += [
-            f"- 预算：{'¥%g' % b if b else '—'}",
-            f"- 本次花费：¥{doc.get('spent') or 0:g}",
-        ]
-        if doc.get("remaining") is not None:
-            L.append(f"- 结余：¥{doc['remaining']:g}")
-        if doc.get("ratio") is not None:
-            L.append(f"- 预算占用：{doc['ratio'] * 100:.0f}%")
+        L += [f"- 预算：{'¥%g' % b if b else '—'}"]
+        # 口径决定怎么写 —— 不把单价伪装成总花费（见 build_budget_doc 的说明）
+        if doc.get("caliber") == "total":
+            L.append(f"- 估算花费：¥{doc['spent']:g}")
+            if doc.get("quantity"):
+                L.append(f"- 估算用量：{doc['quantity']:g} 份")
+            if doc.get("quantity_basis"):
+                L.append(f"- 估算依据：{doc['quantity_basis']}")
+            if doc.get("remaining") is not None:
+                L.append(f"- 结余：¥{doc['remaining']:g}")
+            if doc.get("ratio") is not None:
+                L.append(f"- 预算占用：{doc['ratio'] * 100:.0f}%")
+        elif doc.get("caliber") == "unit_only":
+            up = doc.get("unit_price")
+            L += [
+                f"- 选中商品单价：¥{up:g}",
+                "",
+                "> ⚠️ **未含用量估算** —— 上面是单价，不是整件事的总花费。"
+                "要算总价，还需要知道覆盖面积/用量。",
+            ]
         rng = doc.get("range")
         if rng:
             L += ["", f"候选价格区间：¥{rng['min']:g} – ¥{rng['max']:g}"]
