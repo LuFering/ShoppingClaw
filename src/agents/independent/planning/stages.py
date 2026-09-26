@@ -436,17 +436,25 @@ def deliver_question(state: dict) -> dict:
     根本不需要放宽。**预算压力只可能来自被排除的候选**（filter 按预算剔掉的
     那些），所以判据必须是 excluded，不是 kept。
     """
-    selected = state.get("selected") or {}
     budget_yuan = _budget_yuan(state.get("budget"))
-    name = str(selected.get("name") or "").strip()
-    pick = f"「{name[:24]}」" if name else "当前选中的这件"
+    items = plan_items(state)
+    # 单件时沿用旧措辞；买一套时说「这套 N 件」而不是报第一件的名字
+    if len(items) == 1:
+        name = str(items[0].get("name") or "")
+        pick = f"「{name[:24]}」" if name else "当前选中的这件"
+    elif items:
+        pick = f"这套 {len(items)} 件"
+    else:
+        pick = "当前选中的这件"
 
     # 被硬约束剔掉的候选 —— 这才是「放宽预算」唯一的现实依据
-    excluded = state.get("excluded") or []
+    excluded = effective_excluded(state)
     over = [(cand_yuan(c), cand_name(c)) for c in excluded]
     over = [(p, n) for p, n in over if p is not None]
 
-    sel_price = cand_yuan(selected) if selected else None
+    sel_price = plan_total(state)
+    if sel_price is None and len(items) == 1:
+        sel_price = _num(items[0].get("price_yuan"))
 
     if over and budget_yuan:
         # 真有候选因超预算被剔掉：把「放开能拿到什么」摆出来让用户拍板
@@ -506,19 +514,190 @@ def _price_of(c: dict) -> float | None:
     return cand_yuan(c)
 
 
+def plan_items(state: dict) -> list[dict]:
+    """这次要买的**整套**商品。单件采购时就是一个元素的列表。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：从 `selected`（单件）改成 `plan.items`（整套）
+    ═══════════════════════════════════════════════════════════════════
+    原先交付物只认 `selected` 一件 —— 因为那时 `make_decision` 只收单件。
+    实测「搬家 / 预算 12000」：模型算了整套 5 件 ¥11163（占 93%），
+    却只能交出一张床，于是预算表显示「占 28%」，和它自己写的理由差 3 倍。
+
+    兼容旧的单件形状：老 run 的 `products.selected` 仍然能读出来，
+    这样已经跑完的任务刷新后不会突然变空。
+    """
+    plan = state.get("plan") or {}
+    items = plan.get("items") or []
+    if items:
+        return [i for i in items if isinstance(i, dict)]
+
+    # ── 回退：旧的单件 selected ──
+    sel = state.get("selected") or {}
+    if sel.get("name"):
+        return [{
+            "name": sel.get("name"),
+            "item_id": sel.get("item_id"),
+            "price_yuan": sel.get("price_yuan"),
+            "quantity": sel.get("quantity"),
+            "quantity_basis": sel.get("quantity_basis") or "",
+            "subtotal": sel.get("total_estimate"),
+            "why": sel.get("why") or "",
+        }]
+    return []
+
+
+def plan_why(state: dict) -> str:
+    """整套的取舍逻辑。旧的单件 selected 里 why 就是它。"""
+    plan = state.get("plan") or {}
+    if plan.get("why"):
+        return str(plan["why"])
+    return str((state.get("selected") or {}).get("why") or "")
+
+
+def plan_total(state: dict) -> float | None:
+    """整套估算总额。**每一件都有小计**时才算得准，否则如实返回 None。
+
+    缺任何一件就置空 —— 拿部分和冒充总额正是「28% vs 93%」那类错的来源。
+    """
+    items = plan_items(state)
+    if not items:
+        return None
+    subs = [_num(i.get("subtotal")) for i in items]
+    if any(s is None for s in subs):
+        return None
+    return round(sum(subs), 2)
+
+
+def item_category(c: dict) -> str:
+    """商品属于哪个采购品类。
+
+    来源是**模型搜索时给的 `category`**（见 tools.search_products），
+    没给就用关键词兜底。两者都没有时归到「其他」——
+    宁可归错组，也不要让对比表因为一个缺字段就整张塌掉。
+    """
+    return str(c.get("_category") or "").strip() or "其他"
+
+
+def dedup_by_item(items: list[dict]) -> list[dict]:
+    """按 item_id / 名字去重，**保持首次出现的顺序**。
+
+    ⚠️ 排除名单必须去重：模型答应用户「拉满预算」后会推翻重排，
+    `drop_candidates` 只追加不回改，同一件会被反复记。实测一次 run 的
+    排除名单里 29 条只有 26 个 distinct item_id，有件被记了 3 次。
+    """
+    seen, out = set(), []
+    for c in items or []:
+        if not isinstance(c, dict):
+            continue
+        key = str(c.get("item_id") or cand_name(c))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
+def effective_excluded(state: dict) -> list[dict]:
+    """**当前仍然成立**的排除名单 —— 去重，且剔除已经被选中的那些。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：选中的商品不能还挂在「已排除」里
+    ═══════════════════════════════════════════════════════════════════
+    `drop_candidates` 只往 excluded 里追加，**从不撤回**。而模型会改主意：
+    实测一次 run 里它先以「超预算」排掉雅兰床垫，用户答「升级品质」后
+    又把它选了回来 —— 于是同一件商品同时出现在候选与排除两个名单里。
+
+    后果是交付物自相矛盾：对比表把它标成「排除」，而采购方案说买它；
+    更隐蔽的是 `_state_from_run` 会按排除名单把候选里的它剔掉，
+    于是「入选 6 件」的对比表只标得出 5 件。
+
+    判定以 **item_id 优先**（同名多件时不能误伤），没有 item_id 才退回名字。
+    """
+    picked_ids = {
+        str(i.get("item_id") or "") for i in plan_items(state) if i.get("item_id")
+    }
+    picked_names = {str(i.get("name") or "") for i in plan_items(state)}
+
+    out = []
+    for e in dedup_by_item(state.get("excluded") or []):
+        iid = str(e.get("item_id") or "")
+        if iid and picked_ids:
+            if iid in picked_ids:
+                continue
+        elif cand_name(e) in picked_names:
+            continue
+        out.append(e)
+    return out
+
+
 def build_plan_doc(state: dict) -> dict:
-    """采购方案：这次买什么、为什么是它、别的为什么不行。"""
-    selected = state.get("selected") or {}
+    """采购方案：这次买什么、为什么是它、别的为什么不行。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：从「一件」改成「一套」
+    ═══════════════════════════════════════════════════════════════════
+    原先这里只有一个 `pick`，备选取的是 `cands[:3]` —— 候选池的**前三个**，
+    跟选中项可能根本不是同一品类。实测要买床，备选列出来的是沙发、沙发、
+    餐桌。价格区间同理：「¥11.70 – ¥3611.60」的 min 是个凳子、max 是个沙发。
+
+    现在按品类分组：备选只取**同品类**的，价格区间只算**同品类**的。
+    买一件时行为与从前一致（只有一个品类，备选就是同类里的其他件）。
+    """
+    items = plan_items(state)
     cands = state.get("candidates") or []
-    excluded = state.get("excluded") or []
+    excluded = effective_excluded(state)
 
-    name = str(selected.get("name") or "").strip()
-    why = str(selected.get("why") or "").strip()
-    by = str(selected.get("by") or "rule")
-    price = cand_yuan(selected) if selected else None
+    picked_ids = {str(i.get("item_id") or "") for i in items if i.get("item_id")}
+    picked_names = {str(i.get("name") or "") for i in items}
 
-    # 选中的那件可能不在 candidates 里（pick_best 从候选池挑，池子是筛过的）
-    alts = [c for c in cands if cand_name(c) != name][:3]
+    def _is_picked(c: dict) -> bool:
+        """是不是这次买下的那件。
+
+        ⚠️ 优先按 **item_id** 比。同名商品可能有多件（不同店铺/规格），
+        只按名字比会把它们全算成已选 —— 实测一次运行里 4 件同名床，
+        对比表里 2 件都标了「入选」。
+        """
+        iid = str(c.get("item_id") or "")
+        if iid and picked_ids:
+            return iid in picked_ids
+        return cand_name(c) in picked_names
+
+    picks = [{
+        "name": str(i.get("name") or "（未选出）"),
+        "price": _num(i.get("price_yuan")),
+        "why": str(i.get("why") or ""),
+        "by": str((state.get("plan") or {}).get("by") or "llm"),
+        "quantity": _num(i.get("quantity")),
+        "quantity_basis": str(i.get("quantity_basis") or ""),
+        "subtotal": _num(i.get("subtotal")),
+        "category": item_category(i),
+    } for i in items]
+
+    # 备选：**同品类**里没被选中的那些。跨品类的「备选」没有可比性 ——
+    # 买床时列一张沙发当备选，用户看不出该比什么。
+    #
+    # ⚠️ 还要**按名字去重**：淘宝同一款会由多家店卖，返回的是不同 item_id、
+    # 同一个标题。按 item_id 去重拦不住它们，于是「备选」里会出现三行一模一样
+    # 的名字（实测）。对读的人来说那是噪音，不是三个选项。
+    alts: list[dict] = []
+    for i in items:
+        cat = item_category(i)
+        seen_names: set[str] = set()
+        same: list[dict] = []
+        for c in cands:
+            if item_category(c) != cat or _is_picked(c):
+                continue
+            n = cand_name(c)
+            if n in seen_names:
+                continue
+            seen_names.add(n)
+            same.append(c)
+            if len(same) >= 3:
+                break
+        alts.extend({
+            "name": cand_name(c), "price": cand_yuan(c), "category": cat,
+        } for c in same)
 
     return {
         "kind": "plan",
@@ -527,23 +706,18 @@ def build_plan_doc(state: dict) -> dict:
         "budget": state.get("budget") or "",
         "duration": state.get("duration") or "",
         "constraints": [str(c) for c in (state.get("constraints") or [])],
-        "pick": {
-            "name": name or "（未选出）",
-            "price": price,
-            "why": why,
-            "by": by,
-            # 用量估算（模型给的）。方案里也要显示 —— 单价之外，
-            # 用户想知道「一共大概花多少」（见 build_budget_doc 的口径说明）
-            "quantity": _num(selected.get("quantity")),
-            "quantity_basis": str(selected.get("quantity_basis") or ""),
-            "total_estimate": _num(selected.get("total_estimate")),
-        },
-        "alternatives": [
-            {"name": cand_name(c), "price": cand_yuan(c)} for c in alts
-        ],
+        # 整套的商品列表。前端按 category 分组渲染。
+        "picks": picks,
+        "why": plan_why(state),
+        "total": plan_total(state),
+        # ⚠️ 保留单件的 `pick` 字段（取第一件），是为了兼容还没更新的读取方
+        # —— 前端工作台的存档逻辑、旧事件的回放都读它。新代码请用 `picks`。
+        "pick": picks[0] if picks else None,
+        "alternatives": alts,
         "excluded": [
             {"name": cand_name(c), "price": cand_yuan(c),
-             "reason": str(c.get("_reason") or "")}
+             "reason": str(c.get("_reason") or ""),
+             "category": item_category(c)}
             for c in excluded[:6]
         ],
         "risks": [str(r) for r in (state.get("risks") or [])],
@@ -552,79 +726,132 @@ def build_plan_doc(state: dict) -> dict:
 
 
 def build_compare_doc(state: dict) -> dict:
-    """候选对比表：入选与排除放同一张表，逐项可比。"""
+    """候选对比表：入选与排除放同一张表，**按品类分组**。
+
+    ⚠️ 分组是必须的：买一套家具时池子里有 5 个品类，混在一张表里
+    40 行平铺，看不出「床这一项我比了什么」。分组后每个品类内部横比，
+    才读得出取舍。
+    """
     cands = state.get("candidates") or []
-    excluded = state.get("excluded") or []
-    selected = state.get("selected") or {}
-    sel_name = str(selected.get("name") or "")
+    excluded = effective_excluded(state)
+    items = plan_items(state)
     dims = [str(d) for d in (state.get("dimensions") or [])][:4]
+
+    picked_ids = {str(i.get("item_id") or "") for i in items if i.get("item_id")}
+    picked_names = {str(i.get("name") or "") for i in items}
+    # 每件选中项的**同类理由**，按 item_id / 名字取
+    why_by_id = {
+        str(i.get("item_id") or ""): str(i.get("why") or "")
+        for i in items if i.get("item_id")
+    }
+    why_by_name = {str(i.get("name") or ""): str(i.get("why") or "") for i in items}
+
+    def _picked(c: dict) -> bool:
+        iid = str(c.get("item_id") or "")
+        if iid and picked_ids:
+            return iid in picked_ids
+        return cand_name(c) in picked_names
+
+    def _why(c: dict) -> str:
+        iid = str(c.get("item_id") or "")
+        if iid and why_by_id.get(iid):
+            return why_by_id[iid]
+        return why_by_name.get(cand_name(c), "")
 
     rows = []
     for c in cands:
-        n = cand_name(c)
-        picked = n == sel_name
+        p = _picked(c)
         rows.append({
-            "name": n,
+            "name": cand_name(c),
             "price": cand_yuan(c),
-            "picked": picked,
-            "tag": "入选" if picked else "候选",
+            "picked": p,
+            "category": item_category(c),
+            "tag": "入选" if p else "候选",
             # 入选的那行给模型的完整理由。
             # 未入选的**不写「未入选」**：那是废话，用户看得出来。
             # 空着比写废话好 —— 模型没给落选理由时不该由我们编一句。
-            "reason": str(selected.get("why") or "")[:80] if picked else "",
+            "reason": _why(c)[:80] if p else "",
         })
     for c in excluded:
         rows.append({
             "name": cand_name(c),
             "price": cand_yuan(c),
             "picked": False,
+            "category": item_category(c),
             "tag": "排除",
             "reason": str(c.get("_reason") or "不满足硬约束"),
         })
 
+    # 按品类分组，组内保持原顺序（模型搜出来的先后就是它比较的先后）
+    groups: list[dict] = []
+    idx: dict[str, dict] = {}
+    for r in rows:
+        g = idx.get(r["category"])
+        if g is None:
+            g = {"category": r["category"], "rows": []}
+            idx[r["category"]] = g
+            groups.append(g)
+        g["rows"].append(r)
+
     return {
         "kind": "compare",
         "dimensions": dims,
+        "groups": groups,
+        # 拍平的 rows 保留 —— 旧前端与下载渲染读它
         "rows": rows,
-        "counts": {"candidates": len(cands), "excluded": len(excluded)},
+        "counts": {
+            "candidates": len(cands),
+            "excluded": len(excluded),
+            "picked": len(items),
+        },
     }
 
 
 def build_budget_doc(state: dict) -> dict:
-    """预算分配表：花多少、占几成、剩多少。
+    """预算分配表：花多少、占几成、剩多少、**每个品类各花多少**。
 
     ═══════════════════════════════════════════════════════════════════
-    ⚠️ 2026-09-27 修口径：预算是「整件事」的钱，商品是「一件」的价
+    ⚠️ 2026-09-27 修口径：分子分母必须同量纲
     ═══════════════════════════════════════════════════════════════════
-    原先直接拿**单价**当花费去比预算。实测一次「装修 / 6万」的运行，
-    选中一件 ¥165.64 的隔音毡，于是预算表显示：
+    之前这里拿 `selected.total_estimate`（**一件**的估算）去比预算
+    （**整件事**的钱）。实测「搬家 / 预算 12000」选中一张 ¥3401 的床，
+    于是显示：
 
-        本次花费：¥165.64　预算占用：0%
+        占预算 28%          ← 3401 / 12000
+        整套方案5件合计约¥11163  ← 模型自己算的，占 93%
 
-    算术上没错，但**口径是错的** —— 6 万是整屋装修的预算，而 165 块是
-    一卷隔音毡的单价。这两件事不该相减。用户看到的「6 万只花几百」
-    就是这么来的。
+    同一张卡片上两个数差 3 倍。现在分子改成**整套小计之和**，与预算同量纲。
 
-    现在优先用模型估算的**总价**（`selected.total_estimate`，单价 × 用量）。
     估不出来时**如实标注口径**，而不是把单价伪装成总花费 ——
-    「不编造」在这里的意思是：宁可显示「单价 ¥165.64（未含用量）」，
-    也不显示「花费 ¥165.64 / 占用 0.3%」这种误导性的确定数字。
+    「不编造」在这里的意思是：宁可显示「单价 ¥3401（未含用量）」，
+    也不显示「花费 ¥3401 / 占用 28%」这种误导性的确定数字。
     """
-    selected = state.get("selected") or {}
+    items = plan_items(state)
     cands = state.get("candidates") or []
     budget = _budget_yuan(state.get("budget"))
 
-    sel_price = cand_yuan(selected) if selected else None
     prices = [p for p in (_price_of(c) for c in cands) if p is not None]
 
-    # 模型给的估算总价优先；没有就退回单价（但下面会标成「单价」口径）
-    total = _num(selected.get("total_estimate"))
-    quantity = _num(selected.get("quantity"))
-    basis = str(selected.get("quantity_basis") or "").strip()
+    # 整套总额；估不出来（有任一件缺小计）就是 None，退回单价口径
+    total = plan_total(state)
+    any_qty = any(_num(i.get("quantity")) for i in items)
+    unit_only = plan_items(state)[0].get("price_yuan") if len(items) == 1 else None
+    if unit_only is not None:
+        unit_only = _num(unit_only)
 
-    # 有总价才算「花费」，能算占比；只有单价时口径不明，不给占比
-    spent = total if total is not None else None
+    spent = total
     ratio = (spent / budget) if (spent is not None and budget and budget > 0) else None
+
+    # 按品类拆账 —— 用户想知道「钱花在哪一类上了」
+    by_cat: list[dict] = []
+    for i in items:
+        by_cat.append({
+            "category": item_category(i),
+            "name": str(i.get("name") or ""),
+            "quantity": _num(i.get("quantity")),
+            "unit_price": _num(i.get("price_yuan")),
+            "subtotal": _num(i.get("subtotal")),
+        })
 
     return {
         "kind": "budget",
@@ -633,13 +860,15 @@ def build_budget_doc(state: dict) -> dict:
         "remaining": (budget - spent) if (spent is not None and budget) else None,
         "ratio": ratio,
         # 单价永远单独给出 —— 它是真实数据，只是不该当总价用
-        "unit_price": sel_price,
-        "quantity": quantity,
-        "quantity_basis": basis,
-        # 口径标记：前端据此决定显示「估算总价」还是「单价（未含用量）」
-        "caliber": "total" if spent is not None else ("unit_only" if sel_price else "none"),
+        "unit_price": unit_only,
+        "quantity": _num(items[0].get("quantity")) if len(items) == 1 else None,
+        "quantity_basis": str(items[0].get("quantity_basis") or "") if len(items) == 1 else "",
+        # 口径标记：前端据此决定显示「整套估算」还是「单价（未含用量）」
+        "caliber": "total" if spent is not None else ("unit_only" if unit_only else "none"),
+        # 整套拆账：每件的小计与占比
+        "items": by_cat,
         "range": {"min": min(prices), "max": max(prices)} if prices else None,
-        "items": ([{"name": cand_name(selected), "price": sel_price}] if sel_price else []),
+        "partial": bool(items) and spent is None and any_qty,
     }
 
 
@@ -682,19 +911,36 @@ def deliverable_markdown(doc: dict, name: str) -> str:
         if doc.get("constraints"):
             L.append(f"- 硬约束：{'、'.join(doc['constraints'])}")
         L += ["", "## 建议购买", ""]
-        p = doc.get("pick") or {}
-        price = p.get("price")
-        L.append(f"**{p.get('name')}**" + (f"　¥{price:g}" if price else ""))
-        if p.get("why"):
-            L += ["", f"> {p['why']}", ""]
-        src = "模型判断" if p.get("by") == "llm" else "规则兜底"
-        L.append(f"（判断来源：{src}）")
+        picks = doc.get("picks") or ([doc["pick"]] if doc.get("pick") else [])
+        for p in picks:
+            price = p.get("price")
+            head = f"**{p.get('name')}**"
+            if p.get("category"):
+                head = f"[{p['category']}] {head}"
+            L.append(head + (f"　¥{price:g}" if price else ""))
+            if p.get("quantity") and p.get("subtotal") is not None:
+                L.append(f"- 用量 {p['quantity']:g}"
+                         + (f"（{p['quantity_basis']}）" if p.get("quantity_basis") else "")
+                         + f"，小计 ¥{p['subtotal']:g}")
+            elif p.get("quantity_basis"):
+                L.append(f"- {p['quantity_basis']}")
+            if p.get("why"):
+                L.append(f"- 理由：{p['why']}")
+            L.append("")
+        if doc.get("total") is not None:
+            L += [f"**整套合计：¥{doc['total']:g}**", ""]
+        if picks:
+            src = "模型判断" if picks[0].get("by") == "llm" else "规则兜底"
+            L.append(f"（判断来源：{src}）")
+        if doc.get("why"):
+            L += ["", f"> {doc['why']}"]
 
         if doc.get("alternatives"):
-            L += ["", "## 备选", ""]
+            L += ["", "## 备选（同品类）", ""]
             for a in doc["alternatives"]:
                 pr = f"　¥{a['price']:g}" if a.get("price") else ""
-                L.append(f"- {a['name']}{pr}")
+                cat = f"[{a['category']}] " if a.get("category") else ""
+                L.append(f"- {cat}{a['name']}{pr}")
         if doc.get("excluded"):
             L += ["", "## 已排除", ""]
             for e in doc["excluded"]:
@@ -709,12 +955,18 @@ def deliverable_markdown(doc: dict, name: str) -> str:
             L.append("、".join(doc["dimensions"]))
 
     elif kind == "compare":
-        L += ["| 候选 | 价格 | 结论 | 依据 |", "|---|---|---|---|"]
-        for r in doc.get("rows") or []:
-            pr = f"¥{r['price']:g}" if r.get("price") else "—"
-            L.append(f"| {r['name']} | {pr} | {r.get('tag') or ''} | {r.get('reason') or ''} |")
+        # 按品类分组渲染 —— 买一套时 40 行平铺看不出「床这一项比了什么」
+        for g in (doc.get("groups") or [{"category": "", "rows": doc.get("rows") or []}]):
+            if g.get("category"):
+                L += [f"### {g['category']}", ""]
+            L += ["| 候选 | 价格 | 结论 | 依据 |", "|---|---|---|---|"]
+            for r in g.get("rows") or []:
+                pr = f"¥{r['price']:g}" if r.get("price") else "—"
+                L.append(f"| {r['name']} | {pr} | {r.get('tag') or ''} | {r.get('reason') or ''} |")
+            L.append("")
         c = doc.get("counts") or {}
-        L += ["", f"共 {c.get('candidates', 0)} 个候选，排除 {c.get('excluded', 0)} 个。"]
+        L += ["", f"共 {c.get('candidates', 0)} 个候选，排除 {c.get('excluded', 0)} 个，"
+                 f"入选 {c.get('picked', 0)} 件。"]
 
     elif kind == "budget":
         b = doc.get("budget")
@@ -722,10 +974,6 @@ def deliverable_markdown(doc: dict, name: str) -> str:
         # 口径决定怎么写 —— 不把单价伪装成总花费（见 build_budget_doc 的说明）
         if doc.get("caliber") == "total":
             L.append(f"- 估算花费：¥{doc['spent']:g}")
-            if doc.get("quantity"):
-                L.append(f"- 估算用量：{doc['quantity']:g} 份")
-            if doc.get("quantity_basis"):
-                L.append(f"- 估算依据：{doc['quantity_basis']}")
             if doc.get("remaining") is not None:
                 L.append(f"- 结余：¥{doc['remaining']:g}")
             if doc.get("ratio") is not None:
@@ -744,7 +992,12 @@ def deliverable_markdown(doc: dict, name: str) -> str:
         if doc.get("items"):
             L += ["", "## 明细", ""]
             for it in doc["items"]:
-                pr = f"　¥{it['price']:g}" if it.get("price") else ""
-                L.append(f"- {it['name']}{pr}")
+                cat = f"[{it['category']}] " if it.get("category") else ""
+                line = f"- {cat}{it.get('name') or ''}"
+                if it.get("quantity") and it.get("subtotal") is not None:
+                    line += f"　{it['quantity']:g} 份 × ¥{it['unit_price']:g} = ¥{it['subtotal']:g}"
+                elif it.get("unit_price"):
+                    line += f"　¥{it['unit_price']:g}"
+                L.append(line)
 
     return "\n".join(L) + "\n"

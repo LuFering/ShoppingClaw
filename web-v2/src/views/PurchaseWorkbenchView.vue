@@ -452,6 +452,16 @@ const subscribe = async () => {
 const selectedNode = ref(null)
 const onNodeClick = (node) => { selectedNode.value = node }
 
+/**
+ * 图上被标为「已采纳」的节点。
+ *
+ * ⚠️ 买**一套**时会有多件（床、沙发、衣柜各一件）—— 2026-09-27 之前
+ * 这里一律 `.find()` 只取一件，档案里就只记得下第一件，另外几件凭空消失。
+ */
+const selectedNodes = computed(() =>
+  graphData.value.nodes.filter((n) => n.state === 'selected')
+)
+
 const onAnswer = async (key) => {
   if (!runId.value) return
   try {
@@ -494,8 +504,9 @@ const saving = ref(false)
 
 const saveToArchive = async () => {
   if (saving.value || saved.value) return
-  const selected = graphData.value.nodes.find((n) => n.state === 'selected')
-    || graphData.value.nodes.find((n) => n.type === '候选商品')
+  const picked = selectedNodes.value
+  // 没有入选的就退回第一件候选（至少让档案里有个名字，而不是空着）
+  const primary = picked[0] || graphData.value.nodes.find((n) => n.type === '候选商品')
   saving.value = true
   try {
     const { decisionsApi } = await import('@/apis/decisions_api')
@@ -503,7 +514,7 @@ const saveToArchive = async () => {
       id: `pl-${Date.now().toString(36)}`,
       phase: 'decided',
       source: 'planning',
-      target: selected?.name || taskLabel.value || '采购规划',
+      target: primary?.name || taskLabel.value || '采购规划',
       category: route.query.scene || '',
       note: `来自采购规划推演（${graphData.value.nodes.length} 个决策节点）`,
       rawIdea: '',
@@ -514,10 +525,10 @@ const saveToArchive = async () => {
       candidates: graphData.value.nodes
         .filter((n) => n.type === '候选商品')
         .map((n) => ({ name: n.name, price: Number(n.meta?.price) || 0 })),
-      aiRecommend: selected?.name || '',
-      recReason: selected?.meta?.why || '推演过程中选定的候选',
+      aiRecommend: primary?.name || '',
+      recReason: primary?.meta?.why || '推演过程中选定的候选',
       risk: '',
-      bestPrice: selected?.meta?.price ? `¥${selected.meta.price}` : '',
+      bestPrice: primary?.meta?.price ? `¥${primary.meta.price}` : '',
       dealPrice: '', purchasedAt: '', reviewNote: '', dropNote: '',
       reminders: [], insights: [],
       threadId: null,
@@ -535,8 +546,11 @@ const saveToArchive = async () => {
 
 const briefThesis = () => {
   const n = graphData.value.nodes.length
-  const sel = graphData.value.nodes.find((x) => x.state === 'selected')
-  return sel ? `共 ${n} 个决策节点，选定「${sel.name}」` : `共 ${n} 个决策节点`
+  const sel = selectedNodes.value
+  if (!sel.length) return `共 ${n} 个决策节点`
+  if (sel.length === 1) return `共 ${n} 个决策节点，选定「${sel[0].name}」`
+  // 买一套时会有多件入选 —— 报件数而不是只报第一件的名字
+  return `共 ${n} 个决策节点，选定 ${sel.length} 件：${sel.map((x) => x.name.slice(0, 8)).join('、')}`
 }
 
 const producing = ref(false)

@@ -179,11 +179,17 @@ def _edge(src: str, dst: str, etype: str) -> dict:
     return {"source_id": src, "target_id": dst, "type": etype}
 
 
-async def _merge_graph(run_id: str, new_nodes: list[dict], new_edges: list[dict]) -> None:
+async def _merge_graph(run_id: str, new_nodes: list[dict], new_edges: list[dict],
+                       prune_prefixes: tuple[str, ...] = ()) -> None:
     """把增量并入 run.graph 快照，并发一条 graph 事件。
 
     合并后**下发整图**而不是增量：前端收到直接替换即可。
     「增量合并」的复杂度留在服务端一处，前端不做第二套。
+
+    `prune_prefixes`：合并前先删掉 id 以这些前缀开头、且**不在 `new_nodes`
+    里**的旧节点。`_sync_graph` 是「从产物重建整图」，产物里没有的商品
+    就是这一轮不再成立的 —— 不删的话它们会永远留在图上（见 `_sync_graph`
+    末尾的说明）。默认空，即纯合并、不删任何东西。
     """
     async with pg_manager.get_async_session_context() as session:
         r = await session.execute(select(PlanningRun).where(PlanningRun.id == run_id))
@@ -192,10 +198,19 @@ async def _merge_graph(run_id: str, new_nodes: list[dict], new_edges: list[dict]
             return
         g = dict(run.graph or {})
         nodes = {n["id"]: n for n in (g.get("nodes") or [])}
+        keep_ids = {n["id"] for n in new_nodes}
+        if prune_prefixes:
+            for nid in [k for k in nodes
+                        if k.startswith(prune_prefixes) and k not in keep_ids]:
+                del nodes[nid]
         for n in new_nodes:
             nodes[n["id"]] = {**nodes.get(n["id"], {}), **n}
         edges = {(e.get("source_id"), e.get("target_id"), e.get("type")): e
                  for e in (g.get("edges") or [])}
+        if prune_prefixes:
+            # 指向已删节点的边也要清掉，否则前端会画出一堆悬空的线
+            edges = {k: e for k, e in edges.items()
+                     if k[0] in nodes and k[1] in nodes}
         for e in new_edges:
             edges[(e.get("source_id"), e.get("target_id"), e.get("type"))] = e
 
@@ -392,7 +407,24 @@ async def advance(run_id: str, user_id: str) -> None:
         # 跨步累积的产物（候选/排除/选中/风险/维度）。
         # `stream_mode="updates"` 只给增量，得自己攒；攒出来的要落库，
         # 否则收尾生成交付物时读不到（见 _persist_products 的说明）。
-        acc: dict = {}
+        #
+        # ═══════════════════════════════════════════════════════════════
+        # ⚠️ 2026-09-27：续跑必须**从上一轮的产物接着攒**
+        # ═══════════════════════════════════════════════════════════════
+        # 原先这里恒为 `{}`。中断续跑时，第二轮从空开始攒，收尾
+        # `_persist_products` 拿它**覆盖** products —— 第一轮搜到的候选、
+        # 排掉的商品全被丢掉。而图是 `_merge_graph` 按 id **合并**的，
+        # 不会删节点 —— 于是图和产物越漂越远。
+        #
+        # 实测一次 run：图里 84 个商品节点、products 里只剩 45 个，
+        # 54 个节点成了「数据已经不存在」的孤儿，界面上显示 98 个节点。
+        # 用户看到的「候选商品这么多」有一半是这么来的。
+        #
+        # 同一个 bug 还有第二个后果：agent 的 state 也是空的，工具读
+        # `state.get("candidates")` 得到空列表，`drop_candidates` 于是
+        # 回「这些名字没在候选里找到，未生效」—— 界面上那句
+        # 「候选里没找到你给的…」就是这么来的。
+        acc: dict = _seed_acc(run)
         # 累积对话历史，跑完存进 `run.messages` —— 中断续跑时要用它，
         # 否则 agent 从零开始，把搜过的全重做一遍（见 _agent_input 的说明）。
         history: list[dict] = list(init.get("messages") or [])
@@ -430,6 +462,58 @@ async def advance(run_id: str, user_id: str) -> None:
         logger.error(f"[planning] run {run_id} 推进失败: {e}", exc_info=True)
         await _patch_run(run_id, status="failed", error=str(e)[:500])
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
+
+
+def _merge_plan(old: dict | None, new: dict | None) -> dict:
+    """把新的一次 `make_decision` 并进已有的 plan：**同品类替换、新品类追加**。
+
+    ═══════════════════════════════════════════════════════════════════
+    为什么不能整体覆盖
+    ═══════════════════════════════════════════════════════════════════
+    模型在续跑时会**再调一次** `make_decision`，而第二次通常只列
+    「这次新增的品类」（前一次定过的它认为已经生效 —— 这判断是对的）。
+    整体替换就把上一轮的成果丢掉。实测一次七件套的 run：最终 plan 只剩
+    书桌+餐桌两件，预算表显示「占 15%」，而模型的 `why` 里写的是
+    「合计 ¥10034.7、占 83.6%」—— 卡片和理由又对不上，和用户最初
+    报的那个毛病同源。
+
+    按品类合并同时满足两种意图：
+      · 「改主意换掉床」—— 床这一类被新值覆盖，旧的不会残留
+      · 「这一轮只补书桌」—— 床、沙发等未被提及的品类原样保留
+
+    品类取 `_category`；没有就退回商品名（单件采购时一个元素，等价于替换）。
+    """
+    old = old or {}
+    new = new or {}
+    new_items = [i for i in (new.get("items") or []) if isinstance(i, dict)]
+    if not new_items:
+        # 新的一次什么都没定下（全没匹配上）—— 保留旧的，别把成果清空
+        return old
+
+    def key(i: dict) -> str:
+        return str(i.get("_category") or i.get("name") or "")
+
+    merged: dict[str, dict] = {}
+    for i in (old.get("items") or []):
+        if isinstance(i, dict):
+            merged[key(i)] = i
+    for i in new_items:
+        merged[key(i)] = i
+
+    items = list(merged.values())
+    # 总额：**每一件都有小计**时才算得准；缺任何一件就置空
+    # （拿部分和冒充总额正是「28% vs 93%」那类错的来源，见 build_budget_doc）
+    subs = [i.get("subtotal") for i in items]
+    total = (round(sum(float(s) for s in subs), 2)
+             if subs and all(s is not None for s in subs) else None)
+
+    return {
+        "items": items,
+        # 理由用最新的（它反映这一轮的取舍逻辑）；没有就留旧的
+        "why": new.get("why") or old.get("why") or "",
+        "by": new.get("by") or old.get("by") or "llm",
+        "total": total,
+    }
 
 
 def _collect_messages(chunk: dict, history: list[dict]) -> None:
@@ -490,6 +574,28 @@ async def _persist_history(run_id: str, history: list[dict]) -> None:
         logger.warning(f"[planning] 落对话历史失败（忽略）: {e}")
 
 
+def _seed_acc(run: PlanningRun) -> dict:
+    """续跑时把上一轮的产物读回来，作为累积的起点。
+
+    ⚠️ 这是「agent 自己记得自己做过什么」的一部分，和 `run.messages`
+    （对话历史）配套：消息让它记得**说过什么**，产物让它记得**搜到了什么**。
+    少了后者，`drop_candidates` 会在空池子里找名字，回一句
+    「这些名字没在候选里找到，未生效」—— 模型据此以为自己搞错了，
+    行为开始乱（实测踩过）。
+
+    `plan` 也要带上：模型续跑时**只列这次新增的品类**（前一次定过的
+    它认为已经生效），合并要有个底才能把旧的那些留住（见 `_merge_plan`）。
+    """
+    p = run.products or {}
+    out: dict = {}
+    for k in ("candidates", "excluded", "risks", "dimensions"):
+        if p.get(k):
+            out[k] = list(p[k])
+    if p.get("plan"):
+        out["plan"] = p["plan"]
+    return out
+
+
 def _agent_input(run: PlanningRun) -> dict:
     """给 agent 的初始输入：任务描述 + 入口参数 + **上一轮的对话历史**。
 
@@ -512,7 +618,13 @@ def _agent_input(run: PlanningRun) -> dict:
     if not history:
         # 首轮：只有任务描述
         history = [{"role": "user", "content": build_goal(state)}]
-    return {"messages": history, **state}
+    # ⚠️ 续跑时把上一轮的**产物**也放进 agent 的 state —— 与 `_seed_acc`
+    # 是同一件事的两面：那边管「落库时别丢」，这边管「工具读得到」。
+    # 少了这边，`drop_candidates` 在空池子里找名字，回一句
+    # 「这些名字没在候选里找到，未生效」，模型据此以为自己搞错了。
+    # 图的 reducer 是追加语义，把旧的当底、新搜到的自然接在后面。
+    seed = _seed_acc(run)
+    return {"messages": history, **state, **seed}
 
 
 def _answer_text(run: PlanningRun) -> str:
@@ -585,10 +697,25 @@ async def _on_agent_step(
                 acc.setdefault(k, [])
                 acc[k] = acc[k] + list(d[k])
                 changed = True
-        for k in ("selected", "dims_from_kb", "risks_from_kb"):
+        for k in ("dims_from_kb", "risks_from_kb"):
             if d.get(k) is not None:
                 acc[k] = d[k]
                 changed = True
+
+        # ⚠️ 2026-09-27：`plan` 要**按品类合并**，不能整体覆盖
+        #
+        # `make_decision` 是「收敛动作」，但模型在**续跑**时会再调一次 ——
+        # 而它第二次只列**这次新增的品类**（前一次定过的它认为已经生效了，
+        # 这判断没错）。`plan` 是后写覆盖语义，整体替换就把前一轮的 5 件
+        # 换成这一轮的 2 件。实测：一次七件套的 run 最终只剩书桌+餐桌两件，
+        # 预算表显示「占 15%」，而模型在 `why` 里写的是「合计 ¥10034.7、占 83.6%」
+        # —— 又是同一个病：卡片和理由对不上。
+        #
+        # 合并规则：**同品类替换、新品类追加**。这样「改主意换掉床」仍然生效
+        # （床这一类被新值覆盖），而「这一轮只补了书桌」不会把床弄丢。
+        if d.get("plan") is not None:
+            acc["plan"] = _merge_plan(acc.get("plan"), d["plan"])
+            changed = True
 
         for m in (d.get("messages") or []):
             # ── 模型决定调工具 ──
@@ -660,7 +787,16 @@ def _describe_call(name: str, args: dict) -> tuple[str, str, list]:
         names = args.get("names") or []
         return (f"排除 {len(names)} 件", str(args.get("reason") or ""), [])
     if name == "make_decision":
-        return (f"定下「{args.get('picked') or ''}」", str(args.get("why") or ""), [])
+        picks = args.get("picks") or []
+        if isinstance(picks, list) and picks:
+            names = [str(p.get("picked") or "") for p in picks if isinstance(p, dict)]
+            names = [n for n in names if n]
+            title = (f"定下「{names[0]}」" if len(names) == 1
+                     else f"定下 {len(names)} 件：{'、'.join(n[:12] for n in names[:3])}")
+        else:
+            # 兼容旧事件回放里的单件形状
+            title = f"定下「{args.get('picked') or ''}」"
+        return (title, str(args.get("why") or ""), [])
     if name == "ask_user":
         return ("向你确认一件事", str(args.get("question") or ""), [])
     return (name, "", [])
@@ -796,11 +932,29 @@ async def _sync_graph(run_id: str, acc: dict, state: dict) -> None:
         edges.append(_edge("task", f"ev-{i}", "依据"))
 
     # 候选商品：被排除的用**同一个 id** 覆盖成「已排除」
-    excluded = acc.get("excluded") or []
+    # ⚠️ 用 effective_excluded：剔掉已经被选中的那些。模型会改主意 ——
+    # 先排掉、后又选回来，同一件就会同时挂在两个名单上。不剔掉的话，
+    # 图里它会先画成「已排除」再被候选循环覆盖，看起来忽明忽暗。
+    plan = acc.get("plan") or {}
+    plan_items = [i for i in (plan.get("items") or []) if isinstance(i, dict)]
+    if not plan_items:
+        # 兼容旧的单件形状
+        sel = acc.get("selected") or {}
+        if sel.get("name"):
+            plan_items = [sel]
+    excluded = st.effective_excluded({
+        "excluded": acc.get("excluded") or [],
+        "plan": {**plan, "items": plan_items},
+    })
     out_names = {st.cand_name(e) for e in excluded}
-    selected = acc.get("selected") or {}
-    sel_name = str(selected.get("name") or "")
-    sel_item = str(selected.get("item_id") or "")
+    sel_ids = {str(i.get("item_id") or "") for i in plan_items if i.get("item_id")}
+    sel_names = {str(i.get("name") or "") for i in plan_items}
+    # 每件入选的**同类理由** —— 图里点开节点要看到「为什么是它」
+    why_by_id = {
+        str(i.get("item_id") or ""): str(i.get("why") or "")
+        for i in plan_items if i.get("item_id")
+    }
+    why_by_name = {str(i.get("name") or ""): str(i.get("why") or "") for i in plan_items}
 
     def _cid(c: dict) -> str:
         raw = c.get("item_id") or st.cand_name(c)
@@ -808,30 +962,85 @@ async def _sync_graph(run_id: str, acc: dict, state: dict) -> None:
         return "cand-" + "".join(ch for ch in str(raw) if ch.isalnum() or ch in "-_")[:40]
 
     def _is_selected(c: dict) -> bool:
-        """是不是被选中的那件。
+        """是不是这次买下的那件。
 
         ⚠️ 优先按 **item_id** 比。同名商品可能有**多件**（不同店铺/规格），
         只按名字比会把它们全标成「已采纳」—— 实测一次运行里 4 件同名商品
         都被标上了。模型没给 item_id 时才退回按名字（此时只能接受歧义）。
         """
-        if sel_item:
-            return str(c.get("item_id") or "") == sel_item
-        return bool(sel_name) and st.cand_name(c) == sel_name
+        iid = str(c.get("item_id") or "")
+        if iid and sel_ids:
+            return iid in sel_ids
+        return bool(sel_names) and st.cand_name(c) in sel_names
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 图上每个品类只画前 N 件，其余的**不画但也不丢**
+    # ═══════════════════════════════════════════════════════════════════
+    # 决策图是**决策**视图，不是商品目录。实测一次「搬家」搜了 6 个品类、
+    # 96 件候选、排掉 67 件 —— 全画出来是 107 个节点，界面糊成一片，
+    # 用户的原话就是「候选商品这么多吗」。
+    #
+    # 但**不能直接丢掉**：候选对比表要逐件列出，用户要能核对模型比了什么。
+    # 所以只在**画图**这一层截断，`products` 与交付物仍然拿全量。
+    #
+    # 排序保证该露的都在前面：入选的 > 有价格的 > 原顺序。这样每个品类的
+    # 最终选择一定看得见，被截掉的都是同类里排在后面的备选。
+    MAX_PER_CAT = 6
+
+    def _rank(c: dict) -> tuple:
+        return (0 if _is_selected(c) else 1,
+                0 if st.cand_yuan(c) is not None else 1)
+
+    by_cat: dict[str, list[dict]] = {}
     for c in cands:
+        by_cat.setdefault(st.item_category(c), []).append(c)
+
+    shown, hidden = [], 0
+    for cat, group in by_cat.items():
+        ordered = sorted(group, key=_rank)
+        shown.extend(ordered[:MAX_PER_CAT])
+        hidden += max(0, len(ordered) - MAX_PER_CAT)
+
+    for c in shown:
         n = st.cand_name(c)
+        iid = str(c.get("item_id") or "")
         state_key = "selected" if _is_selected(c) else "candidate"
+        why = why_by_id.get(iid) or why_by_name.get(n) or ""
         nodes.append(_node(_cid(c), n[:40], "候选商品", 3, state_key,
-                           {"price": st.yuan(c.get("price")), "item_id": c.get("item_id")}))
+                           {"price": st.yuan(c.get("price")), "item_id": c.get("item_id"),
+                            # 图里点开节点要能看到选它的理由
+                            "why": why if state_key == "selected" else "",
+                            "category": st.item_category(c)}))
         edges.append(_edge("obj-1", _cid(c), "候选"))
 
-    for e in excluded:
+    # 每个品类画一条「还有 N 件」的汇总节点 —— 截断必须**看得见**。
+    # 悄悄少画几件，用户会以为搜索只返回了这些（那是在骗人）；
+    # 明说「这一类还有 8 件没画」，他才知道图是摘要、去哪看全量。
+    #
+    # ⚠️ id 用**品类名本身**（清洗后）而不是 `hash(cat)`：Python 的字符串
+    # hash 每个进程都不同（PYTHONHASHSEED 随机），重启一次 id 就变，
+    # 旧节点留在图上删不掉。
+    for cat, group in by_cat.items():
+        extra = len(group) - MAX_PER_CAT
+        if extra > 0:
+            slug = "".join(ch for ch in cat if ch.isalnum())[:16] or "x"
+            hid = f"more-{slug}"
+            nodes.append(_node(hid, f"{cat}还有 {extra} 件", "候选商品", 1, "candidate",
+                               {"category": cat, "collapsed": extra}))
+            edges.append(_edge("obj-1", hid, "候选"))
+
+    # 排除的同样只画前几件：全画出来又是一面墙。理由已在对比表里逐条列出。
+    for e in excluded[:MAX_PER_CAT * 2]:
         price = st.cand_yuan(e)
         nodes.append(_node(_cid(e), st.cand_name(e)[:40], "已排除", 2, "pruned",
                            {"price": st.yuan(e.get("price")), "item_id": e.get("item_id"),
                             "reason": e.get("_reason") or "",
                             # 前端详情条读的是 pruneReason
                             "pruneReason": e.get("_reason") or ""}))
+    if len(excluded) > MAX_PER_CAT * 2:
+        rest = len(excluded) - MAX_PER_CAT * 2
+        nodes.append(_node("more-excluded", f"另有 {rest} 件已排除", "已排除", 1, "pruned",
+                           {"reason": "见图表与交付物中的完整排除清单"}))
 
     # 风险
     for i, r in enumerate((acc.get("risks") or [])[:6]):
@@ -840,7 +1049,16 @@ async def _sync_graph(run_id: str, acc: dict, state: dict) -> None:
 
     if not nodes:
         return
-    await _merge_graph(run_id, nodes, edges)
+    # ⚠️ `_merge_graph` 只按 id 合并、**从不删节点**。而 `_sync_graph` 是
+    # 「从产物重建整图」—— 产物里没有的，就是这一轮不再成立的节点。
+    # 不显式删掉的话，上一轮搜到、这一轮已被丢弃的商品会永远留在图上，
+    # 越积越多（实测一次 run 攒到 98 个节点，其中 54 个是孤儿）。
+    #
+    # 所以把这次重建出的**商品类节点 id 全集**传下去，让合并时清掉
+    # 不在其中的旧商品节点。前缀要包含 `more-`（品类的「还有 N 件」汇总
+    # 节点）—— 那个数字随搜索变化，旧的要跟着走。
+    # 只清商品类 —— 需求/依据/风险这些是按位置编号的，删了会连累其它节点。
+    await _merge_graph(run_id, nodes, edges, prune_prefixes=("cand-", "more-"))
 
 
 async def _emit_think_delta(run_id: str, text: str, kind: str = "content") -> None:
@@ -875,9 +1093,16 @@ def _state_from_run(run: PlanningRun) -> dict:
     读不到 products 时（旧 run）回退到从图反推。
     """
     p = run.products or {}
-    if p.get("candidates") or p.get("selected"):
+    if p.get("candidates") or p.get("selected") or p.get("plan"):
         cands = _dedup(p.get("candidates") or [])
-        excluded = p.get("excluded") or []
+        # ⚠️ 用 effective_excluded：它会剔掉**已经被选中的**那些。
+        # 模型会改主意 —— 实测它先以「超预算」排掉雅兰床垫，用户答
+        # 「升级品质」后又选了回来，于是同一件同时挂在候选与排除两个名单上。
+        # 不剔掉的话，下面这行会把它从候选里删掉，对比表就标不出它入选。
+        state_for_ex = {"excluded": p.get("excluded") or [],
+                        "plan": p.get("plan") or {},
+                        "selected": p.get("selected") or {}}
+        excluded = st.effective_excluded(state_for_ex)
         out_names = {st.cand_name(e) for e in excluded}
         return {
             "scene": run.scene, "budget": run.budget, "duration": run.duration,
@@ -887,6 +1112,8 @@ def _state_from_run(run: PlanningRun) -> dict:
             # 不回头改 candidates（改了会让候选翻倍，见 tools._to_stage_state）
             "candidates": [c for c in cands if st.cand_name(c) not in out_names],
             "excluded": excluded,
+            "plan": p.get("plan") or {},
+            # 兼容旧 run：单件形状仍然读得出来，刷新后不会突然变空
             "selected": p.get("selected") or {},
             "risks": p.get("risks") or [],
             "dimensions": p.get("dimensions") or [],
@@ -914,13 +1141,27 @@ def _state_from_run(run: PlanningRun) -> dict:
                 "_reason": meta.get("reason") or "",
             })
 
-    selected = next((c for c in candidates if c.pop("_selected", False)), None) or {}
+    # 回退路径也按「可能有多件」来读 —— 2026-09-27 之后图上可以有多件 selected
+    # （买一套时每件都标），所以收集全部，不再只取第一件。
+    picked = [c for c in candidates if c.pop("_selected", False)]
+    plan = {
+        "items": [{
+            "name": c.get("name"), "item_id": c.get("item_id"),
+            "price_yuan": c.get("price_yuan"), "quantity": None,
+            "quantity_basis": "", "subtotal": None, "why": c.get("why") or "",
+        } for c in picked],
+        "why": "", "by": "kb",
+        "total": (sum(c["price_yuan"] for c in picked)
+                  if picked and all(c.get("price_yuan") for c in picked) else None),
+    }
 
     return {
         "scene": run.scene, "budget": run.budget, "duration": run.duration,
         "constraints": run.constraints or [], "subject": run.subject,
         "run_id": run.id, "user_id": run.user_id,
-        "candidates": candidates, "excluded": excluded, "selected": selected,
+        "candidates": candidates, "excluded": excluded,
+        "plan": plan,
+        "selected": picked[0] if picked else {},
         "risks": [n.get("name") for n in nodes if n.get("type") == "风险"],
         "dimensions": [n.get("name") for n in nodes if n.get("type") == "决策依据"],
         "needs": [n.get("name") for n in nodes if n.get("type") == "需求"],

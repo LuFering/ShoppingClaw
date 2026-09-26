@@ -36,18 +36,49 @@
           <div v-show="openId === d.id" class="dc-body">
             <!-- ── 采购方案：买哪件 + 为什么 + 排除原因 ── -->
             <template v-if="d.data.kind === 'plan'">
-              <div class="pick">
-                <p class="pick-name">{{ d.data.pick?.name || '（未选出）' }}</p>
-                <p class="pick-line">
-                  <span v-if="d.data.pick?.price != null" class="pick-price mono">
-                    ¥{{ fmtPrice(d.data.pick.price) }}
-                  </span>
-                  <span class="pick-by" :class="`by-${d.data.pick?.by}`">
-                    {{ BY_LABEL[d.data.pick?.by] || '来源未知' }}
-                  </span>
+              <!--
+                ⚠️ 2026-09-27：从「一件」改成「一套」。
+                原先只渲染 d.data.pick 一件，因为后端 make_decision 只收单件。
+                实测「搬家 / 预算 12000」：模型算了整套 5 件 ¥11163，却只能
+                交出一张床 —— 卡片上「占 28%」和它自己写的「占 93%」差 3 倍。
+                现在后端给的是 picks 列表（按品类），这里逐件渲染。
+              -->
+              <div v-if="picks(d).length" class="picks">
+                <div v-for="(p, i) in picks(d)" :key="i" class="pick">
+                  <p class="pick-name">
+                    <span v-if="p.category" class="pick-cat">{{ p.category }}</span>
+                    {{ p.name }}
+                  </p>
+                  <p class="pick-line">
+                    <span v-if="p.price != null" class="pick-price mono">¥{{ fmtPrice(p.price) }}</span>
+                    <!--
+                      只在**算式成立**时才写「单价 × 用量 = 小计」。
+                      模型可以给一个与单价×用量不符的小计（它可能知道优惠），
+                      那时把它写成等式就是在编一个不成立的算术 —— 分开列。
+                    -->
+                    <span v-if="isProduct(p)" class="pick-qty mono">
+                      × {{ p.quantity }} = ¥{{ fmtPrice(p.subtotal) }}
+                    </span>
+                    <span v-else-if="p.subtotal != null && p.subtotal !== p.price" class="pick-qty mono">
+                      小计 ¥{{ fmtPrice(p.subtotal) }}
+                    </span>
+                    <span class="pick-by" :class="`by-${p.by}`">
+                      {{ BY_LABEL[p.by] || '来源未知' }}
+                    </span>
+                  </p>
+                  <p v-if="p.why" class="pick-why">{{ p.why }}</p>
+                  <p v-else-if="p.quantity_basis" class="pick-why">{{ p.quantity_basis }}</p>
+                </div>
+                <p v-if="d.data.total != null" class="picks-total">
+                  整套合计 <span class="mono">¥{{ fmtPrice(d.data.total) }}</span>
                 </p>
               </div>
-              <p v-if="d.data.pick?.why" class="pick-why">{{ d.data.pick.why }}</p>
+              <div v-else class="pick">
+                <p class="pick-name">（未选出）</p>
+              </div>
+
+              <!-- 整套的取舍逻辑：为什么这么搭配、总账怎么算 -->
+              <p v-if="d.data.why" class="pick-why overall">{{ d.data.why }}</p>
 
               <dl v-if="facts(d).length" class="facts">
                 <template v-for="f in facts(d)" :key="f.k">
@@ -57,10 +88,12 @@
               </dl>
 
               <div v-if="d.data.alternatives?.length" class="blk">
-                <p class="blk-title">备选</p>
+                <p class="blk-title">备选（同品类）</p>
                 <ul class="alts">
-                  <li v-for="a in d.data.alternatives" :key="a.name">
-                    <span class="alts-n">{{ a.name }}</span>
+                  <li v-for="a in d.data.alternatives" :key="a.category + a.name">
+                    <span class="alts-n">
+                      <span v-if="a.category" class="alts-cat">{{ a.category }}</span>{{ a.name }}
+                    </span>
                     <span v-if="a.price != null" class="alts-p mono">¥{{ fmtPrice(a.price) }}</span>
                   </li>
                 </ul>
@@ -69,7 +102,7 @@
               <div v-if="d.data.excluded?.length" class="blk">
                 <p class="blk-title">已排除 {{ d.data.excluded.length }} 件</p>
                 <ul class="outs">
-                  <li v-for="e in d.data.excluded" :key="e.name">
+                  <li v-for="(e, i) in d.data.excluded" :key="i">
                     <span class="outs-n">{{ e.name }}</span>
                     <span class="outs-w">{{ e.reason || '不满足硬约束' }}</span>
                   </li>
@@ -84,32 +117,36 @@
               </div>
             </template>
 
-            <!-- ── 候选对比表：入选与排除同表 ── -->
+            <!-- ── 候选对比表：入选与排除同表，按品类分组 ── -->
             <template v-else-if="d.data.kind === 'compare'">
-              <table class="cmp">
-                <thead>
-                  <tr><th>候选</th><th class="num">价格</th><th>结论</th></tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="r in d.data.rows"
-                    :key="r.name"
-                    :class="{ 'is-picked': r.picked, 'is-out': r.tag === '排除' }"
-                  >
-                    <td class="cmp-n">
-                      {{ r.name }}
-                      <span v-if="r.reason" class="cmp-why">{{ r.reason }}</span>
-                    </td>
-                    <td class="num mono">{{ r.price != null ? '¥' + fmtPrice(r.price) : '—' }}</td>
-                    <td>
-                      <span class="tag" :class="tagClass(r.tag)">{{ r.tag }}</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+              <div v-for="g in groups(d)" :key="g.category" class="cmp-grp">
+                <p v-if="g.category" class="cmp-cat">{{ g.category }}</p>
+                <table class="cmp">
+                  <thead>
+                    <tr><th>候选</th><th class="num">价格</th><th>结论</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="(r, i) in g.rows"
+                      :key="i"
+                      :class="{ 'is-picked': r.picked, 'is-out': r.tag === '排除' }"
+                    >
+                      <td class="cmp-n">
+                        {{ r.name }}
+                        <span v-if="r.reason" class="cmp-why">{{ r.reason }}</span>
+                      </td>
+                      <td class="num mono">{{ r.price != null ? '¥' + fmtPrice(r.price) : '—' }}</td>
+                      <td>
+                        <span class="tag" :class="tagClass(r.tag)">{{ r.tag }}</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
               <p class="cmp-sum">
                 共 {{ d.data.counts?.candidates || 0 }} 个候选，
-                排除 {{ d.data.counts?.excluded || 0 }} 个
+                排除 {{ d.data.counts?.excluded || 0 }} 个<template
+                  v-if="d.data.counts?.picked">，入选 {{ d.data.counts.picked }} 件</template>
               </p>
             </template>
 
@@ -136,8 +173,31 @@
                     <span v-if="d.data.ratio != null">占预算 {{ Math.round(d.data.ratio * 100) }}%</span>
                     <span v-if="d.data.remaining != null">· 结余 ¥{{ fmtPrice(d.data.remaining) }}</span>
                   </p>
+
+                  <!--
+                    按品类拆账 —— 用户想知道「钱花在哪一类上了」。
+                    买一套时这一行就是「整套」的构成，单件时只有一行。
+                  -->
+                  <ul v-if="d.data.items?.length > 1" class="bud-items">
+                    <li v-for="(it, i) in d.data.items" :key="i">
+                      <span class="bud-cat">{{ it.category }}</span>
+                      <span class="bud-iname">{{ it.name }}</span>
+                      <span class="bud-isum mono">
+                        <template v-if="isProduct(it)">
+                          ¥{{ fmtPrice(it.unit_price) }} × {{ it.quantity }} =
+                        </template>
+                        <template v-else-if="it.subtotal == null">小计待估</template>
+                        ¥{{ it.subtotal != null ? fmtPrice(it.subtotal) : '—' }}
+                      </span>
+                    </li>
+                  </ul>
+
                   <p v-if="d.data.quantity" class="bud-basis">
                     用量约 {{ d.data.quantity }} 份<span v-if="d.data.quantity_basis"> · {{ d.data.quantity_basis }}</span>
+                  </p>
+                  <!-- 有任一件缺小计 → 总额是缺的，如实说，不假装算全了 -->
+                  <p v-if="d.data.partial" class="bud-note">
+                    有商品未估出用量，<em>合计未含</em>那一部分 —— 不是最终总额。
                   </p>
                 </div>
               </template>
@@ -287,6 +347,23 @@ const fmtPrice = (v) => {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
 }
 
+/**
+ * 这一项的「单价 × 用量 = 小计」是不是一个**成立的**算式。
+ *
+ * 模型可以给一个与单价×用量不符的小计（它可能知道我们不知道的，比如套装
+ * 优惠）—— 那时把它写成等式就是在编一个不成立的算术。宁可分开列。
+ * 实测一次运行里衣柜单价 ¥691.58、小计 ¥686.23，写等式就是错的。
+ */
+const isProduct = (it) => {
+  // picks 里叫 price，预算明细里叫 unit_price —— 两个字段名都认
+  const u = Number(it?.unit_price ?? it?.price)
+  const q = Number(it?.quantity)
+  const s = Number(it?.subtotal)
+  if (!Number.isFinite(u) || !Number.isFinite(q) || !Number.isFinite(s)) return false
+  if (!(q > 0)) return false
+  return Math.abs(u * q - s) < 0.01
+}
+
 /** 采购方案顶部的事实行：只放真有值的，不铺空占位 */
 const facts = (d) => {
   const x = d.data || {}
@@ -298,17 +375,48 @@ const facts = (d) => {
   return out
 }
 
+/**
+ * 这次买下的商品列表。
+ *
+ * ⚠️ 优先读 `picks`（后端 2026-09-27 起给的是整套）。
+ * 旧的单件形状（`pick`）仍然兼容 —— 历史事件回放里是那个形状。
+ */
+const picks = (d) => {
+  const x = d.data || {}
+  if (x.picks?.length) return x.picks
+  return x.pick ? [x.pick] : []
+}
+
+/**
+ * 对比表的分组。
+ *
+ * ⚠️ 优先读 `groups`（按品类分组）。旧的拍平 `rows` 兜底 ——
+ * 历史事件里没有 groups，不兜底会让旧 run 的表整张空掉。
+ */
+const groups = (d) => {
+  const x = d.data || {}
+  if (x.groups?.length) return x.groups
+  return x.rows?.length ? [{ category: '', rows: x.rows }] : []
+}
+
 /** 收起时的一行摘要 —— 三份都收起也要能扫到各自的结论 */
 const brief = (d) => {
   const x = d.data || {}
   if (x.kind === 'plan') {
-    const p = x.pick || {}
-    const price = p.price != null ? `　¥${fmtPrice(p.price)}` : ''
-    return `${p.name || '未选出'}${price}`
+    const ps = picks(d)
+    if (!ps.length) return '未选出'
+    if (ps.length === 1) {
+      const p = ps[0]
+      return `${p.name}${p.price != null ? `　¥${fmtPrice(p.price)}` : ''}`
+    }
+    // 买一套时，逐个列名字太长 —— 报件数 + 总价才是结论
+    const total = x.total != null ? `　¥${fmtPrice(x.total)}` : ''
+    return `${ps.length} 件：${ps.map((p) => p.category || p.name.slice(0, 6)).join('、')}${total}`
   }
   if (x.kind === 'compare') {
     const c = x.counts || {}
-    return `${c.candidates || 0} 个候选，排除 ${c.excluded || 0} 个`
+    const picked = c.picked ? `，入选 ${c.picked} 件` : ''
+    return `${c.candidates || 0} 个候选，排除 ${c.excluded || 0} 个${picked}`
   }
   if (x.kind === 'budget') {
     // 口径不同，摘要也不同 —— 单价不能伪装成总花费
@@ -461,9 +569,36 @@ const brief = (d) => {
 }
 
 /* ── 采购方案 ── */
+/* 买一套时每件一个小节，用左边框串起来 —— 单件时视觉与从前一致 */
+.picks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
 .pick {
   border-left: 2px solid var(--accent-solid);
   padding-left: 9px;
+}
+/* 品类标签：买一套时先看品类再看商品名 */
+.pick-cat {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  font-weight: 400;
+  vertical-align: 1px;
+}
+/* 整套合计：所有小计的和，比单件更重 */
+.picks-total {
+  margin: 2px 0 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 0.74rem;
+  color: var(--text-strong);
+  text-align: right;
 }
 .pick-name {
   margin: 0;
@@ -475,12 +610,18 @@ const brief = (d) => {
 .pick-line {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 7px;
   margin: 4px 0 0;
 }
 .pick-price {
   font-size: 0.78rem;
   color: var(--accent-700);
+}
+/* 单价 × 用量 = 小计 —— 让「怎么算出来的」一眼可核 */
+.pick-qty {
+  font-size: 0.7rem;
+  color: var(--text-muted);
 }
 /* 来源标记：与左栏执行流同一套语言 */
 .pick-by {
@@ -496,6 +637,11 @@ const brief = (d) => {
   font-size: 0.72rem;
   line-height: 1.6;
   color: var(--text-muted);
+  /* 整套的取舍逻辑：与单件理由区分开，它是更高一层的说明 */
+  &.overall {
+    padding-left: 9px;
+    border-left: 2px solid var(--border-strong);
+  }
 }
 
 .facts {
@@ -535,6 +681,15 @@ const brief = (d) => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.alts-cat {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-sunken);
+  color: var(--text-faint);
+  font-size: 0.62rem;
+}
 .alts-p { margin-left: auto; color: var(--text-faint); }
 
 .outs li {
@@ -564,6 +719,21 @@ const brief = (d) => {
 }
 
 /* ── 候选对比表 ── */
+/* 按品类分组：一组一张表。买一套时 40 行平铺看不出「床这一项比了什么」 */
+.cmp-grp {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  & + .cmp-grp { margin-top: 10px; }
+}
+.cmp-cat {
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-strong);
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border-strong);
+}
 .cmp {
   width: 100%;
   border-collapse: collapse;
@@ -650,6 +820,44 @@ tr.is-picked .cmp-why { color: var(--text-muted); }
   margin: 5px 0 0;
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+/* 按品类拆账 —— 钱花在哪一类上 */
+.bud-items {
+  list-style: none;
+  margin: 7px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.69rem;
+  li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+}
+.bud-cat {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-size: 0.63rem;
+}
+.bud-iname {
+  min-width: 0;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bud-isum {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text);
+  white-space: nowrap;
 }
 /* 用量依据：比正文更弱，是「我怎么算的」 */
 .bud-basis {

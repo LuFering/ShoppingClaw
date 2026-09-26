@@ -44,7 +44,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
@@ -96,6 +96,7 @@ async def search_products(
     keyword: str,
     state: Annotated[dict, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
+    category: Annotated[str, "这一搜属于哪个采购品类，如「床」「沙发」。一次采购要买多个品类时用它分组"] = "",
 ) -> Command:
     """在淘宝搜真实商品，返回商品名与价格。
 
@@ -104,10 +105,18 @@ async def search_products(
 
     Args:
         keyword: 搜索关键词。用**品类词**，不要用「礼物」「推荐」这类词
+        category: 这次搜索属于哪个采购品类（如「床」「沙发」「隔音毡」）。
+            要买多个品类时**务必填** —— 候选对比表按它分组，备选与价格区间
+            也按同品类算。不填则退回用关键词当品类名。
     """
     from src.agents.independent.planning import stages as st
 
     found = await st.search_candidates(_to_stage_state(state), keyword=keyword)
+
+    # 给每件打上品类标记 —— 下游的对比表分组、备选、价格区间都靠它。
+    # 用模型给的 `category`，没给就用关键词兜底（关键词本身就是个粗略品类）。
+    cat = (category or "").strip() or keyword
+    found = [{**c, "_category": cat} for c in found]
 
     if found:
         lines = []
@@ -120,17 +129,26 @@ async def search_products(
 
     # 池子满了就**明说**，让模型先去筛，而不是继续往里堆。
     # ═══════════════════════════════════════════════════════════════════
-    # 2026-09-27：提示词写了「最多 10 件」但没人执行
+    # 2026-09-27：上限改成**按品类**计
     # ═══════════════════════════════════════════════════════════════════
     # 实测模型搜了 7 次、候选池涨到 30 个才去排除 —— 决策图上几十个节点，
     # 界面被淹没。光在 system prompt 里写规矩不够，工具返回时要**当面提醒**，
     # 它才会立刻处理（模型对工具返回的敏感度远高于对提示词的记忆）。
+    #
+    # 买一套家具时池子里有 5 个品类，只报「总共 N 件」没有可操作性 ——
+    # 模型不知道该砍哪一类。所以要按品类分别报，指出**哪一类**超了。
     pool = _dedup_pool((state.get("candidates") or []) + found)
-    if len(pool) > CANDIDATE_CAP:
+    by_cat: dict[str, int] = {}
+    for c in pool:
+        by_cat[st.item_category(c)] = by_cat.get(st.item_category(c), 0) + 1
+    over = {k: v for k, v in by_cat.items() if v > CANDIDATE_CAP}
+    if over:
+        detail = "、".join(f"{k} {v} 件" for k, v in over.items())
         body += (
-            f"\n\n⚠️ 候选池已有 {len(pool)} 件，超过 {CANDIDATE_CAP} 件上限。"
+            f"\n\n⚠️ 候选池超出上限（每类最多 {CANDIDATE_CAP} 件）：{detail}。"
             f"请**先用 `drop_candidates` 排除明显不合适的**（配件类、场景不符、"
-            f"只吸音不隔声的），把池子收到 {CANDIDATE_CAP} 件以内，再继续搜或收敛。"
+            f"档次明显不符的），把超标的品类收到 {CANDIDATE_CAP} 件以内，"
+            f"再继续搜或收敛。"
         )
 
     return Command(update={
@@ -139,9 +157,9 @@ async def search_products(
     })
 
 
-# 候选池上限。与 system prompt 里的说法**必须一致** ——
+# 候选池上限，**按品类**计（不是总数）。与 system prompt 里的说法必须一致 ——
 # 两处写不同的数字，模型会按提示词的来，工具提醒就成了噪音。
-CANDIDATE_CAP = 10
+CANDIDATE_CAP = 5
 
 
 def _dedup_pool(items: list[dict]) -> list[dict]:
@@ -231,89 +249,150 @@ def drop_candidates(
 
 @tool
 def make_decision(
-    picked: Annotated[str, "选中的商品名（必须与候选里的名字完全一致）"],
-    why: Annotated[str, "为什么是它。要指回具体依据：某条硬约束、某个价位、某个风险"],
+    picks: Annotated[list[dict], "要买的商品列表，每项见下"],
+    why: Annotated[str, "整套的取舍逻辑：为什么这么搭配、总账怎么算"],
     state: Annotated[dict, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
-    item_id: Annotated[str, "该商品的 item_id。同名商品有多件时必须给，用来消歧"] = "",
-    quantity: Annotated[float, "估算用量：这件东西要买几份（几卷/几片/几平米）"] = 0,
-    quantity_basis: Annotated[str, "用量怎么估出来的，一句话（如「90㎡户型需做隔音墙面约60㎡，每卷10㎡」）"] = "",
-    total_estimate: Annotated[float, "估算总价（单价 × 用量），单位元"] = 0,
 ) -> Command:
-    """定下最终买哪一件，并说明理由。
+    """定下最终买**哪些**商品，并说明理由。
 
     **这是收敛动作**：调完之后应当准备给用户交代，不要再搜新商品。
-    理由必须指回具体依据，写「性价比高」「品质好」这种放在任何商品上都
-    成立的话算无效。
-
-    ⚠️ 同名商品可能有**多件**（不同店铺/规格，item_id 不同）。只给名字的话
-    系统只能猜一件 —— 实测一次运行里有 4 件同名商品，结果 4 个节点都被标成
-    「已采纳」。有歧义时请带上 `item_id`。
 
     ═══════════════════════════════════════════════════════════════════
-    ⚠️ 必须估算用量：预算是「整件事」的钱，商品是「一件」的价
+    ⚠️ 一次采购可以是「一套」，不是只能「一件」
+    ═══════════════════════════════════════════════════════════════════
+    「搬家买家具」「装修」这类任务要买的是**多个不同品类**（床、沙发、
+    衣柜…），互相不可替代，全部列进 `picks`。
+
+    实测踩过：一次「搬家 / 预算 12000」的运行，模型搜齐 5 个品类、算好
+    整套 ¥11163（占预算 93%），却因为旧签名只收单件，最终只交出一张床
+    —— 预算表显示「占 28%」，和它自己写的理由差了 3 倍。是工具签名在逼
+    模型迁就一个错误的接口，不是模型算错。
+
+    `picks` 每一项的字段：
+
+      picked          商品名，必须与候选里的名字完全一致
+      item_id         该商品的 item_id。同名商品有多件时**必须**给，用来消歧
+      quantity        买几份（件/卷/平米）。整数件通常就是 1
+      quantity_basis  用量怎么估出来的，一句话
+      subtotal        小计 = 单价 × 用量。估不出来就留空，**不要瞎填**
+      why             为什么在**同类里**是它（比的是什么）
+
+    单件采购就传一个元素的列表。
+
+    ═══════════════════════════════════════════════════════════════════
+    ⚠️ 预算是「整件事」的钱，商品是「一件」的价
     ═══════════════════════════════════════════════════════════════════
     用户说「预算 6 万装修」指的是整件事；淘宝返回的是单价。直接拿单价去比
     预算会得出荒唐结论 —— 实测一次 6 万的预算算出「花费 ¥165、占用 0.3%」。
-
-    所以要给 `quantity`（几份）与 `total_estimate`（单价 × 用量）。
-    估不出来就把 `quantity_basis` 写成「无法估算，原因…」，**不要瞎填**。
+    所以每件都要估用量、给小计，**整套小计相加**才是这次采购的花费。
 
     Args:
-        picked: 选中的商品名
-        why: 选它的理由
-        item_id: 该商品的 item_id（同名多件时必填）
-        quantity: 估算用量（几卷/几片/几平米）
-        quantity_basis: 用量依据，一句话
-        total_estimate: 估算总价（元）
+        picks: 要买的商品列表，每项含 picked/item_id/quantity/quantity_basis/subtotal/why
+        why: 整套的取舍逻辑（为什么这么搭配、总账怎么算）
     """
     from src.agents.independent.planning import stages as st
 
     pool = (state.get("candidates") or []) + (state.get("excluded") or [])
-    if item_id:
-        hit = next((c for c in pool if str(c.get("item_id") or "") == item_id), None)
-    else:
-        hit = next((c for c in pool if st.cand_name(c) == picked), None)
 
-    if hit is None:
-        # 名字对不上、或 item_id 不存在 —— 如实回报，别让模型以为定下来了
-        hint = f"（item_id={item_id}）" if item_id else ""
+    items: list[dict] = []
+    missed: list[str] = []
+    for p in (picks or []):
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("picked") or p.get("name") or "").strip()
+        if not name:
+            continue
+        iid = str(p.get("item_id") or "")
+
+        # 同名商品可能有多件（不同店铺/规格，item_id 不同）。只给名字的话
+        # 系统只能猜一件 —— 实测一次运行里 4 件同名商品，结果 4 个节点
+        # 都被标成「已采纳」。有 item_id 就按它精确定位。
+        if iid:
+            hit = next((c for c in pool if str(c.get("item_id") or "") == iid), None)
+        else:
+            hit = next((c for c in pool if st.cand_name(c) == name), None)
+
+        if hit is None:
+            missed.append(name + (f"（item_id={iid}）" if iid else ""))
+            continue
+
+        price = st.cand_yuan(hit)
+        qty = _positive(p.get("quantity"))
+        sub = _positive(p.get("subtotal"))
+        # 小计没给但用量与单价都在 → 自己算。这是算术，不该让模型心算，
+        # 但也不覆盖它明确给的数（它可能知道些我们不知道的，比如套装优惠）。
+        if sub is None and qty is not None and price is not None:
+            sub = round(qty * price, 2)
+
+        items.append({
+            "name": st.cand_name(hit),
+            "item_id": hit.get("item_id"),
+            "price_yuan": price,
+            "quantity": qty,
+            "quantity_basis": str(p.get("quantity_basis") or "").strip(),
+            "subtotal": sub,
+            "why": str(p.get("why") or "").strip(),
+            # ⚠️ 把品类**带过来**：交付物的备选与预算拆账都按品类分组，
+            # 而入选项是从候选里挑出来的 —— 不带上就会全归到「其他」，
+            # 备选列不出来、预算表分不了组（单测实测踩过）。
+            "_category": hit.get("_category") or "",
+        })
+
+    if not items:
+        # 一个都没对上 —— 如实回报，别让模型以为定下来了
         return Command(update={
             "messages": [_note(
-                f"⚠️ 候选里没找到「{picked}」{hint}，请用搜索结果里的原名或 item_id。",
+                "⚠️ 候选里没找到你给的任何商品，请用搜索结果里的原名或 item_id。"
+                + (f"未找到：{missed[:3]}" if missed else ""),
                 tool_call_id,
             )],
         })
 
-    price = st.cand_yuan(hit)
-    # ⚠️ 把**价格与 item_id 一起存进 selected**：
-    #   · 价格 —— 交付物的预算表要算「花了多少」，只存 name/why 会恒显示 ¥0
-    #   · item_id —— 图里靠它精确定位是哪个节点该标「已采纳」；
-    #     只按名字匹配会把同名的其他商品也标上（实测 4 件同名全被标了）
-    #   · 用量与估算总价 —— 预算是「整件事」的钱、商品是「一件」的价，
-    #     只报单价会让 6 万预算显示成「花费 ¥165、占用 0.3%」（实测踩过）
-    est = {
-        "quantity": quantity or None,
-        "quantity_basis": (quantity_basis or "").strip(),
-        "total_estimate": total_estimate or None,
-    }
+    total = sum(i["subtotal"] for i in items if i["subtotal"] is not None)
+    any_sub = any(i["subtotal"] is not None for i in items)
+
+    lines = [f"已定下 {len(items)} 件："]
+    for i in items:
+        seg = f"· {i['name']}"
+        if i["price_yuan"] is not None:
+            seg += f" ¥{i['price_yuan']:g}"
+        if i["quantity"]:
+            seg += f" × {i['quantity']:g}"
+        if i["subtotal"] is not None:
+            seg += f" = ¥{i['subtotal']:g}"
+        lines.append(seg)
+    if any_sub:
+        lines.append(f"整套合计：¥{total:g}")
+    if missed:
+        lines.append(f"⚠️ 这些名字没在候选里找到，未生效：{missed[:3]}")
+
     return Command(update={
-        "selected": {
-            "name": st.cand_name(hit),
+        "plan": {
+            "items": items,
             "why": why,
             "by": "llm",
-            "price_yuan": price,
-            "item_id": hit.get("item_id"),
-            **est,
+            # 总价只在**每一件都有小计**时才算得准。缺任何一件就如实置空，
+            # 不能拿部分和冒充总额（那正是「28% vs 93%」那类错的来源）。
+            "total": round(total, 2) if (any_sub and len(items) == sum(
+                1 for i in items if i["subtotal"] is not None)) else None,
         },
-        "messages": [_note(
-            f"已定：{st.cand_name(hit)}" + (f"（¥{price:g}）" if price is not None else "")
-            + (f"\n用量：{quantity:g} 份" if quantity else "")
-            + (f"\n估算总价：¥{total_estimate:g}" if total_estimate else "")
-            + f"\n理由：{why}",
-            tool_call_id,
-        )],
+        "messages": [_note("\n".join(lines) + f"\n理由：{why}", tool_call_id)],
     })
+
+
+def _positive(v: Any) -> float | None:
+    """宽松取正数：模型可能给 "6" 这种字符串、也可能给 0 表示「没填」。
+
+    取不到或非正返回 None —— 与「真的是 0」区分开。
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
 
 
 @tool
@@ -387,7 +466,7 @@ def _to_stage_state(state: dict) -> dict:
         "subject": state.get("subject") or "",
         "candidates": cands,
         "excluded": excluded,
-        "selected": state.get("selected") or {},
+        "plan": state.get("plan") or {},
         "risks": state.get("risks") or [],
         "dimensions": state.get("dimensions") or [],
         "run_id": state.get("run_id") or "",
