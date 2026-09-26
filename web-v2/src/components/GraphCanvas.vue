@@ -54,6 +54,21 @@ let resizeTimer = null
 let centerTimer = null
 let syncing = false
 let syncPending = false
+/**
+ * 「代」计数器：每次重建 G6 实例自增一次。
+ *
+ * ⚠️ 这是修「多点几次辐射/力导向，图就消失」的关键。
+ * `syncing` 是一把**跨实例**的锁，但 `syncData` 的 `await graph.render()`
+ * 绑在**某一代实例**上。切换布局会 `initGraph()` 重建实例，而上一代那次
+ * `syncData` 还卡在它的 `render()` 里（实测永不返回）—— 锁因此永不释放。
+ * 之后每一代 `syncData` 进来都只把 `syncPending` 置 true 就返回，
+ * 而负责排空它的那个循环已经随旧实例一起死了 → 新实例一次都没渲染过，
+ * 画布上一个 canvas 都不剩，看起来就是「图消失了」（实测 canvasEls 0）。
+ *
+ * 有了代号：旧的那次醒来发现代号变了就自己退出，且**不碰锁**；
+ * `initGraph` 负责把锁重置给新一代。
+ */
+let syncGen = 0
 let renderRetries = 0
 const MAX_RETRIES = 8
 
@@ -211,8 +226,6 @@ const destroyGraph = () => {
   // 重建实例前取消待执行的居中：那个定时器捕获的是**旧实例**，
   // 让它跑完会对着已经销毁的图调 API（静默失败，但会掩盖真正的居中）
   if (centerTimer) { clearTimeout(centerTimer); centerTimer = null }
-  // 同步循环里持有的是旧实例，清掉待办标记避免它在新实例上再跑一轮
-  syncPending = false
   try {
     graph.destroy()
   } catch {
@@ -237,6 +250,11 @@ const initGraph = () => {
   renderRetries = 0
 
   destroyGraph()
+  // ⚠️ 重建实例 = 换一代。上一代可能还卡在 render() 里握着锁，
+  // 必须在这里作废它并把锁交还给新一代（见 syncGen 的说明）。
+  syncGen += 1
+  syncing = false
+  syncPending = false
   graph = new Graph(buildConfig(width, height))
 
   graph.on('node:click', (evt) => {
@@ -444,6 +462,7 @@ const scheduleCenter = (delay = CENTER_DEBOUNCE) => {
  */
 const syncData = async () => {
   if (!graph) return
+  const myGen = syncGen
   if (syncing) {
     // 正在渲染：记下「有新数据」，等它跑完再同步一次（只保留最后一次）
     syncPending = true
@@ -453,10 +472,12 @@ const syncData = async () => {
   try {
     do {
       syncPending = false
-      if (!graph) return          // 循环期间可能被销毁
+      // 循环期间实例可能被销毁，或已被新一代取代 —— 这一代就此作废
+      if (!graph || myGen !== syncGen) return
       graph.setData(toG6Data())
       await graph.render()
-      if (!graph) return
+      // render 期间可能已经切过布局：那时这次的结果属于旧实例，直接作废
+      if (!graph || myGen !== syncGen) return
       // 自适应统一交给 centerOnFocus（自己算缩放 + 居中，可复现）。
       // 不再调 graph.fitView()：它读的是**绘制后**的包围盒，而 render() 里
       // fitView 与 postLayout 是并发的，会拿到尚未布局完的范围，算出离谱的
@@ -465,7 +486,9 @@ const syncData = async () => {
       scheduleCenter(props.layoutOptions?.type === 'radial' ? 160 : 700)
     } while (syncPending)
   } finally {
-    syncing = false
+    // ⚠️ 只有仍是当前代才释放锁。旧代若在这里无条件释放，
+    // 会把新一代刚拿到的锁清掉，导致两个循环并发（正是丢节点的老毛病）。
+    if (myGen === syncGen) syncing = false
   }
   emit('data-rendered', props.graphData)
 }

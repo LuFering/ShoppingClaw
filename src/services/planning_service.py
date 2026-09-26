@@ -974,18 +974,28 @@ async def _sync_graph(run_id: str, acc: dict, state: dict) -> None:
         return bool(sel_names) and st.cand_name(c) in sel_names
 
     # ═══════════════════════════════════════════════════════════════════
-    # 图上每个品类只画前 N 件，其余的**不画但也不丢**
+    # 采购对象 → 品类 → 商品：候选不再直接挂在中心点上
     # ═══════════════════════════════════════════════════════════════════
-    # 决策图是**决策**视图，不是商品目录。实测一次「搬家」搜了 6 个品类、
-    # 96 件候选、排掉 67 件 —— 全画出来是 107 个节点，界面糊成一片，
-    # 用户的原话就是「候选商品这么多吗」。
+    # 用户的原话：「候选节点会有这么多节点，这很不合理…全是点」。
     #
-    # 但**不能直接丢掉**：候选对比表要逐件列出，用户要能核对模型比了什么。
-    # 所以只在**画图**这一层截断，`products` 与交付物仍然拿全量。
+    # 根因是**所有候选都从同一个中心点射出去**。一次采购 6 个品类、几十件
+    # 商品，星形辐射的结果就是中心一圈密密麻麻的点，读不出任何结构 ——
+    # 看不出「这是床那组、那是沙发那组」，也看不出每组收敛到了哪一件。
     #
-    # 排序保证该露的都在前面：入选的 > 有价格的 > 原顺序。这样每个品类的
-    # 最终选择一定看得见，被截掉的都是同类里排在后面的备选。
-    MAX_PER_CAT = 6
+    # 现在加一层**品类节点**：
+    #
+    #     采购对象 ─┬─ 床   ─┬─ 候选…
+    #               ├─ 沙发 ─┼─ 候选…
+    #               └─ 衣柜 ─┴─ ★入选
+    #
+    # 每个品类自己收着自己的候选，星形变成三级树。好处不只是好看：
+    # 品类节点本身就是**归纳**，一眼能看出这次要买几类、每类几件、
+    # 哪一类还没定下来。
+    #
+    # 画布容量也跟着降：原先每个品类留 6 件（共 36 个点），现在 4 件。
+    # 排序保证该露的在前面：入选的 > 有价格的 > 原顺序，所以被截掉的
+    # 一定是同类里排在后面的备选。
+    MAX_PER_CAT = 4
 
     def _rank(c: dict) -> tuple:
         return (0 if _is_selected(c) else 1,
@@ -995,39 +1005,49 @@ async def _sync_graph(run_id: str, acc: dict, state: dict) -> None:
     for c in cands:
         by_cat.setdefault(st.item_category(c), []).append(c)
 
-    shown, hidden = [], 0
+    # 品类节点的 id。⚠️ 用**品类名清洗后**的 slug，不用 hash() ——
+    # Python 字符串 hash 每进程不同（PYTHONHASHSEED 随机），
+    # 重启一次 id 就变，旧节点留在图上删不掉。
+    def _catid(cat: str) -> str:
+        slug = "".join(ch for ch in str(cat) if ch.isalnum())[:16] or "x"
+        return f"cat-{slug}"
+
     for cat, group in by_cat.items():
         ordered = sorted(group, key=_rank)
-        shown.extend(ordered[:MAX_PER_CAT])
-        hidden += max(0, len(ordered) - MAX_PER_CAT)
+        picked_in_cat = [c for c in ordered if _is_selected(c)]
+        # 品类节点带「本类几件 / 已选哪件」—— 它是归纳，本身就该有信息量
+        if picked_in_cat:
+            sub = f"已选 {st.cand_name(picked_in_cat[0])[:12]}"
+        else:
+            sub = f"{len(ordered)} 件候选"
+        nodes.append(_node(_catid(cat), f"{cat}（{len(ordered)}）", "采购品类", 4,
+                           "selected" if picked_in_cat else "candidate",
+                           {"category": cat, "count": len(ordered),
+                            "picked": st.cand_name(picked_in_cat[0]) if picked_in_cat else "",
+                            "sub": sub}))
+        edges.append(_edge("obj-1", _catid(cat), "拆解为"))
 
-    for c in shown:
-        n = st.cand_name(c)
-        iid = str(c.get("item_id") or "")
-        state_key = "selected" if _is_selected(c) else "candidate"
-        why = why_by_id.get(iid) or why_by_name.get(n) or ""
-        nodes.append(_node(_cid(c), n[:40], "候选商品", 3, state_key,
-                           {"price": st.yuan(c.get("price")), "item_id": c.get("item_id"),
-                            # 图里点开节点要能看到选它的理由
-                            "why": why if state_key == "selected" else "",
-                            "category": st.item_category(c)}))
-        edges.append(_edge("obj-1", _cid(c), "候选"))
+        for c in ordered[:MAX_PER_CAT]:
+            n = st.cand_name(c)
+            iid = str(c.get("item_id") or "")
+            state_key = "selected" if _is_selected(c) else "candidate"
+            why = why_by_id.get(iid) or why_by_name.get(n) or ""
+            nodes.append(_node(_cid(c), n[:40], "候选商品", 3, state_key,
+                               {"price": st.yuan(c.get("price")), "item_id": c.get("item_id"),
+                                # 图里点开节点要能看到选它的理由
+                                "why": why if state_key == "selected" else "",
+                                "category": cat}))
+            edges.append(_edge(_catid(cat), _cid(c), "候选"))
 
-    # 每个品类画一条「还有 N 件」的汇总节点 —— 截断必须**看得见**。
-    # 悄悄少画几件，用户会以为搜索只返回了这些（那是在骗人）；
-    # 明说「这一类还有 8 件没画」，他才知道图是摘要、去哪看全量。
-    #
-    # ⚠️ id 用**品类名本身**（清洗后）而不是 `hash(cat)`：Python 的字符串
-    # hash 每个进程都不同（PYTHONHASHSEED 随机），重启一次 id 就变，
-    # 旧节点留在图上删不掉。
-    for cat, group in by_cat.items():
-        extra = len(group) - MAX_PER_CAT
+        # 截断必须**看得见**：悄悄少画几件，用户会以为搜索只返回了这些
+        # （那是在骗人）；明说「还有 N 件没画」，他才知道图是摘要、
+        # 全量在候选对比表里。
+        extra = len(ordered) - MAX_PER_CAT
         if extra > 0:
-            slug = "".join(ch for ch in cat if ch.isalnum())[:16] or "x"
-            hid = f"more-{slug}"
-            nodes.append(_node(hid, f"{cat}还有 {extra} 件", "候选商品", 1, "candidate",
+            hid = f"more-{_catid(cat)[4:]}"
+            nodes.append(_node(hid, f"还有 {extra} 件", "候选商品", 1, "candidate",
                                {"category": cat, "collapsed": extra}))
-            edges.append(_edge("obj-1", hid, "候选"))
+            edges.append(_edge(_catid(cat), hid, "候选"))
 
     # 排除的同样只画前几件：全画出来又是一面墙。理由已在对比表里逐条列出。
     for e in excluded[:MAX_PER_CAT * 2]:
@@ -1058,7 +1078,7 @@ async def _sync_graph(run_id: str, acc: dict, state: dict) -> None:
     # 不在其中的旧商品节点。前缀要包含 `more-`（品类的「还有 N 件」汇总
     # 节点）—— 那个数字随搜索变化，旧的要跟着走。
     # 只清商品类 —— 需求/依据/风险这些是按位置编号的，删了会连累其它节点。
-    await _merge_graph(run_id, nodes, edges, prune_prefixes=("cand-", "more-"))
+    await _merge_graph(run_id, nodes, edges, prune_prefixes=("cand-", "more-", "cat-"))
 
 
 async def _emit_think_delta(run_id: str, text: str, kind: str = "content") -> None:
