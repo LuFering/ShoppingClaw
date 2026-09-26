@@ -69,6 +69,13 @@
                  必须显示 —— 否则降级输出和模型判断长得一样，用户无从分辨。 -->
             <span v-if="item.by" class="es-by" :class="'by-' + item.by">{{ BY_LABEL[item.by] || item.by }}</span>
 
+            <!--
+              合并行：连续同类调用的「×N」角标。
+              它是这一行最重要的信息 —— 一眼看出「这一步做了 5 次」，
+              而不是让 5 行一模一样的「搜索…」把列表撑满。
+            -->
+            <span v-if="item.grouped?.length" class="es-mul mono">×{{ item.grouped.length }}</span>
+
             <span v-if="item.title" class="es-text">{{ item.title }}</span>
 
             <!-- 流式期间：显示正在生长的文字（截尾，避免撑开行高） -->
@@ -91,6 +98,21 @@
 
           <!-- 展开的细节 -->
           <div v-if="isOpen(item)" class="es-detail">
+            <!--
+              合并行展开：把合并掉的每一次调用逐条列出。
+              合并只是**收起**，不是丢弃 —— 想看「它到底搜了哪几个词」
+              点开就有，这才是「简略但不失信息」。
+            -->
+            <template v-if="item.grouped?.length">
+              <p class="es-detail-k">这一步的 {{ item.grouped.length }} 次</p>
+              <ul class="es-samples">
+                <li v-for="(g, k) in item.grouped" :key="k">
+                  <span class="es-sample-n">{{ g.title || g.name }}</span>
+                  <span v-if="briefOf(g)" class="es-sample-p mono">{{ briefOf(g) }}</span>
+                </li>
+              </ul>
+            </template>
+
             <!-- 推理原文：模型逐段吐出来的，不是我们拼的一句话 -->
             <p v-if="item.detail && item.kind === 'think'" class="es-detail-think">{{ item.detail }}</p>
 
@@ -183,7 +205,68 @@ const isReasoning = (item) => item.kind === 'think' && item.thinkKind === 'reaso
 /** 模型叙述行数 —— 为 0 时不显示「只看核心」按钮（没什么可藏的） */
 const reasonCount = computed(() => props.items.filter((x) => x.kind === 'think').length)
 
-const hideReasoning = ref(false)
+/**
+ * 默认**只看核心**。
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * 2026-09-27：默认值从 false 改成 true
+ * ═══════════════════════════════════════════════════════════════════
+ * 用户第三次提这件事：「左边执行流还是内容太密集了，简化到显示模型做了
+ * 什么、正在做什么、得到的简要结果就行」。
+ *
+ * 前两次我只是把行**压扁**（一屏一行、细节按需展开），但没有改**默认
+ * 显示什么** —— 默认仍然是全量，一次运行 32 行里二十几行是模型的思考与
+ * 叙述。用户要的是「它做了什么」，那是工具调用。所以默认就该是核心视图，
+ * 想看模型的推理过程再点开。
+ */
+const hideReasoning = ref(true)
+
+/**
+ * 连续同类调用合并成一行。
+ *
+ * 「搜索 X」出现 8 次就是 8 行几乎一样的字 —— 这是密集感的第二大来源
+ *（第一大是模型叙述，已默认折起）。合并成「搜索  ×8」一行，点开看
+ * 每一次搜的是什么。
+ *
+ * ⚠️ 只合并**连续**的同类调用，且**必须有标题**：
+ *   · 不连续不能合 —— 中间夹着别的步骤，合了会打乱时序
+ *     （「搜 → 排除 → 搜」变成一个「搜 ×2」是错的，排除确实发生在两次搜索之间）
+ *   · 正在跑的那条不合并 —— 它要单独显示实时秒数与流式文字
+ *   · 阶段行（phase）不合并 —— 它是分段的锚点，合了就没有节奏了
+ * 合并后的行**保留最后一次调用**作为代表，并挂上 `grouped` 供展开。
+ */
+const GROUPABLE = new Set(['call', 'retrieve'])
+
+const groupedItems = computed(() => {
+  const src = props.items
+  const out = []
+  for (const it of src) {
+    const prev = out[out.length - 1]
+    const canMerge =
+      prev &&
+      GROUPABLE.has(it.kind) &&
+      prev.kind === it.kind &&
+      it.state !== 'running' &&
+      prev.state !== 'running' &&
+      !prev.streaming &&
+      it.title && prev.title
+    if (canMerge) {
+      // 代表行沿用上一条，但把这一条并进去
+      out[out.length - 1] = {
+        ...prev,
+        grouped: [...(prev.grouped || [prev]), it],
+        // 结果取最新一次的，耗时是这一组的总和
+        result: it.result || prev.result,
+        sample: it.sample?.length ? it.sample : prev.sample,
+        ms: (prev.ms || 0) + (it.ms || 0) || prev.ms,
+        by: it.by || prev.by,
+      }
+    } else {
+      out.push(it)
+    }
+  }
+  return out
+})
 
 /**
  * 实际渲染的行。
@@ -198,11 +281,18 @@ const hideReasoning = ref(false)
  * 但**正在流式输出的那条要留**：否则点了之后界面完全静止，
  * 用户会以为卡住了。
  */
-const visibleItems = computed(() =>
-  hideReasoning.value
-    ? props.items.filter((x) => x.kind !== 'think' || x.streaming)
-    : props.items
-)
+const visibleItems = computed(() => {
+  // 空行先剔掉：模型每一轮思考会先起一条流式行，若下一步没跟上收尾
+  // （run 结束、或事件被节流），它会永远停在 streaming 状态 —— 于是
+  // 绕过下面的过滤，在「只看核心」里留下一排没有文字的空「思考」行。
+  // 实测一次运行有 4~5 条这样的空行。
+  const rows = groupedItems.value.filter(
+    (x) => !(x.kind === 'think' && !String(x.detail || '').trim() && !x.streaming)
+  )
+  return hideReasoning.value
+    ? rows.filter((x) => x.kind !== 'think' || (x.streaming && String(x.detail || '').trim()))
+    : rows
+})
 
 /**
  * 展开的行。
@@ -523,6 +613,17 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   flex: 0 1 auto;
 }
+/* 合并角标：连续同类调用的次数。比类型标签更醒目 —— 它是这行的量词 */
+.es-mul {
+  flex: 0 0 auto;
+  font-size: 0.64rem;
+  font-weight: 600;
+  color: var(--accent-700);
+  background: var(--accent-50);
+  padding: 0 5px;
+  border-radius: 3px;
+}
+
 /* 一句话结果：比标题弱，但仍然是一行 */
 .es-brief {
   flex: 0 1 auto;

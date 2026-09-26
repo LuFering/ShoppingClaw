@@ -34,8 +34,16 @@
         <template v-else-if="d.state === 'ready' && d.data">
           <p v-if="openId !== d.id" class="dc-brief">{{ brief(d) }}</p>
           <div v-show="openId === d.id" class="dc-body">
+            <!--
+              ── 采购规划报告：交付物的主件 ──
+              它**不是**三张表拼起来，而是按读者的顺序重新组织的一份文档：
+              摘要 → 关键数字 → 预算构成图 → 整体取舍 → 逐品类依据 → 风险。
+              渲染在 ReportCard.vue（含 echarts 饼图）。
+            -->
+            <ReportCard v-if="d.data.kind === 'report'" :d="d.data" />
+
             <!-- ── 采购方案：买哪件 + 为什么 + 排除原因 ── -->
-            <template v-if="d.data.kind === 'plan'">
+            <template v-else-if="d.data.kind === 'plan'">
               <!--
                 ⚠️ 2026-09-27：从「一件」改成「一套」。
                 原先只渲染 d.data.pick 一件，因为后端 make_decision 只收单件。
@@ -228,6 +236,17 @@
 
           <div v-show="openId === d.id" class="dc-actions">
             <button class="dp-btn" type="button" @click="$emit('download', d)">下载 Markdown</button>
+            <!-- 只有报告有排版好的 PDF（后端 d.pdf 标记），点之前就知道有没有 -->
+            <button
+              v-if="d.pdf"
+              class="dp-btn is-pdf"
+              type="button"
+              :disabled="d.pdfBusy"
+              @click="$emit('download-pdf', d)"
+            >
+              <FileDown :size="12" />
+              {{ d.pdfBusy ? '导出中…' : '导出 PDF' }}
+            </button>
           </div>
         </template>
 
@@ -282,14 +301,15 @@
  * 默认展开第一份：交付物是这一栏的主角，藏起来要多点一次才看得到。
  */
 import { ref, computed, watch } from 'vue'
-import { ChevronDown } from 'lucide-vue-next'
+import { ChevronDown, FileDown } from 'lucide-vue-next'
+import ReportCard from './ReportCard.vue'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
   question: { type: Object, default: null }
 })
 
-defineEmits(['download', 'answer'])
+defineEmits(['download', 'download-pdf', 'answer'])
 
 const BY_LABEL = {
   llm: '模型判断',
@@ -301,18 +321,19 @@ const openId = ref('')
 // 用户手动点过之后就不再自动切换 —— 否则每次数据更新都会把他正在看的那份顶掉
 const userToggled = ref(false)
 
-// 首屏/刷新后自动展开**采购方案**（d-plan）—— 它是结论本身，
-// 另外两份是支撑材料。
+// 首屏/刷新后自动展开**采购规划报告**（d-report）—— 它是交付物的主件，
+// 另外三份是明细附件。
 //
 // ⚠️ 不能只「取第一份 ready」：刷新时三份是并发取回的（Promise.all），
 // 谁先 resolve 不确定，实测会停在预算分配表上，等于把最该先看的藏起来了。
-// 所以在用户动手之前，一直朝 d-plan 收敛。
+// 所以在用户动手之前，一直朝 d-report 收敛。
 watch(
   () => props.items,
   (list) => {
     if (userToggled.value) return
-    const plan = list.find((d) => d.id === 'd-plan' && d.state === 'ready')
-    if (plan) { openId.value = plan.id; return }
+    // 默认展开**报告**（它是主件），不是采购方案 —— 后者现在是明细附件
+    const first = list.find((d) => d.id === 'd-report' && d.state === 'ready')
+    if (first) { openId.value = first.id; return }
     // 方案还没好，先展开任何一份已生成的，别让右栏空着
     const any = list.find((d) => d.state === 'ready')
     if (any && !openId.value) openId.value = any.id
@@ -402,6 +423,15 @@ const groups = (d) => {
 /** 收起时的一行摘要 —— 三份都收起也要能扫到各自的结论 */
 const brief = (d) => {
   const x = d.data || {}
+  if (x.kind === 'report') {
+    // 报告的一行摘要：结论本身就是摘要的第一句
+    const h = x.headline || {}
+    const parts = []
+    if (h.categories) parts.push(`${h.categories} 个品类`)
+    if (h.total != null) parts.push(`¥${fmtPrice(h.total)}`)
+    if (h.ratio != null) parts.push(`占 ${Math.round(h.ratio * 100)}%`)
+    return parts.join(' · ') || (x.summary || '').slice(0, 40)
+  }
   if (x.kind === 'plan') {
     const ps = picks(d)
     if (!ps.length) return '未选出'
@@ -537,6 +567,19 @@ const brief = (d) => {
 }
 .dc-actions {
   padding: 9px 10px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* PDF 是「正式文件」，比 Markdown 更重 —— 给它一点点强调但不抢主按钮 */
+.dp-btn.is-pdf {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-color: var(--accent-200);
+  color: var(--accent-700);
+  &:hover:not(:disabled) { border-color: var(--accent-500); }
+  &:disabled { opacity: 0.6; cursor: default; }
 }
 .dc-empty {
   margin: 8px 0 0;

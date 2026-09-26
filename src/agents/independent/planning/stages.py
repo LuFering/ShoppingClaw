@@ -869,6 +869,8 @@ def build_budget_doc(state: dict) -> dict:
         "items": by_cat,
         "range": {"min": min(prices), "max": max(prices)} if prices else None,
         "partial": bool(items) and spent is None and any_qty,
+        # 图表数据：前端画饼图，PDF 也用它（见 _budget_chart 的说明）
+        "chart": _budget_chart(items, spent, budget),
     }
 
 
@@ -883,7 +885,150 @@ def _num(v: Any) -> float | None:
     return f if f > 0 else None
 
 
+def build_report_doc(state: dict) -> dict:
+    """**采购规划报告** —— 一份能直接交出去的完整文档，不是一张表。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：为什么要有它
+    ═══════════════════════════════════════════════════════════════════
+    用户原话：「这个交付方式还是太简陋了…要么生成一个详细的采购规划报告
+    而非这种非常敷衍不专业的几张表」。
+
+    他说得对。原先三份「交付物」各自都只是一张表或一份清单，读者要自己在
+    脑子里把三份拼起来 —— 而真实的采购规划交付物应该是一份**读完就能照着
+    下单**的文档：先讲清楚这次要解决什么、约束是什么，再逐项给出推荐与
+    理由，然后才是价格与预算，最后是风险与待办。
+
+    这份报告**不是把三张表拼在一起**，而是按读者的顺序重新组织：
+    结论在前、依据在后；每个数字都带出处；被排除的也写清楚为什么
+    （否则用户不知道「为什么不是那个更便宜的」）。
+
+    ⚠️ 内容全部来自**已有的结构化数据**（模型给的 why / 用量依据 /
+    排除理由），不在这里另调一次模型 —— 那会让同一份 run 每次打开
+    都得出不同的报告，用户没法核对。模型该说的它已经说过了。
+    """
+    items = plan_items(state)
+    cands = state.get("candidates") or []
+    excluded = effective_excluded(state)
+    budget = _budget_yuan(state.get("budget"))
+    total = plan_total(state)
+
+    # ── 1. 摘要：整份报告最先被读到的三行 ──
+    scene = state.get("scene") or state.get("subject") or "本次采购"
+    if total is not None and budget:
+        ratio = total / budget
+        summary = (f"本次为「{scene}」规划了 {len(items)} 个品类的采购，"
+                   f"估算总额 ¥{total:g}，占预算 ¥{budget:g} 的 {ratio * 100:.0f}%"
+                   + (f"，结余 ¥{budget - total:g}。" if budget > total else "。"))
+    elif total is not None:
+        summary = f"本次为「{scene}」规划了 {len(items)} 个品类的采购，估算总额 ¥{total:g}。"
+    elif items:
+        summary = (f"本次为「{scene}」选出 {len(items)} 件商品，"
+                   f"但**用量未能估出**，因此没有总额 —— 见下方各自说明。")
+    else:
+        summary = f"本次「{scene}」未选出合适的商品。"
+
+    # 每个品类一段。这一段是报告的主体 —— 要能照着它下单。
+    sections: list[dict] = []
+    for i in items:
+        cat = item_category(i)
+        price = _num(i.get("price_yuan"))
+        qty = _num(i.get("quantity"))
+        sub = _num(i.get("subtotal"))
+        # 同品类的备选：让读者知道「还有别的选择、为什么没选它」
+        alts = [
+            {"name": cand_name(c), "price": cand_yuan(c)}
+            for c in cands
+            if item_category(c) == cat and cand_name(c) != str(i.get("name") or "")
+        ][:3]
+        # 同品类被排除的：解释「为什么不是那个更便宜的」
+        outs = [
+            {"name": cand_name(c), "price": cand_yuan(c),
+             "reason": str(c.get("_reason") or "")}
+            for c in excluded if item_category(c) == cat
+        ][:4]
+        sections.append({
+            "category": cat,
+            "name": str(i.get("name") or ""),
+            "price": price,
+            "quantity": qty,
+            "quantity_basis": str(i.get("quantity_basis") or ""),
+            "subtotal": sub,
+            "why": str(i.get("why") or ""),
+            "alternatives": alts,
+            "excluded": outs,
+        })
+
+    return {
+        "kind": "report",
+        "title": f"{scene} · 采购规划报告",
+        "subject": state.get("subject") or scene,
+        "scene": state.get("scene") or "",
+        "budget": state.get("budget") or "",
+        "duration": state.get("duration") or "",
+        "constraints": [str(c) for c in (state.get("constraints") or [])],
+        "summary": summary,
+        # 报告开头的一组关键数字
+        "headline": {
+            "categories": len(items),
+            "total": total,
+            "budget": budget,
+            "remaining": (budget - total) if (total is not None and budget) else None,
+            "ratio": (total / budget) if (total is not None and budget and budget > 0) else None,
+            "candidates": len(cands),
+            "excluded": len(excluded),
+        },
+        "thesis": plan_why(state),
+        "sections": sections,
+        "chart": _budget_chart(items, total, budget),
+        "risks": [str(r) for r in (state.get("risks") or [])],
+        "dimensions": [str(d) for d in (state.get("dimensions") or [])],
+        "generated_note": (
+            "本报告由采购规划智能体推演生成。商品与价格为淘宝实时返回的真实数据；"
+            "用量为依据场景常识的**估算**，下单前请自行核对。"
+        ),
+    }
+
+
+def _budget_chart(items: list[dict], total: float | None, budget: float | None) -> dict:
+    """预算分配的图表数据（前端用 echarts 画，PDF 里自己画）。
+
+    ⚠️ 只给**数据**，不在这里生成图片。两个原因：
+      · 前端已经有 echarts，能画交互式图表（hover 看数值），比静态图好；
+      · 后端画图要么多一个依赖，要么手搓 SVG —— 没必要。
+
+    没有小计的品类**不进饼图**（用 0 会画出误导性的扇区），
+    但在 `missing` 里列出来，让调用方如实说明「这几类没算进去」。
+    """
+    parts, missing = [], []
+    for i in items:
+        sub = _num(i.get("subtotal"))
+        if sub is None:
+            missing.append(item_category(i))
+            continue
+        parts.append({"name": item_category(i), "value": round(sub, 2)})
+
+    return {
+        "type": "pie",
+        "unit": "元",
+        "series": parts,
+        "total": total,
+        "budget": budget,
+        # 结余单独一项 —— 不放进饼图，否则「没花的钱」看起来像花掉了
+        "remaining": (round(budget - total, 2)
+                      if (total is not None and budget and budget > total) else None),
+        "missing": missing,
+    }
+
+
+def budget_chart(state: dict) -> dict:
+    """给预算表的图表数据（与报告里的同一个）。"""
+    return _budget_chart(plan_items(state), plan_total(state),
+                         _budget_yuan(state.get("budget")))
+
+
 DELIVERABLE_BUILDERS = {
+    "d-report": build_report_doc,
     "d-plan": build_plan_doc,
     "d-compare": build_compare_doc,
     "d-budget": build_budget_doc,
@@ -901,7 +1046,83 @@ def deliverable_markdown(doc: dict, name: str) -> str:
     kind = doc.get("kind")
     L: list[str] = [f"# {name}", ""]
 
-    if kind == "plan":
+    if kind == "report":
+        # 报告不是「三张表拼起来」，而是按读者的顺序重新组织：
+        # 结论在前、依据在后；每个数字都带出处；排除的也写清为什么。
+        h = doc.get("headline") or {}
+        L += [f"> {doc.get('summary') or ''}", ""]
+        L += [
+            f"- 采购对象：{doc.get('subject') or '—'}",
+            f"- 场景：{doc.get('scene') or '—'}",
+            f"- 预算：{doc.get('budget') or '—'}",
+            f"- 周期：{doc.get('duration') or '—'}",
+        ]
+        if doc.get("constraints"):
+            L.append(f"- 硬约束：{'、'.join(doc['constraints'])}")
+        L += [
+            "",
+            f"- 入选品类：{h.get('categories', 0)} 个",
+            f"- 浏览候选：{h.get('candidates', 0)} 件（排除 {h.get('excluded', 0)} 件）",
+        ]
+        if h.get("total") is not None:
+            L.append(f"- 估算总额：¥{h['total']:g}")
+        if h.get("ratio") is not None:
+            L.append(f"- 预算占用：{h['ratio'] * 100:.0f}%"
+                     + (f"，结余 ¥{h['remaining']:g}" if h.get("remaining") is not None else ""))
+
+        if doc.get("thesis"):
+            L += ["", "## 整体取舍", "", str(doc["thesis"])]
+
+        # 图表数据渲染成一张 markdown 表 —— 下载的文件里也要看得见构成
+        ch = doc.get("chart") or {}
+        if ch.get("series"):
+            L += ["", "## 预算构成", "", "| 品类 | 金额 | 占比 |", "|---|---:|---:|"]
+            tot = ch.get("total") or sum(x["value"] for x in ch["series"])
+            for x in ch["series"]:
+                pct = f"{x['value'] / tot * 100:.0f}%" if tot else "—"
+                L.append(f"| {x['name']} | ¥{x['value']:g} | {pct} |")
+            L.append(f"| **合计** | **¥{tot:g}** | 100% |")
+            if ch.get("remaining"):
+                L.append(f"| 未动用 | ¥{ch['remaining']:g} | — |")
+            if ch.get("missing"):
+                L.append("")
+                L.append(f"> ⚠️ {'、'.join(ch['missing'])} 未估出用量，未计入上表。")
+
+        idx = 0
+        for sec in doc.get("sections") or []:
+            idx += 1
+            cat = sec.get("category") or f"第 {idx} 项"
+            L += ["", f"## {idx}. {cat}", "", f"**推荐：{sec.get('name') or '—'}**", ""]
+            if sec.get("price") is not None:
+                line = f"- 单价：¥{sec['price']:g}"
+                if sec.get("quantity"):
+                    line += f" × {sec['quantity']:g}"
+                    if sec.get("subtotal") is not None:
+                        line += f" = ¥{sec['subtotal']:g}"
+                L.append(line)
+            if sec.get("quantity_basis"):
+                L.append(f"- 用量依据：{sec['quantity_basis']}")
+            if sec.get("why"):
+                L += ["", f"{sec['why']}"]
+            if sec.get("alternatives"):
+                L += ["", "同品类其他候选："]
+                for a in sec["alternatives"]:
+                    pr = f"　¥{a['price']:g}" if a.get("price") else ""
+                    L.append(f"- {a['name']}{pr}")
+            if sec.get("excluded"):
+                L += ["", "已排除："]
+                for e in sec["excluded"]:
+                    pr = f"　¥{e['price']:g}" if e.get("price") else ""
+                    L.append(f"- {e['name']}{pr} —— {e.get('reason') or '不满足硬约束'}")
+
+        if doc.get("risks"):
+            L += ["", "## 风险与待确认", ""]
+            L += [f"- {r}" for r in doc["risks"]]
+        if doc.get("dimensions"):
+            L += ["", "## 评估维度", "", "、".join(doc["dimensions"])]
+        L += ["", "---", "", doc.get("generated_note") or ""]
+
+    elif kind == "plan":
         L += [
             f"- 采购对象：{doc.get('subject') or '—'}",
             f"- 场景：{doc.get('scene') or '—'}",

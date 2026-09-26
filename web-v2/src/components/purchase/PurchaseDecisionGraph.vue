@@ -164,6 +164,24 @@ const resolveNode = (node) => {
   }
 }
 
+/**
+ * 哪些关系词**不显示**在线上的。
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * 2026-09-27：几十条边共用一个词 = 纯噪音
+ * ═══════════════════════════════════════════════════════════════════
+ * 「采购对象 → 品类」全是「拆解为」，「品类 → 每个候选」全是「候选」，
+ * 「核心任务 → 每条依据」全是「依据」。一次运行几十条这样的边，标签
+ * 全挤在线上糊成一团 —— 用户截图里「很多线重叠」的观感有一半来自它们。
+ *
+ * 这些词**不承载信息**：看到一条线连着品类和商品，本来就知道那是候选。
+ * 真正要读的是**少见的关系**（替代 / 依赖 / 排除 —— 它们表达取舍）。
+ *
+ * ⚠️ 判据是「这个词是不是高频套话」，不是「线多不多」—— 用数量阈值
+ * 会在 4 个品类与 12 个品类的 run 上表现不一致。
+ */
+const NOISY_EDGE_LABELS = new Set(['候选', '依据', '需要', '拆解为', '存在', '满足', '约束'])
+
 /** 关系视觉：线型表达确定与否，颜色随关系类型 */
 const resolveEdge = (edge) => {
   const style = RELATION_STYLE[edge.type] || RELATION_STYLE['依据']
@@ -176,7 +194,11 @@ const resolveEdge = (edge) => {
   return {
     stroke: style.color,
     lineDash: style.dash ? [4, 3] : undefined,
-    opacity: dim ? 0.32 : 0.8,
+    // 指向淘汰节点的边再压一档 —— 它们是背景，不该抢视线
+    opacity: dim ? 0.26 : (to?.state === 'pruned' ? 0.42 : 0.78),
+    // 高频套话不显示。返回空串是**明确要求不显示**，
+    // GraphCanvas 用 `!== undefined` 判断，不会回退到默认标签。
+    labelText: NOISY_EDGE_LABELS.has(edge.type) ? '' : undefined,
     labelFill: dim ? themeColor('--text-faint') : themeColor('--text-muted')
   }
 }

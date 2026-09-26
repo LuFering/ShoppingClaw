@@ -93,6 +93,41 @@ export const planningApi = {
   },
 
   /**
+   * 交付物的 PDF 字节流 → 触发浏览器下载。
+   *
+   * 不走 `apiGet`：那个封装会 `res.json()`，而 PDF 是二进制。这里直接
+   * fetch 拿 blob。
+   *
+   * ⚠️ 不能把 token 拼进 URL（`?token=`）：那样 token 会进浏览器历史、
+   * nginx 日志、Referer —— 后端也不认这种传法，会 401。
+   */
+  async downloadPdf(runId, did, filename) {
+    let headers = {}
+    try {
+      const { useUserStore } = await import('@/stores/user')
+      headers = useUserStore().getAuthHeaders()
+    } catch { /* 未登录则由后端 401 */ }
+
+    const resp = await fetch(
+      `/api/planning/runs/${encodeURIComponent(runId)}/deliverables/${encodeURIComponent(did)}/pdf`,
+      { headers }
+    )
+    if (!resp.ok) throw new Error(`导出失败（HTTP ${resp.status}）`)
+
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || '采购规划报告.pdf'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    // 交给浏览器读完再释放，立即 revoke 在部分浏览器上会导致下载失败
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    return true
+  },
+
+  /**
    * 订阅事件流。
    *
    * 不用 EventSource：它无法携带 Authorization 头，而该端点要求登录。

@@ -24,7 +24,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from server.utils.auth_middleware import get_required_user
 from server.utils.user_store import User
@@ -152,3 +152,37 @@ async def get_deliverable(
     if d is None:
         raise HTTPException(status_code=404, detail="交付物不存在")
     return {"success": True, "data": d}
+
+
+@router.get("/runs/{run_id}/deliverables/{did}/pdf")
+async def download_deliverable_pdf(
+    run_id: str,
+    did: str,
+    current_user: User = Depends(get_required_user),
+):
+    """交付物导出 PDF —— 报告类交付物的「正式文件」形态。
+
+    ⚠️ 文件名用 RFC 5987 的 `filename*=UTF-8''…` 传中文：
+    只给 `filename=` 的话，HTTP 头按 latin-1 编码，中文会变成乱码
+    （浏览器里就是一堆问号）。前端用 <a download> 时同理。
+    """
+    from urllib.parse import quote
+
+    pdf = await planning_service.get_deliverable_pdf(run_id, _uid(current_user), did)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="这份交付物没有 PDF")
+
+    # 取交付物名字拼文件名（取不到就退回 id）
+    d = await planning_service.get_deliverable(run_id, _uid(current_user), did)
+    base = (d or {}).get("name") or did
+    fname = f"{base}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{did}.pdf"; '
+                f"filename*=UTF-8''{quote(fname)}"
+            ),
+        },
+    )

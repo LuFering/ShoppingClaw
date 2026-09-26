@@ -71,6 +71,11 @@ RUNNING_HINT = {
 
 # 交付物清单：收敛后逐个产出。state: waiting → running → ready
 DELIVERABLE_SPEC = (
+    # ⚠️ 2026-09-27：报告排第一 —— 它才是「交付物」该有的样子。
+    # 原先三份各是一张表，读者要自己在脑子里把它们拼起来。用户的原话是
+    # 「这个交付方式还是太简陋了…要么生成一个详细的采购规划报告而非这种
+    # 非常敷衍不专业的几张表」。三张表保留为**附件/明细**，报告是主件。
+    ("d-report", "采购规划报告", "完整方案：结论、依据、预算与风险"),
     ("d-plan", "采购方案.md", "含清单、顺序与依赖"),
     ("d-compare", "候选对比表", "按硬约束逐项横比"),
     ("d-budget", "预算分配表", "按类别拆分预算"),
@@ -842,7 +847,10 @@ async def _finish(run_id: str, user_id: str) -> None:
                 doc = None
             await emit(run_id, "deliverable",
                        {"id": did, "name": name, "meta": meta,
-                        "state": "ready" if doc else "empty", "data": doc})
+                        "state": "ready" if doc else "empty", "data": doc,
+                        # 前端据此决定要不要显示「导出 PDF」——
+                        # 不带的话按钮永远不出现（见 get_deliverable 的 pdf 字段）
+                        "pdf": bool(doc and doc.get("kind") == "report")})
 
         await _patch_run(run_id, status="converged")
         await emit(run_id, "done", {"status": "converged"})
@@ -1228,5 +1236,33 @@ async def get_deliverable(run_id: str, user_id: str, did: str) -> dict | None:
         "meta": meta,
         "data": doc,
         "content": st.deliverable_markdown(doc, name) if doc else "",
+        # 这份能不能导出 PDF —— 只有报告有排版好的 PDF（见 pdf_export 的说明）。
+        # 前端据此决定要不要显示「下载 PDF」按钮，而不是点了才发现不支持。
+        "pdf": bool(doc and doc.get("kind") == "report"),
         "generated_at": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M"),
     }
+
+
+async def get_deliverable_pdf(run_id: str, user_id: str, did: str) -> bytes | None:
+    """把交付物导出成 PDF 字节。不支持的类型返回 None（由路由层 404）。
+
+    只做排版，不重算业务数字 —— 数据来自 `get_deliverable` 的同一套 builder，
+    两者不会漂（见 pdf_export 的说明）。
+    """
+    run = await get_run(run_id, user_id)
+    if run is None:
+        return None
+
+    state = _state_from_run(run)
+    try:
+        doc = st.build_deliverable(state, did)
+    except Exception as e:
+        logger.warning(f"[planning] PDF 生成前置失败 {did}: {e}")
+        return None
+
+    try:
+        from src.agents.independent.planning.pdf_export import build_report_pdf
+        return build_report_pdf(doc)
+    except Exception as e:
+        logger.error(f"[planning] PDF 导出失败 {did}: {e}", exc_info=True)
+        return None

@@ -90,6 +90,7 @@
           :question="pendingQuestion"
           @answer="onAnswer"
           @download="onDownload"
+          @download-pdf="onDownloadPdf"
         />
       </section>
     </div>
@@ -333,6 +334,12 @@ const applyEvent = (kind, payload) => {
       upsertDeliverable(payload)
       break
     case 'done':
+      // ⚠️ 收尾时把还在流式的那条行**收掉**。否则最后一段推理永远停在
+      // streaming 状态 —— 界面上是一条没有内容、光标一直闪的行。
+      // 实测一次 run 会留下 4~5 条这样的空「思考」行。
+      stream.value.forEach((x) => {
+        if (x.streaming) { x.streaming = false; x.state = 'done' }
+      })
       runStatus.value = payload.status || 'converged'
       // 收敛/失败后**收掉待拍板的问题** —— 否则用户已经点过「定下来」，
       // 那个问题卡还挂在右栏，看起来像没生效、又像在重复问。
@@ -357,6 +364,8 @@ const upsertDeliverable = (d) => {
     // 正文被丢掉 —— 面板就只剩文件名，只能靠弹窗再请求一次，
     // 而那次请求返回的又是同一段节点罗列。这是「交付物很简陋」的一半原因。
     data: d.data ?? null,
+    // 能不能导出 PDF（只有报告能）。事件里不带，靠收尾后 loadSnapshot 补齐。
+    pdf: Boolean(d.pdf),
   }
   if (i >= 0) deliverables.value[i] = { ...deliverables.value[i], ...item }
   else deliverables.value.push(item)
@@ -398,6 +407,9 @@ const loadSnapshot = async () => {
             ...d,
             state: got?.data ? 'ready' : 'empty',
             data: got?.data || null,
+            // 后端说这份能不能导 PDF（只有报告能）——
+            // 不带上的话按钮会按 undefined 判false，永远不显示
+            pdf: Boolean(got?.pdf),
           })
         } catch {
           // 取不到就如实标成无内容，不假装已生成
@@ -415,6 +427,8 @@ const loadSnapshot = async () => {
 }
 
 const DELIVERABLE_FALLBACK = [
+  // 报告排第一 —— 它是主件，另外三份是明细附件（与后端 DELIVERABLE_SPEC 一致）
+  { id: 'd-report', name: '采购规划报告', meta: '完整方案：结论、依据、预算与风险' },
   { id: 'd-plan', name: '采购方案.md', meta: '含清单、顺序与依赖' },
   { id: 'd-compare', name: '候选对比表', meta: '按硬约束逐项横比' },
   { id: 'd-budget', name: '预算分配表', meta: '按类别拆分预算' }
@@ -491,6 +505,28 @@ const onDownload = async (d) => {
     URL.revokeObjectURL(url)
   } catch (e) {
     loadError.value = e?.message || '下载失败'
+  }
+}
+
+/**
+ * 导出 PDF。
+ *
+ * 比 Markdown 多两件事要做对：
+ *   1. **忙态**：PDF 要服务端排版，有几秒钟。不加忙态用户会连点，
+ *      导出多份。所以先把这一份标成 pdfBusy，再恢复。
+ *   2. **文件名**：报告标题里有「·」（「搬家 · 采购规划报告」），
+ *      某些系统不允许。换成下划线。
+ */
+const onDownloadPdf = async (d) => {
+  if (!runId.value || d.pdfBusy) return
+  upsertDeliverable({ ...d, pdfBusy: true })
+  try {
+    const safe = String(d.name || '采购规划报告').replace(/[\\/:*?"<>|·]/g, '_')
+    await planningApi.downloadPdf(runId.value, d.id, `${safe}.pdf`)
+  } catch (e) {
+    loadError.value = e?.message || 'PDF 导出失败'
+  } finally {
+    upsertDeliverable({ ...d, pdfBusy: false })
   }
 }
 

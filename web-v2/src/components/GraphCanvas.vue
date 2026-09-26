@@ -125,15 +125,25 @@ const toG6Data = () => {
     }
   })
 
-  const edges = (src.edges || []).map((e, i) => ({
-    id: e.id ? String(e.id) : `e-${i}`,
-    source: String(e.source_id),
-    target: String(e.target_id),
-    data: {
-      label: e.type ?? e.label ?? '',
-      original: e
+  // 同一对起止点之间可能有多条边，再加同源的兄弟边 —— 序号用来错开曲率，
+  // 否则它们会画成同一条线（见 buildConfig 里 curveOffset 的说明）
+  const pairSeen = new Map()
+  const edges = (src.edges || []).map((e, i) => {
+    const key = `${e.source_id}->${e.target_id}`
+    const dup = pairSeen.get(key) || 0
+    pairSeen.set(key, dup + 1)
+    return {
+      id: e.id ? String(e.id) : `e-${i}`,
+      source: String(e.source_id),
+      target: String(e.target_id),
+      data: {
+        label: e.type ?? e.label ?? '',
+        original: e,
+        // 第几条同名边 —— 曲率按它递增，让平行边分得开
+        dupIndex: dup
+      }
     }
-  }))
+  })
 
   return { nodes, edges }
 }
@@ -201,7 +211,18 @@ const buildConfig = (width, height) => {
     edge: {
       type: 'quadratic',
       style: {
-        labelText: (d) => edgeStyleFn('labelText', d) ?? d.data.label,
+        // ⚠️ 曲率按「第几条同名边」错开。原先所有边曲率相同，从同一个
+        // 品类节点射向多件候选时，几条线会**画成同一条**，看上去就是
+        // 「很多线重重叠在一起」（用户截图里的观感问题）。
+        curveOffset: (d) => 18 + (d.data.dupIndex || 0) * 26,
+        labelText: (d) => {
+          const forced = edgeStyleFn('labelText', d)
+          if (forced !== undefined) return forced
+          // 关系标签只有「很多条边共用同一个词」时才是噪音 ——
+          // 实测几十条「候选」叠在一起，字都糊成一团。
+          // 领域层用 labelText:'' 明确要求不显示时也照办（见 resolveEdge）。
+          return d.data.label
+        },
         labelFill: (d) => edgeStyleFn('labelFill', d) ?? cssVar('--text-muted', '#6b727a'),
         labelFontSize: 10,
         labelBackground: true,
