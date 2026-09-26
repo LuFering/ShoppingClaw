@@ -3,20 +3,27 @@
     <header class="es-head">
       <span class="es-title">执行流</span>
       <!--
-        不报「第 N / 7 步」了。
-        ═══════════════════════════════════════════════════════════════
-        2026-09-26：分母不存在了
-        ═══════════════════════════════════════════════════════════════
-        旧实现按写死的七个阶段推进，所以能说「总共 7 步、现在第 3 步」。
-        现在走法由模型定 —— 它可能搜三次、可能跳过风险排查、可能来回问
-        两次。硬报分母就是编的。改成报「调了几次工具」，那是真实发生的事。
+        不报「第 N / 7 步」了 —— 走法由模型定，分母不存在。
+        报「调了几次工具」，那是真实发生、可数的量。
       -->
-      <span v-if="toolCount" class="es-prog mono">{{ toolCount }} 次工具调用</span>
-      <!-- 整体状态：有步骤在跑时给一个会动的指示，静止的界面看起来像卡死 -->
+      <span v-if="toolCount" class="es-prog mono">{{ toolCount }} 次调用</span>
       <span v-if="runningItem" class="es-live">
         <i class="es-live-dot" />进行中
       </span>
       <span v-else-if="totalMs" class="es-total mono">共 {{ fmtMs(totalMs) }}</span>
+      <!--
+        只看核心步骤：把模型说的话（推理 + 叙述）全折起来，只留工具调用。
+        用户说「太一大串」主要就是这类行太多 —— 一次运行模型会吐二十几段，
+        每段一行，真正「它做了什么」反而被淹没。
+      -->
+      <button
+        v-if="reasonCount"
+        class="es-filter"
+        :class="{ on: hideReasoning }"
+        type="button"
+        :title="hideReasoning ? '显示模型的过程叙述' : '只看核心步骤（隐藏模型叙述）'"
+        @click="hideReasoning = !hideReasoning"
+      >{{ hideReasoning ? `显示过程 (${reasonCount})` : '只看核心' }}</button>
       <button
         v-if="!atBottom"
         class="es-jump"
@@ -27,61 +34,73 @@
 
     <div ref="scrollEl" class="es-scroll" @scroll="onScroll">
       <div
-        v-for="(item, i) in items"
-        :key="item.phase || i"
+        v-for="item in visibleItems"
+        :key="item.phase || item.uid"
         class="es-row"
-        :class="{ 'is-live': item.state === 'running' }"
+        :class="{
+          'is-live': item.state === 'running',
+          'is-reason': isReasoning(item),
+        }"
       >
         <div class="es-rail">
           <span class="es-dot" :class="'is-' + item.state">
             <i v-if="item.state === 'running'" class="es-dot-pulse" />
           </span>
-          <span v-if="i < items.length - 1" class="es-line" />
+          <span v-if="item !== visibleItems[visibleItems.length - 1]" class="es-line" />
         </div>
+
         <div class="es-body">
-          <span class="es-kind" :class="'k-' + item.kind">{{ KIND_LABEL[item.kind] || item.kind }}</span>
           <!--
-            来源标记：这一步的结论是怎么来的。后端带 `by`：
-              llm  模型判断   · kb  知识库检索命中   · rule 规则兜底
-            **必须显示出来** —— 之前规则兜底的输出在界面上和模型判断长得
-            一模一样，用户无从分辨，这正是「用假推理忽悠」的观感来源。
-            宁可显示「规则兜底」也不假装。
-          -->
-          <span v-if="item.by" class="es-by" :class="'by-' + item.by">
-            {{ BY_LABEL[item.by] || item.by }}
-          </span>
-          <p class="es-text" :class="{ dim: item.state === 'todo' }">
-            {{ item.title }}
-            <span v-if="item.state === 'running' && !item.streaming && item.detail" class="es-hint">· {{ item.detail }}</span>
-          </p>
+            ═══════════════════════════════════════════════════════════
+            2026-09-26：一屏只留「核心环节」，细节按需展开
+            ═══════════════════════════════════════════════════════════
+            之前每一行都把推理全文、工具入参、返回原文全铺出来 ——
+            一次运行 30+ 行、每行好几行字，滚动条拉不到底，核心步骤反而
+            被淹没了。用户要的是「指出核心环节」。
 
-          <!--
-            推理正文：模型逐段吐出来的原文，不是我们拼的一句话。
-            流式期间带光标；结束后光标消失、文字留着 —— 这段文字**不删**，
-            它是这次判断的依据，用户随时能回看。
-
-            reasoning（它的自言自语）弱化成灰色；content（它要说的话）用正文色。
-            两者不区分的话，用户会以为模型在胡言乱语 —— 实测 reasoning 里
-            确实有试错和自我纠正（「第2是下水管隔音，场景太窄」这种）。
+            现在每步**一行**：类型标签 + 做了什么 + 一句话结果 + 耗时。
+            想看细节点这一行展开（推理原文 / 入参 / 返回样本）。
+            流式期间例外：正在想的那一步把文字显示出来，让「它在动」可见，
+            想完自动折回一行。
           -->
-          <p
-            v-if="item.streaming || (item.kind === 'think' && item.detail)"
-            class="es-think"
-            :class="{ 'is-reasoning': item.thinkKind === 'reasoning' }"
-          >{{ item.detail }}<i v-if="item.streaming" class="es-caret" /></p>
+          <div class="es-main" role="button" tabindex="0" @click="toggle(item)">
+            <span class="es-kind" :class="'k-' + item.kind">{{ KIND_LABEL[item.kind] || item.kind }}</span>
+            <!-- 来源标记：llm 模型判断 / kb 知识库命中 / rule 规则兜底。
+                 必须显示 —— 否则降级输出和模型判断长得一样，用户无从分辨。 -->
+            <span v-if="item.by" class="es-by" :class="'by-' + item.by">{{ BY_LABEL[item.by] || item.by }}</span>
 
-          <!--
-            真实入参与真实返回样本（call 事件带）。
-            这是「不假」的关键：用户能核对它**真的搜了什么、搜回来什么**，
-            而不是只看一句由 len() 拼出来的「返回 6 个 SKU」。
-          -->
-          <div v-if="item.args || item.sample?.length || item.result" class="es-tool">
-            <p v-if="item.args" class="es-tool-line">
-              <span class="es-tool-k">入参</span>
-              <span class="es-tool-v mono">{{ fmtArgs(item.args) }}</span>
-            </p>
+            <span v-if="item.title" class="es-text">{{ item.title }}</span>
+
+            <!-- 流式期间：显示正在生长的文字（截尾，避免撑开行高） -->
+            <span v-if="item.streaming" class="es-live-text">
+              {{ tail(item.detail) }}<i class="es-caret" />
+            </span>
+            <!-- 已结束：一句话结果。有标题时才加「·」当分隔，没标题它就是正文 -->
+            <span
+              v-else-if="briefOf(item)"
+              class="es-brief"
+              :class="{ 'is-solo': !item.title }"
+            >{{ item.title ? '· ' : '' }}{{ briefOf(item) }}</span>
+
+            <span v-if="item.state === 'running' && !item.streaming" class="es-elapsed mono">{{ elapsedOf(item) }}</span>
+            <span v-else-if="item.ms != null" class="es-ms mono">{{ fmtMs(item.ms) }}</span>
+
+            <!-- 有细节才显示可展开的提示 -->
+            <span v-if="hasDetail(item)" class="es-chevron" :class="{ open: isOpen(item) }">›</span>
+          </div>
+
+          <!-- 展开的细节 -->
+          <div v-if="isOpen(item)" class="es-detail">
+            <!-- 推理原文：模型逐段吐出来的，不是我们拼的一句话 -->
+            <p v-if="item.detail && item.kind === 'think'" class="es-detail-think">{{ item.detail }}</p>
+
+            <template v-if="item.args">
+              <p class="es-detail-k">入参</p>
+              <p class="es-detail-v mono">{{ fmtArgs(item.args) }}</p>
+            </template>
+
             <template v-if="item.sample?.length">
-              <p class="es-tool-k">返回</p>
+              <p class="es-detail-k">返回 {{ item.sample.length }} 件</p>
               <ul class="es-samples">
                 <li v-for="(s, k) in item.sample" :key="k">
                   <span class="es-sample-n">{{ s.name }}</span>
@@ -89,34 +108,11 @@
                 </li>
               </ul>
             </template>
-            <!--
-              工具原文返回：模型看到的就是这段。
-              默认**收起成一行摘要** —— 搜索一次返回 6 件带描述，全展开会把
-              执行流顶爆（实测一次调用的输出占满整个面板，其他行全被挤出去）。
-              点一下展开完整内容。
-            -->
             <template v-else-if="item.result">
-              <p class="es-tool-k">
-                <button class="es-result-toggle" type="button" @click="toggleResult(item)">
-                  返回 {{ item.result.split('\n').length }} 行
-                  <span class="es-result-chevron">{{ expanded.has(item) ? '收起' : '展开' }}</span>
-                </button>
-              </p>
-              <pre v-if="expanded.has(item)" class="es-result">{{ item.result }}</pre>
-              <p v-else class="es-result-brief">{{ firstLine(item.result) }}</p>
+              <p class="es-detail-k">工具返回原文</p>
+              <pre class="es-result">{{ item.result }}</pre>
             </template>
           </div>
-
-          <!-- 正在跑的这一步：显示**实时**已用时长，让「它在动」可见 -->
-          <p v-if="item.state === 'running' && !item.streaming" class="es-meta">
-            <span class="es-elapsed mono">{{ elapsedOf(item) }}</span>
-            <i class="es-caret" />
-          </p>
-          <p v-else-if="item.detail && !item.streaming && item.kind !== 'think'" class="es-detail" :class="{ dim: item.state === 'todo' }">{{ item.detail }}</p>
-          <p class="es-time mono">
-            <span v-if="item.ms != null" class="es-ms">{{ fmtMs(item.ms) }}</span>
-            <span v-if="item.time">{{ item.time }}</span>
-          </p>
         </div>
       </div>
     </div>
@@ -127,24 +123,24 @@
 /**
  * 左栏 · agent 任务执行流。
  *
- * 三种条目用「标签色 + 措辞」区分，不拆成三套组件：
- *   think 思考（紫） / retrieve 检索（蓝） / call 调用（中性） / produce 产出（绿）
- * 数据源来自 SSE。
- *
  * ═══════════════════════════════════════════════════════════════════
- * 2026-09-25：补上「实时」元素
+ * 2026-09-26：从「过程全铺」改成「核心环节 + 按需展开」
  * ═══════════════════════════════════════════════════════════════════
  *
- * 之前只有「跑完的条目」—— 一个静态列表。但这一步最慢要 9 秒（MCP 检索）
- * 到 8 秒（模型取舍），期间界面完全不动，看起来像卡死。
+ * 用户原话：「内容能不能做的简略一点，指出核心环节就行，不用这么一大串」。
  *
- * 现在有三种实时元素（都对应真实数据，不做假动画）：
- *   1. 正在跑的条目：呼吸点 + **实时累加**的已用秒数（每 100ms 跳一次）
- *   2. 跑完的条目：真实耗时（后端给 ms，给了就用；没给用本地计时）
- *   3. 头部：进行中指示 / 全部耗时合计
+ * 之前每一行都把三样东西全铺出来：推理全文（常常几百字）、工具入参、
+ * 返回原文。一次运行 30+ 行，一屏放不下，**核心步骤反而被淹没了** ——
+ * 想看「它搜了几次、最后选了啥」得在字缝里找。
  *
- * 计时用 requestAnimationFrame 而不是 setInterval：标签页切到后台时
- * rAF 自动停，回来再继续 —— 不会在后台空转，也不会算出离谱的时长。
+ * 现在：
+ *   · 每步**一行** —— 类型标签 + 做了什么 + 一句话结果 + 耗时
+ *   · 细节（推理原文 / 入参 / 返回样本）点这一行才展开
+ *   · 流式期间例外：正在想的那一步把文字显示出来（截尾 + 光标），
+ *     让「它在动」可见；想完自动折回一行
+ *
+ * 「实时」没有丢：进行中的步骤仍有呼吸点 + 每 100ms 重算的已用秒数，
+ * 只是不再把整段推理糊在列表里。
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 
@@ -174,35 +170,109 @@ const runningItem = computed(() => props.items.find((x) => x.state === 'running'
 const totalMs = computed(() =>
   props.items.reduce((sum, x) => sum + (typeof x.ms === 'number' ? x.ms : 0), 0)
 )
+const toolCount = computed(() => props.items.filter((x) => x.kind === 'call').length)
 
 /**
- * 工具调用次数 —— 代替原来的「第 N / 7 步」。
+ * 这一行是不是「模型的推理」（草稿纸）。
  *
- * 走法由模型定之后就没有固定分母了，但「它已经做了多少件事」是真实的、
- * 可数的，而且恰好是用户想知道的量：调得越多说明它查得越细。
+ * 用户说「太一大串」主要就是这类行太多 —— 模型一次思考会吐十几段，
+ * 每段一行就把工具调用（真正的核心步骤）挤没了。
  */
-const toolCount = computed(
-  () => props.items.filter((x) => x.kind === 'call').length
+const isReasoning = (item) => item.kind === 'think' && item.thinkKind === 'reasoning'
+
+/** 模型叙述行数 —— 为 0 时不显示「只看核心」按钮（没什么可藏的） */
+const reasonCount = computed(() => props.items.filter((x) => x.kind === 'think').length)
+
+const hideReasoning = ref(false)
+
+/**
+ * 实际渲染的行。
+ *
+ * 「只看核心」= **只留工具调用与阶段**，把模型说的话全折起来。
+ *
+ * ⚠️ 不能只滤 reasoning：模型还有一路 `content`（它给用户看的叙述），
+ * 一次运行同样有十几段。只滤 reasoning 实测 28 行 → 22 行，几乎没变化
+ * —— 用户要的「核心环节」是**它做了什么**（查了什么、搜了什么、排除了
+ * 什么、定了什么），那些是 call 行。
+ *
+ * 但**正在流式输出的那条要留**：否则点了之后界面完全静止，
+ * 用户会以为卡住了。
+ */
+const visibleItems = computed(() =>
+  hideReasoning.value
+    ? props.items.filter((x) => x.kind !== 'think' || x.streaming)
+    : props.items
 )
 
 /**
- * 哪些工具返回被展开了。
+ * 展开的行。
  *
  * 用 Set 存**行对象引用**（不是下标）—— 行会被 push 进来，下标会漂。
- * 默认收起：搜索一次返回 6 件带描述，全展开会把执行流顶爆
- * （实测一次调用的输出占满整个面板，其他行全被挤出去）。
  */
 const expanded = ref(new Set())
-const toggleResult = (item) => {
+const isOpen = (item) => expanded.value.has(item)
+const toggle = (item) => {
+  if (!hasDetail(item)) return
   const next = new Set(expanded.value)
   if (next.has(item)) next.delete(item)
   else next.add(item)
   expanded.value = next
 }
-const firstLine = (text) => (text || '').split('\n')[0].slice(0, 60)
+
+/** 这行有没有可展开的东西 */
+const hasDetail = (item) =>
+  Boolean(item.args || item.result || item.sample?.length ||
+          (item.detail && item.kind === 'think'))
+
+/**
+ * 一句话结果 —— 收起时显示的摘要。
+ *
+ * 工具调用优先用返回样本的**件数**（「6 件」比「返回 6 件商品…」一眼）；
+ * 没有样本就取返回原文的第一行去掉前缀。
+ */
+const briefOf = (item) => {
+  if (item.sample?.length) return `${item.sample.length} 件`
+  if (item.result) {
+    const first = String(item.result).split('\n')[0]
+    // 「关键词「隔音材料」返回 6 件：」→ 只留「6 件」
+    const m = first.match(/返回\s*(\d+)\s*件/)
+    if (m) return `${m[1]} 件`
+    if (/没有返回|未找到|暂未/.test(first)) return '无结果'
+    return first.slice(0, 26)
+  }
+  if (item.kind === 'think' && item.detail) return item.detail.replace(/\s+/g, ' ').slice(0, 34)
+  if (item.detail) return String(item.detail).slice(0, 34)
+  return ''
+}
+
+/** 流式期间显示文字的**尾巴** —— 头会被滚动条挤走，尾巴才是「正在想」 */
+const tail = (text) => {
+  const t = String(text || '').replace(/\s+/g, ' ').trim()
+  return t.length > 48 ? '…' + t.slice(-48) : t
+}
+
+const fmtMs = (ms) => {
+  if (ms == null) return ''
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+const fmtPrice = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  return Number.isInteger(n) ? String(n) : n.toFixed(2)
+}
+
+/** 工具入参：`{"q":"隔音材料","page_size":6}` → `q=隔音材料 · page_size=6` */
+const fmtArgs = (args) => {
+  if (!args || typeof args !== 'object') return ''
+  return Object.entries(args)
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+    .join(' · ')
+}
 
 // ── 实时秒数 ──────────────────────────────────────────────
-// tick 只是用来触发重算的计数器：已用时长必须每帧重算（见 elapsedOf），
+// tick 只是用来触发重算的计数器：已用时长必须每帧重算，
 // 存在数据里的话就成了「只算一次的假时钟」。
 const tick = ref(0)
 let rafId = null
@@ -219,27 +289,6 @@ const elapsedOf = (item) => {
   tick.value   // 建立依赖，让每 100ms 重算
   if (!item.startedAt) return ''
   return fmtMs(Date.now() - item.startedAt)
-}
-
-const fmtMs = (ms) => {
-  if (ms == null) return ''
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  return `${(ms / 1000).toFixed(1)}s`
-}
-
-/** 价格是「元」，整数不显示小数点 */
-const fmtPrice = (v) => {
-  const n = Number(v)
-  if (!Number.isFinite(n)) return '—'
-  return Number.isInteger(n) ? String(n) : n.toFixed(2)
-}
-
-/** 工具入参：`{"q":"隔音材料","page_size":6}` → `q=隔音材料 · page_size=6` */
-const fmtArgs = (args) => {
-  if (!args || typeof args !== 'object') return ''
-  return Object.entries(args)
-    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
-    .join(' · ')
 }
 
 const isNearBottom = () => {
@@ -298,15 +347,13 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 0 0 10px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .es-title {
   font-size: 0.82rem;
   font-weight: 600;
   color: var(--text-strong);
 }
-/* 阶段进度：取代原来的静态说明「调用 · 检索 · 思考」——
-   那句是分类标签，而这里给的是**进程信息**（第几步 / 共几步）。 */
 .es-prog {
   font-size: 0.68rem;
   color: var(--text-muted);
@@ -347,6 +394,27 @@ onBeforeUnmount(() => {
   color: var(--accent-700);
   cursor: pointer;
 }
+/* 「只看核心」开关：默认态低调，开启时高亮 —— 让用户知道当前被过滤了 */
+.es-filter {
+  margin-left: auto;
+  font-size: 0.66rem;
+  font-family: var(--font-body);
+  padding: 1px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
+  &:hover { color: var(--text); }
+  &.on {
+    border-color: var(--accent-500);
+    background: var(--accent-50);
+    color: var(--accent-700);
+  }
+}
+/* 有开关时「回到最新」不再靠 margin-left:auto 顶到右边 */
+.es-filter + .es-jump { margin-left: 6px; }
 
 .es-scroll {
   flex: 1 1 auto;
@@ -357,20 +425,22 @@ onBeforeUnmount(() => {
 
 .es-row {
   display: flex;
-  gap: 9px;
+  gap: 8px;
 }
+
+/* ── 时间线 ── */
 .es-rail {
-  flex: 0 0 9px;
+  flex: 0 0 7px;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
 .es-dot {
   position: relative;
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  margin-top: 4px;
+  margin-top: 7px;
   flex: 0 0 auto;
   &.is-done { background: var(--pos); }
   &.is-running { background: var(--info); }
@@ -380,7 +450,6 @@ onBeforeUnmount(() => {
     box-sizing: border-box;
   }
 }
-/* 正在跑的那一步：外扩的呼吸圈，一眼能扫到 */
 .es-dot-pulse {
   position: absolute;
   inset: -3px;
@@ -404,70 +473,86 @@ onBeforeUnmount(() => {
 
 .es-body {
   min-width: 0;
-  padding-bottom: 12px;
+  flex: 1 1 auto;
+  padding-bottom: 3px;
 }
-.es-row:last-child .es-body { padding-bottom: 0; }
-/* 正在跑的一行整体提亮，与已完成的拉开层次 */
-.es-row.is-live .es-text { color: var(--text-strong); font-weight: 500; }
+
+/*
+  一行的主体。用 flex + 单行省略，保证**永远占一行** ——
+  这是「简略」的关键：不管标题多长、结果多长，都截断而不是折行。
+*/
+.es-main {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 20px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  &:hover { background: var(--bg-sunken); }
+}
 
 .es-kind {
-  display: inline-block;
-  font-size: 0.66rem;
-  padding: 1px 6px;
-  border-radius: 4px;
-  margin-bottom: 3px;
+  flex: 0 0 auto;
+  font-size: 0.64rem;
+  padding: 0 4px;
+  border-radius: 3px;
   background: var(--bg-sunken);
+  color: var(--text-muted);
   // 与项目既有的 .state 写法一致：靠文字色区分类型，不堆彩色胶囊容器
-  &.k-phase { color: var(--text-muted); }
+  &.k-phase { color: var(--text-faint); }
   &.k-think { color: #9581cc; }
   &.k-retrieve { color: var(--info); }
   &.k-call { color: var(--text-muted); }
   &.k-produce { color: var(--pos); }
 }
-
-/* 来源标记：模型判断 / 规则兜底。刻意做得比 es-kind 更弱 ——
-   它是注脚，不该抢判断本身的注意力；但降级时用警示色，确保看得见。 */
 .es-by {
-  display: inline-block;
-  margin-left: 5px;
-  margin-bottom: 3px;
-  font-size: 0.62rem;
-  padding: 1px 5px;
-  border-radius: 4px;
-  &.by-llm { color: var(--text-faint); background: transparent; }
-  /* 检索命中：中性偏正，不抢眼 */
-  &.by-kb { color: var(--text-muted); background: transparent; }
-  /* 降级用警示色 + 底色，确保在一屏「思考」里能一眼扫到 */
+  flex: 0 0 auto;
+  font-size: 0.6rem;
+  padding: 0 4px;
+  border-radius: 3px;
+  &.by-llm { color: var(--text-faint); }
+  &.by-kb { color: var(--text-muted); }
   &.by-rule { color: var(--warn); background: var(--bg-sunken); }
 }
+
 .es-text {
-  margin: 0;
-  font-size: 0.76rem;
-  line-height: 1.5;
+  font-size: 0.75rem;
   color: var(--text);
-  &.dim { color: var(--text-faint); }
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
 }
-/* 「正在做」的说明跟在标题后面，弱一档 */
-.es-hint {
+/* 一句话结果：比标题弱，但仍然是一行 */
+.es-brief {
+  flex: 0 1 auto;
+  font-size: 0.71rem;
   color: var(--text-muted);
-  font-weight: 400;
-  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  /* 没有标题时它就是这行的正文（思考行）—— 用正文色、去掉「·」前缀感 */
+  &.is-solo {
+    color: var(--text);
+    font-size: 0.73rem;
+  }
 }
-.es-meta {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin: 3px 0 0;
+/* 流式中的文字尾巴 */
+.es-live-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.71rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.es-elapsed {
-  font-size: 0.68rem;
-  color: var(--info);
-}
-/* 光标：告诉用户这行还在长 */
 .es-caret {
   display: inline-block;
   width: 2px;
-  height: 0.72em;
+  height: 0.7em;
+  margin-left: 2px;
   vertical-align: -0.06em;
   background: var(--info);
   animation: es-caret 1s steps(2, start) infinite;
@@ -479,49 +564,52 @@ onBeforeUnmount(() => {
 @media (prefers-reduced-motion: reduce) {
   .es-caret { animation: none; }
 }
-.es-detail {
-  margin: 2px 0 0;
-  font-size: 0.7rem;
-  line-height: 1.5;
-  color: var(--text-muted);
-  &.dim { color: var(--text-faint); }
-}
 
-/* 推理正文：模型原文，逐段长出来。比 es-detail 更"实"（是内容不是注脚），
-   所以用正文色、行距放开一点，读起来像一段话而不是一条日志。 */
-.es-think {
-  margin: 3px 0 0;
-  font-size: 0.74rem;
-  line-height: 1.65;
-  color: var(--text);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  /* reasoning（模型的自言自语）弱化：它是过程，不是结论 */
-  &.is-reasoning {
-    color: var(--text-muted);
-    font-size: 0.72rem;
-  }
-}
-
-/* 工具的真实入参与返回样本 */
-.es-tool {
-  margin: 5px 0 0;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-sunken);
-}
-.es-tool-line {
-  display: flex;
-  gap: 6px;
-  margin: 0;
-}
-.es-tool-k {
+.es-elapsed, .es-ms {
   flex: 0 0 auto;
-  margin: 0 0 3px;
+  margin-left: auto;
   font-size: 0.64rem;
   color: var(--text-faint);
 }
-.es-tool-v {
+.es-elapsed { color: var(--info); }
+
+/* 可展开提示：只在有细节时出现 */
+.es-chevron {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--text-faint);
+  transition: transform 0.15s ease-out;
+  &.open { transform: rotate(90deg); }
+}
+
+/* ── 展开的细节 ── */
+.es-detail {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.es-detail-think {
+  margin: 0;
+  font-size: 0.71rem;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.es-detail-k {
+  margin: 0;
+  font-size: 0.62rem;
+  color: var(--text-faint);
+}
+.es-detail-v {
+  margin: 0;
   font-size: 0.68rem;
   color: var(--text-muted);
   overflow-wrap: anywhere;
@@ -552,51 +640,15 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   color: var(--text-faint);
 }
-
-/* 工具原文返回：模型看到的就是这段。等宽、可滚动、限高 ——
-   它可能很长（搜索返回 6 件带描述），不能让执行流被一段输出顶爆。 */
 .es-result {
-  margin: 2px 0 0;
-  max-height: 132px;
+  margin: 0;
+  max-height: 160px;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--font-mono);
-  font-size: 0.67rem;
-  line-height: 1.55;
+  font-size: 0.66rem;
+  line-height: 1.5;
   color: var(--text-muted);
 }
-/* 收起态：一行摘要 */
-.es-result-brief {
-  margin: 2px 0 0;
-  font-size: 0.68rem;
-  line-height: 1.5;
-  color: var(--text-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.es-result-toggle {
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-family: var(--font-body);
-  font-size: 0.64rem;
-  color: var(--text-faint);
-  cursor: pointer;
-  &:hover { color: var(--text-muted); }
-}
-.es-result-chevron {
-  margin-left: 4px;
-  color: var(--accent-700);
-}
-
-.es-time {
-  display: flex;
-  gap: 6px;
-  margin: 2px 0 0;
-  font-size: 0.66rem;
-  color: var(--text-faint);
-}
-.es-ms { color: var(--text-muted); }
 </style>

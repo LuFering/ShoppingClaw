@@ -145,6 +145,18 @@ const stream = ref([])
 const deliverables = ref([])
 const pendingQuestion = ref(null)
 
+/**
+ * 给每一行一个稳定 id。
+ *
+ * 执行流的渲染会用 `v-for` 的 key 与「是不是最后一行」的判断 ——
+ * 之前用数组下标，但「只看核心」开关会把推理行滤掉，下标就漂了
+ * （描线会画错位置、Vue 复用错节点）。给每行一个自增 id 就稳定了。
+ */
+let streamSeq = 0
+const pushRow = (row) => {
+  stream.value.push({ ...row, uid: `r${++streamSeq}` })
+}
+
 const taskLabel = computed(() => {
   const parts = []
   const scene = route.query.scene
@@ -187,7 +199,7 @@ const applyEvent = (kind, payload) => {
         exist.detail = payload.hint || exist.detail
         exist.time = nowClock()
       } else {
-        stream.value.push({
+        pushRow({
           kind: 'phase',
           phase,
           title: payload.label || phase,
@@ -219,9 +231,13 @@ const applyEvent = (kind, payload) => {
           prev.streaming = false
           prev.state = 'done'
         }
-        stream.value.push({
+        pushRow({
           kind: 'think',
-          title: kind === 'reasoning' ? '正在权衡' : '判断依据',
+          // ⚠️ 不给 title：一行的空间要留给**它说了什么**。
+          // 原先 title 是「正在权衡 / 判断依据」，占掉半行，而摘要又是一句
+          // 推理的开头 —— 界面上变成「判断依据 · 品类标准知识库没收录…」，
+          // 前半截是废话。现在整行就是那句话本身（见 AgentExecStream.briefOf）。
+          title: '',
           detail: payload.text || '',
           streaming: true,          // 有光标；收到收尾事件后置 false
           thinkKind: kind,
@@ -248,7 +264,7 @@ const applyEvent = (kind, payload) => {
         prev.streaming = false
         prev.state = 'done'
       }
-      stream.value.push({
+      pushRow({
         kind,
         title: payload.title || '',
         detail: payload.detail || '',
@@ -286,7 +302,7 @@ const applyEvent = (kind, payload) => {
       if (row) {
         row.result = payload.text || ''
       } else {
-        stream.value.push({
+        pushRow({
           kind: 'call',
           title: '工具返回',
           detail: '',
