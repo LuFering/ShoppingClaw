@@ -30,7 +30,7 @@
     <!-- 三栏：过程 / 推理 / 产出 -->
     <div class="wb-body">
       <section class="wb-col wb-col--left">
-        <AgentExecStream :items="stream" />
+        <StageExecStream :items="stream" :finish="finishInfo" />
       </section>
 
       <section class="wb-col wb-col--center">
@@ -137,7 +137,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
-import AgentExecStream from '@/components/purchase/AgentExecStream.vue'
+import StageExecStream from '@/components/purchase/StageExecStream.vue'
 import PurchaseDecisionGraph from '@/components/purchase/PurchaseDecisionGraph.vue'
 import ArtifactsPanel from '@/components/purchase/ArtifactsPanel.vue'
 import ArtifactPreview from '@/components/purchase/ArtifactPreview.vue'
@@ -213,11 +213,36 @@ const applyEvent = (kind, payload) => {
       //
       // 所以这里不再维护 todo 态、也不再算耗时 —— 真实耗时由调用行自己带。
       // 同名的阶段标签只落一条，后续调用往它下面挂。
+      // ⚠️ 2026-09-27：阶段有 running / done **两种**事件，都要处理。
+      // 原先只认 running（因为后端也只发 running），于是每个阶段永远停在
+      // 「进行中」，run 跑完了界面还在转 —— 用户说的「有始有终」缺的就是
+      // 这一半。现在后端在离开阶段时补发 done + 真实耗时，这里如实落库。
       const exist = stream.value.find((x) => x.kind === 'phase' && x.phase === phase)
+      if (payload.state === 'done') {
+        if (exist) {
+          exist.state = 'done'
+          // ⚠️ 同一个阶段会被**反复进入**（模型搜一轮、筛一轮、又回头搜 ——
+          // 实测「搜索候选」进了 3 轮）。事件在**这里**就被合并成一行，
+          // 所以耗时必须在这里**累加**，否则只会留下最后一轮的数字：
+          // 三轮共 126s 的阶段会显示成 24.4s —— 而「哪一步最费时间」
+          // 正是用户想知道的。轮数也记下来，界面标注「3 轮」。
+          if (typeof payload.ms === 'number') {
+            exist.msTotal = (exist.msTotal || 0) + payload.ms
+          }
+          exist.passes = (exist.passes || 0) + 1
+          exist.finishedAt = Date.now()
+          exist.startedAt = null
+          exist.time = nowClock()
+        }
+        break
+      }
       if (exist) {
         exist.state = 'running'
         exist.detail = payload.hint || exist.detail
         exist.time = nowClock()
+        // 重新进入同一阶段时重置计时起点，否则「本阶段已用」会把
+        // 上一次进入的时长也算进来
+        if (!exist.startedAt) exist.startedAt = Date.now()
       } else {
         pushRow({
           kind: 'phase',
@@ -225,6 +250,9 @@ const applyEvent = (kind, payload) => {
           title: payload.label || phase,
           detail: payload.hint || '',
           state: 'running',
+          // ⚠️ 记开始时间：左栏的「本阶段已用 X秒」靠它实时重算。
+          // 没有它那行只能显示空 —— 而「正在跑多久了」正是实时性的载体。
+          startedAt: Date.now(),
           time: nowClock()
         })
       }
@@ -514,6 +542,24 @@ const onAnswer = async (key) => {
     pendingQuestion.value = run.question
       ? { text: run.question.text, options: run.question.options || [] }
       : null
+    // ⚠️ 插一条**分段标记**：用户拍板后 agent 会从中断处接着走，可能重新
+    // 进入已经走过的阶段（实测：答完「方案一」后又回到「筛选硬约束」排掉
+    // 一件）。没有这个标记的话，那些调用会被算进中断前最后一个阶段
+    // （「生成交付」）的块里 —— 界面上就是「生成交付 · 排除 1 件」，
+    // 而排除根本不发生在生成交付阶段。
+    //
+    // 用一条 phase 行当分隔，比新造一种事件简单：阶段视图本来就在等它。
+    pushRow({
+      kind: 'phase',
+      phase: '__resume__',
+      title: '继续执行',
+      detail: '按你的选择接着推演',
+      state: 'done',
+      ms: 0,
+      msTotal: 0,
+      passes: 1,
+      time: nowClock()
+    })
     // 续跑会产生新事件，重新订阅（带 after_seq，不重放）
     subscribe()
   } catch (e) {
@@ -528,6 +574,24 @@ const onAnswer = async (key) => {
  * 会补一次）。重新取一遍会出现「点了预览、正文闪一下才出来」，
  * 而且网络失败时明明有内容却显示空态。
  */
+/**
+ * 收尾总结的素材（左栏「有终」那行用）。
+ *
+ * 取 run 状态 + 报告里的关键数字。**不在这里算业务数字** ——
+ * 品类数与总额直接读交付物已经算好的 headline，两处各算一遍必然漂。
+ * 报告还没到时只给状态，那行就退化成「进行中 · 54.3s」。
+ */
+const finishInfo = computed(() => {
+  const rep = deliverables.value.find((x) => x.id === 'd-report')
+  const h = rep?.data?.headline || {}
+  return {
+    status: runStatus.value,
+    categories: h.categories ?? 0,
+    total: h.total ?? null,
+    error: loadError.value || '',
+  }
+})
+
 const previewId = ref('')
 const previewItem = computed(() =>
   deliverables.value.find((x) => x.id === previewId.value) || null

@@ -398,6 +398,9 @@ async def advance(run_id: str, user_id: str) -> None:
     中断（ask_user）：工具写了 `question` 就落 awaiting 并停在这里。
     续跑时把用户的回答作为新消息喂回去，循环接着走。
     """
+    # ⚠️ 在 try **之前**定义：`except` 里要用它关阶段，而失败可能发生在
+    # 赋值之前（那时会 NameError，把真正的错误盖掉）。实测踩过。
+    phases: dict[str, float] = {}
     try:
         run = await get_run(run_id, user_id)
         if run is None:
@@ -433,6 +436,11 @@ async def advance(run_id: str, user_id: str) -> None:
             filter_reasoning_text=True,
         )
         seen_tools: set[str] = set()
+        # 阶段状态表（stage → 首次进入的时间戳）。换阶段时给上一个收尾，
+        # 收尾/中断时全部关掉 —— 否则界面会永远停在「进行中」（见 _close_phase）。
+        # 每次 advance 清空：续跑是新一轮循环，上一轮的阶段不该继续计。
+        phases.clear()
+        _current_phase.pop(run_id, None)
         # 跨步累积的产物（候选/排除/选中/风险/维度）。
         # `stream_mode="updates"` 只给增量，得自己攒；攒出来的要落库，
         # 否则收尾生成交付物时读不到（见 _persist_products 的说明）。
@@ -470,9 +478,12 @@ async def advance(run_id: str, user_id: str) -> None:
                     continue
 
                 _collect_messages(chunk, history)
-                stop = await _on_agent_step(run_id, chunk, seen_tools, pump, acc, state)
+                stop = await _on_agent_step(run_id, chunk, seen_tools, pump, acc,
+                                            state, phases)
                 if stop:
                     await pump.close()
+                    # 关掉还开着的阶段：进程要停了，界面不能还显示「进行中」
+                    await _close_all_phases(run_id, phases)
                     await _persist_history(run_id, history)
                     await _patch_run(run_id, status="awaiting", question=stop)
                     await emit(run_id, "question", stop)
@@ -482,6 +493,8 @@ async def advance(run_id: str, user_id: str) -> None:
 
         # 收尾前把产物落库 + 最后一次重建图 —— `_finish` 生成交付物时要读它，
         # 界面也要看到「最终选中的那件」被标成 selected（而不是停在候选态）
+        # 关掉最后一个阶段 —— 它后面没有「下一个阶段」来触发收尾
+        await _close_all_phases(run_id, phases)
         await _persist_history(run_id, history)
         await _persist_products(run_id, acc)
         await _sync_graph(run_id, acc, state)
@@ -489,6 +502,11 @@ async def advance(run_id: str, user_id: str) -> None:
 
     except Exception as e:
         logger.error(f"[planning] run {run_id} 推进失败: {e}", exc_info=True)
+        # 失败时同样要关阶段：否则界面显示「正在进行」，而进程已经停了
+        try:
+            await _close_all_phases(run_id, phases)
+        except Exception:
+            pass
         await _patch_run(run_id, status="failed", error=str(e)[:500])
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
 
@@ -706,7 +724,7 @@ async def _on_model_token(run_id: str, chunk: Any, pump: DeltaPump) -> None:
 
 async def _on_agent_step(
     run_id: str, chunk: dict, seen_tools: set[str], pump: DeltaPump,
-    acc: dict, state: dict,
+    acc: dict, state: dict, phases: dict,
 ) -> dict | None:
     """agent 跑完一步（模型节点或工具节点）→ 落事件、累积产物。
 
@@ -757,7 +775,7 @@ async def _on_agent_step(
                 first = key not in seen_tools
                 seen_tools.add(key)
                 await _emit_tool_call(run_id, name, args, first,
-                                      call.get("id") or "")
+                                      call.get("id") or "", phases)
 
             # ── 工具返回 ──
             if isinstance(m, ToolMessage):
@@ -776,17 +794,73 @@ async def _on_agent_step(
     return None
 
 
+# 每个 run 当前处在哪个阶段 —— 用来判断「换阶段了」从而给上一个收尾。
+# 进程内即可：单进程跑后台任务，run 的推进是单条任务链，不会并发。
+_current_phase: dict[str, str] = {}
+
+
+async def _close_phase(run_id: str, stage: str, phases: dict) -> None:
+    """给一个阶段收尾：发 state=done + **真实耗时**。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：为什么必须补这一步
+    ═══════════════════════════════════════════════════════════════════
+    原先只发 `state="running"`，**从不发改 done** —— 于是界面上每个阶段
+    都永远停在「进行中」（实测五个阶段全是 is-running、耗时全是 0ms），
+    run 跑完了左栏还在转。用户说的「有始有终」缺的就是这一半。
+
+    耗时按「首次进入 → 离开」的时间差算，是**真实**的墙上时间。它包含了
+    模型在这阶段里的思考时间，所以不是「工具执行耗时」而是「这一阶段
+    耗时」—— 那正是用户想知道的（哪一步慢）。
+    """
+    t0 = phases.pop(stage, None)
+    _current_phase.pop(run_id, None)
+    if t0 is None:
+        return
+    ms = int((time.time() - t0) * 1000)
+    await emit(run_id, "phase", {
+        "phase": stage, "label": stage, "state": "done", "ms": ms,
+    })
+
+
+async def _close_all_phases(run_id: str, phases: dict) -> None:
+    """收尾时把还开着的阶段全部关掉。
+
+    ⚠️ 必须有：run 的最后一个阶段不会有「下一个阶段」来触发收尾，
+    不显式关就会一直挂在「进行中」。中断（等用户拍板）与失败路径也要关 ——
+    否则界面显示「正在进行」，而实际上进程已经停了。
+    """
+    for stage in list(phases.keys()):
+        await _close_phase(run_id, stage, phases)
+
+
 async def _emit_tool_call(run_id: str, name: str, args: dict, first: bool,
-                          tool_call_id: str = "") -> None:
+                          tool_call_id: str = "",
+                          phases: dict | None = None) -> None:
     """模型决定调某个工具 → 一条事件。**带真实入参**。
 
     ⚠️ 带上 `tool_call_id`：模型会**并行**调多个工具，返回时要用它精确配对
     到是哪一次调用。前端靠「最后一条还没返回的 call」去猜是错的 ——
     并行时返回顺序不保证，会把 A 的结果挂到 B 上（实测踩过：搜索关键词和
     返回的商品对不上）。
+
+    `phases`：阶段状态表（stage → 首次进入的时间戳）。传入时这里负责
+    **阶段的生命周期** —— 换阶段就把上一个阶段收尾（发 state=done + 真实
+    耗时）。不传则只发 running（测试与旧调用方）。
     """
     stage, verb = _TOOL_META.get(name, ("执行", name))
-    if first:
+    if phases is not None:
+        prev = _current_phase.get(run_id)
+        if prev and prev != stage:
+            await _close_phase(run_id, prev, phases)
+        if stage not in phases:
+            phases[stage] = time.time()
+            _current_phase[run_id] = stage
+            await emit(run_id, "phase", {
+                "phase": stage, "label": stage, "state": "running",
+                "hint": verb,
+            })
+    elif first:
         await emit(run_id, "phase", {
             "phase": stage, "label": stage, "state": "running",
             "hint": verb,
