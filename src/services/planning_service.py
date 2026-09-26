@@ -70,15 +70,39 @@ RUNNING_HINT = {
 }
 
 # 交付物清单：收敛后逐个产出。state: waiting → running → ready
-DELIVERABLE_SPEC = (
-    # ⚠️ 2026-09-27：报告排第一 —— 它才是「交付物」该有的样子。
-    # 原先三份各是一张表，读者要自己在脑子里把它们拼起来。用户的原话是
-    # 「这个交付方式还是太简陋了…要么生成一个详细的采购规划报告而非这种
-    # 非常敷衍不专业的几张表」。三张表保留为**附件/明细**，报告是主件。
-    ("d-report", "采购规划报告", "完整方案：结论、依据、预算与风险"),
-    ("d-plan", "采购方案.md", "含清单、顺序与依赖"),
-    ("d-compare", "候选对比表", "按硬约束逐项横比"),
-    ("d-budget", "预算分配表", "按类别拆分预算"),
+# ══════════════════════════════════════════════════════════════════════
+# 产出物清单（artifacts）
+# ══════════════════════════════════════════════════════════════════════
+# 2026-09-27 重构：从「三份写得差不多的 Markdown」改成**按用途分的产出物**，
+# 每份声明自己支持的格式。
+#
+# ⚠️ 元组第 4 位是**支持的格式**，不是装饰：
+#   · 前端据此决定显示哪几个下载按钮 —— 而不是点了才发现 404
+#   · 导出端点据此校验 —— 不支持的格式直接 404，不去猜怎么转
+#
+# 分工（这是重构的要点，不是「多加了几份」）：
+#   report  读的：为什么这么买。有 PDF（可打印/转发）
+#   list    用的：照着下单。有 CSV（进 Excel 做预算表）
+#   compare 对的：横比表。明细附件
+#   budget  算的：预算拆账。明细附件
+ARTIFACT_SPEC = (
+    {"id": "d-report", "name": "采购规划报告", "meta": "完整方案：结论、依据、预算与风险",
+     "kind": "report", "formats": ("pdf", "md"), "primary": True,
+     "desc": "读这一份就够：先讲清约束与结论，再逐项给推荐与理由，最后是风险。"},
+    {"id": "d-list", "name": "采购清单", "meta": "照着下单：商品、数量、价格、item_id",
+     "kind": "list", "formats": ("csv", "md"), "primary": False,
+     "desc": "下单时用的那一份。含 item_id，可直接去淘宝搜同款；可导 CSV 做预算表。"},
+    {"id": "d-compare", "name": "候选对比表", "meta": "按品类分组，入选与排除同表",
+     "kind": "compare", "formats": ("md",), "primary": False,
+     "desc": "每条候选为什么入选或排除，按品类分组逐项横比。"},
+    {"id": "d-budget", "name": "预算分配表", "meta": "按品类拆分预算",
+     "kind": "budget", "formats": ("md",), "primary": False,
+     "desc": "钱花在哪一类上、占比与结余。"},
+)
+
+# 兼容旧名（事件与前端都还在按 id 取）
+DELIVERABLE_SPEC = tuple(
+    (a["id"], a["name"], a["meta"]) for a in ARTIFACT_SPEC
 )
 
 MAX_EVENTS_PER_RUN = 2000   # 兜底：异常情况下不让单次 run 无限写事件
@@ -837,7 +861,8 @@ async def _finish(run_id: str, user_id: str) -> None:
             return
 
         state = _state_from_run(run)
-        for did, name, meta in DELIVERABLE_SPEC:
+        for a in ARTIFACT_SPEC:
+            did, name, meta = a["id"], a["name"], a["meta"]
             await emit(run_id, "deliverable",
                        {"id": did, "name": name, "meta": meta, "state": "running", "progress": 0.5})
             try:
@@ -848,9 +873,12 @@ async def _finish(run_id: str, user_id: str) -> None:
             await emit(run_id, "deliverable",
                        {"id": did, "name": name, "meta": meta,
                         "state": "ready" if doc else "empty", "data": doc,
-                        # 前端据此决定要不要显示「导出 PDF」——
-                        # 不带的话按钮永远不出现（见 get_deliverable 的 pdf 字段）
-                        "pdf": bool(doc and doc.get("kind") == "report")})
+                        # 产出物元信息：支持的格式、是否主件、一句话说明。
+                        # 前端据此决定显示几个下载按钮、哪个默认展开 ——
+                        # 而不是点了才发现 404（见 ARTIFACT_SPEC 的说明）
+                        "formats": list(a["formats"]),
+                        "primary": a["primary"],
+                        "desc": a["desc"]})
 
         await _patch_run(run_id, status="converged")
         await emit(run_id, "done", {"status": "converged"})
@@ -1218,10 +1246,10 @@ async def get_deliverable(run_id: str, user_id: str, did: str) -> dict | None:
     run = await get_run(run_id, user_id)
     if run is None:
         return None
-    spec = next((s for s in DELIVERABLE_SPEC if s[0] == did), None)
+    spec = next((a for a in ARTIFACT_SPEC if a["id"] == did), None)
     if spec is None:
         return None
-    _, name, meta = spec
+    name, meta = spec["name"], spec["meta"]
 
     state = _state_from_run(run)
     try:
@@ -1236,19 +1264,43 @@ async def get_deliverable(run_id: str, user_id: str, did: str) -> dict | None:
         "meta": meta,
         "data": doc,
         "content": st.deliverable_markdown(doc, name) if doc else "",
-        # 这份能不能导出 PDF —— 只有报告有排版好的 PDF（见 pdf_export 的说明）。
-        # 前端据此决定要不要显示「下载 PDF」按钮，而不是点了才发现不支持。
-        "pdf": bool(doc and doc.get("kind") == "report"),
+        # 支持的导出格式。前端据此显示按钮、路由据此校验 ——
+        # 一份产出物能导什么，由**它的类型**决定，不由调用方猜。
+        "formats": list(spec["formats"]) if doc else [],
+        "primary": spec["primary"],
+        "desc": spec["desc"],
         "generated_at": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M"),
     }
 
 
-async def get_deliverable_pdf(run_id: str, user_id: str, did: str) -> bytes | None:
-    """把交付物导出成 PDF 字节。不支持的类型返回 None（由路由层 404）。
+# ══════════════════════════════════════════════════════════════════════
+# 导出：按格式分派
+# ══════════════════════════════════════════════════════════════════════
+# 每种格式只做**渲染**，不重算任何业务数字 —— 数据来自与 `get_deliverable`
+# 同一套 builder，两者不会漂。
+#
+# ⚠️ 格式支持由产出物**自己声明**（ARTIFACT_SPEC 的 formats），
+# 不在这里按 did 写 if/else。加一种产出物时只改那一处。
+_EXT = {"pdf": "pdf", "csv": "csv", "md": "md"}
+_MIME = {
+    "pdf": "application/pdf",
+    # ⚠️ CSV 带 BOM 才是给人用的（Excel 中文不乱码），见 st.list_csv 的说明
+    "csv": "text/csv; charset=utf-8",
+    "md": "text/markdown; charset=utf-8",
+}
 
-    只做排版，不重算业务数字 —— 数据来自 `get_deliverable` 的同一套 builder，
-    两者不会漂（见 pdf_export 的说明）。
+
+async def export_deliverable(run_id: str, user_id: str, did: str,
+                             fmt: str) -> tuple[bytes, str, str] | None:
+    """导出产出物。返回 `(字节, 文件名, MIME)`；不支持则 None（路由层 404）。
+
+    支持格式以 `ARTIFACT_SPEC` 的声明为准 —— 声明了 md 但没有专门的渲染器时
+    走 `deliverable_markdown`（所有类型都有），所以 md 是天然兜底。
     """
+    spec = next((a for a in ARTIFACT_SPEC if a["id"] == did), None)
+    if spec is None or fmt not in spec["formats"]:
+        return None
+
     run = await get_run(run_id, user_id)
     if run is None:
         return None
@@ -1257,12 +1309,24 @@ async def get_deliverable_pdf(run_id: str, user_id: str, did: str) -> bytes | No
     try:
         doc = st.build_deliverable(state, did)
     except Exception as e:
-        logger.warning(f"[planning] PDF 生成前置失败 {did}: {e}")
+        logger.warning(f"[planning] 导出前置失败 {did}: {e}")
+        return None
+    if not doc:
         return None
 
+    name = spec["name"]
     try:
-        from src.agents.independent.planning.pdf_export import build_report_pdf
-        return build_report_pdf(doc)
+        if fmt == "pdf":
+            from src.agents.independent.planning.pdf_export import build_report_pdf
+            data = build_report_pdf(doc)
+            if not data:
+                return None
+        elif fmt == "csv":
+            data = st.list_csv(doc).encode("utf-8-sig")
+        else:  # md
+            data = st.deliverable_markdown(doc, name).encode("utf-8")
     except Exception as e:
-        logger.error(f"[planning] PDF 导出失败 {did}: {e}", exc_info=True)
+        logger.error(f"[planning] 导出 {did}.{fmt} 失败: {e}", exc_info=True)
         return None
+
+    return data, f"{name}.{_EXT.get(fmt, fmt)}", _MIME.get(fmt, "application/octet-stream")

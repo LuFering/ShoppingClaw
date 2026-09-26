@@ -1027,8 +1027,97 @@ def budget_chart(state: dict) -> dict:
                          _budget_yuan(state.get("budget")))
 
 
+def build_list_doc(state: dict) -> dict:
+    """**采购清单** —— 照着它下单的那一份。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：为什么单独出这一份
+    ═══════════════════════════════════════════════════════════════════
+    报告是「读完知道为什么」的文档，但用户真正在**下单那一刻**要的不是
+    文档，是一张能照着买的清单：买哪件、几份、多少钱、去哪家店。
+
+    这两件事的形态不同：
+      · 报告要读（段落、依据、取舍逻辑）
+      · 清单要查（一行一件，可以对勾、可以导出到表格）
+
+    所以清单**不复用报告的段落**，而是把每件商品拍平成一行，
+    并给出可直接复制的 item_id 与店铺名 —— 用户拿它去淘宝搜得到。
+    同时导出 CSV，能直接进 Excel 做预算表。
+    """
+    items = plan_items(state)
+    rows = []
+    for i in items:
+        price = _num(i.get("price_yuan"))
+        qty = _num(i.get("quantity")) or 1
+        sub = _num(i.get("subtotal"))
+        rows.append({
+            "category": item_category(i),
+            "name": str(i.get("name") or ""),
+            "item_id": str(i.get("item_id") or ""),
+            "shop": str(i.get("shop_name") or i.get("shop") or ""),
+            "unit_price": price,
+            "quantity": qty,
+            "subtotal": sub,
+            # 理由截断 —— 清单里只要一句话，长论证在报告里
+            "note": str(i.get("why") or "")[:60],
+        })
+
+    budget = _budget_yuan(state.get("budget"))
+    total = plan_total(state)
+    # 缺小计的件数：清单必须如实说明「这几行没算进去」
+    missing = [r["category"] for r in rows if r["subtotal"] is None]
+
+    return {
+        "kind": "list",
+        "rows": rows,
+        "total": total,
+        "budget": budget,
+        "remaining": (budget - total) if (total is not None and budget) else None,
+        "missing": missing,
+        "note": (
+            "单价与商品信息为淘宝实时返回；数量为依据场景的估算，"
+            "下单前请核对规格与运费。"
+        ),
+    }
+
+
+def list_csv(doc: dict) -> str:
+    """把采购清单导成 CSV —— 能直接进 Excel 做预算表。
+
+    ⚠️ 用 `utf-8-sig`（带 BOM）而不是 utf-8：Excel 在中文 Windows 上
+    默认按 GBK 解码，没有 BOM 的 UTF-8 中文会全是乱码。这是导 CSV 给
+    人用的标准做法，不是可有可无的细节。
+    """
+    import csv
+    import io
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["品类", "商品", "单价(元)", "数量", "小计(元)", "店铺", "item_id", "备注"])
+    for r in doc.get("rows") or []:
+        w.writerow([
+            r.get("category") or "",
+            r.get("name") or "",
+            "" if r.get("unit_price") is None else f"{r['unit_price']:.2f}",
+            r.get("quantity") or "",
+            "" if r.get("subtotal") is None else f"{r['subtotal']:.2f}",
+            r.get("shop") or "",
+            r.get("item_id") or "",
+            r.get("note") or "",
+        ])
+    if doc.get("total") is not None:
+        w.writerow([])
+        w.writerow(["合计", "", "", "", f"{doc['total']:.2f}"])
+        if doc.get("budget"):
+            w.writerow(["预算", "", "", "", f"{doc['budget']:.2f}"])
+        if doc.get("remaining") is not None:
+            w.writerow(["结余", "", "", "", f"{doc['remaining']:.2f}"])
+    return buf.getvalue()
+
+
 DELIVERABLE_BUILDERS = {
     "d-report": build_report_doc,
+    "d-list": build_list_doc,
     "d-plan": build_plan_doc,
     "d-compare": build_compare_doc,
     "d-budget": build_budget_doc,
@@ -1121,6 +1210,29 @@ def deliverable_markdown(doc: dict, name: str) -> str:
         if doc.get("dimensions"):
             L += ["", "## 评估维度", "", "、".join(doc["dimensions"])]
         L += ["", "---", "", doc.get("generated_note") or ""]
+
+    elif kind == "list":
+        L += ["| 品类 | 商品 | 单价 | 数量 | 小计 |", "|---|---|---:|---:|---:|"]
+        for r in doc.get("rows") or []:
+            up = f"¥{r['unit_price']:g}" if r.get("unit_price") is not None else "—"
+            sub = f"¥{r['subtotal']:g}" if r.get("subtotal") is not None else "待估"
+            L.append(f"| {r.get('category') or ''} | {r.get('name') or ''} | {up} "
+                     f"| {r.get('quantity') or ''} | {sub} |")
+        if doc.get("total") is not None:
+            L.append(f"| **合计** | | | | **¥{doc['total']:g}** |")
+        if doc.get("remaining") is not None:
+            L.append(f"| 结余 | | | | ¥{doc['remaining']:g} |")
+        # item_id 单独给一段 —— 它很长，放在表里会把表撑爆，
+        # 但用户要拿它去淘宝搜，必须给全
+        with_id = [r for r in (doc.get("rows") or []) if r.get("item_id")]
+        if with_id:
+            L += ["", "## item_id（去淘宝搜同款用）", ""]
+            for r in with_id:
+                L.append(f"- {r.get('category') or ''}：`{r['item_id']}`")
+        if doc.get("missing"):
+            L += ["", f"> ⚠️ {'、'.join(doc['missing'])} 未估出用量，小计与合计未含。"]
+        if doc.get("note"):
+            L += ["", doc["note"]]
 
     elif kind == "plan":
         L += [

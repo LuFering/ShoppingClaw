@@ -154,34 +154,37 @@ async def get_deliverable(
     return {"success": True, "data": d}
 
 
-@router.get("/runs/{run_id}/deliverables/{did}/pdf")
-async def download_deliverable_pdf(
+@router.get("/runs/{run_id}/deliverables/{did}/export/{fmt}")
+async def export_deliverable(
     run_id: str,
     did: str,
+    fmt: str,
     current_user: User = Depends(get_required_user),
 ):
-    """交付物导出 PDF —— 报告类交付物的「正式文件」形态。
+    """导出产出物：`fmt` ∈ {pdf, csv, md}。
+
+    ⚠️ 支持哪些格式由**产出物自己声明**（后端 ARTIFACT_SPEC 的 formats），
+    这里不写 if/else —— 声明了没实现的渲染器会在服务层返回 None，走到 404。
 
     ⚠️ 文件名用 RFC 5987 的 `filename*=UTF-8''…` 传中文：
-    只给 `filename=` 的话，HTTP 头按 latin-1 编码，中文会变成乱码
-    （浏览器里就是一堆问号）。前端用 <a download> 时同理。
+    只给 `filename=` 的话 HTTP 头按 latin-1 编码，中文会变成乱码
+    （浏览器里就是一堆问号）。
     """
     from urllib.parse import quote
 
-    pdf = await planning_service.get_deliverable_pdf(run_id, _uid(current_user), did)
-    if not pdf:
-        raise HTTPException(status_code=404, detail="这份交付物没有 PDF")
+    got = await planning_service.export_deliverable(
+        run_id, _uid(current_user), did, fmt
+    )
+    if got is None:
+        raise HTTPException(status_code=404, detail=f"这份交付物不支持导出为 {fmt}")
+    data, fname, mime = got
 
-    # 取交付物名字拼文件名（取不到就退回 id）
-    d = await planning_service.get_deliverable(run_id, _uid(current_user), did)
-    base = (d or {}).get("name") or did
-    fname = f"{base}.pdf"
     return Response(
-        content=pdf,
-        media_type="application/pdf",
+        content=data,
+        media_type=mime,
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{did}.pdf"; '
+                f'attachment; filename="{did}.{fmt}"; '
                 f"filename*=UTF-8''{quote(fname)}"
             ),
         },

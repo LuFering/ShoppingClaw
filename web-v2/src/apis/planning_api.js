@@ -93,15 +93,14 @@ export const planningApi = {
   },
 
   /**
-   * 交付物的 PDF 字节流 → 触发浏览器下载。
+   * 导出产出物：`fmt` ∈ {pdf, csv, md}。拿到字节流 → 触发浏览器下载。
    *
-   * 不走 `apiGet`：那个封装会 `res.json()`，而 PDF 是二进制。这里直接
-   * fetch 拿 blob。
+   * 不走 `apiGet`：那个封装会 `res.json()`，而这些是二进制/纯文本文件。
    *
    * ⚠️ 不能把 token 拼进 URL（`?token=`）：那样 token 会进浏览器历史、
    * nginx 日志、Referer —— 后端也不认这种传法，会 401。
    */
-  async downloadPdf(runId, did, filename) {
+  async exportArtifact(runId, did, fmt, filename) {
     let headers = {}
     try {
       const { useUserStore } = await import('@/stores/user')
@@ -109,7 +108,8 @@ export const planningApi = {
     } catch { /* 未登录则由后端 401 */ }
 
     const resp = await fetch(
-      `/api/planning/runs/${encodeURIComponent(runId)}/deliverables/${encodeURIComponent(did)}/pdf`,
+      `/api/planning/runs/${encodeURIComponent(runId)}`
+      + `/deliverables/${encodeURIComponent(did)}/export/${encodeURIComponent(fmt)}`,
       { headers }
     )
     if (!resp.ok) throw new Error(`导出失败（HTTP ${resp.status}）`)
@@ -118,7 +118,7 @@ export const planningApi = {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = filename || '采购规划报告.pdf'
+    a.download = filename || `artifact.${fmt}`
     document.body.appendChild(a)
     a.click()
     a.remove()

@@ -59,6 +59,22 @@
             <p class="hint-sub">阶段推进中，决策图会逐步长出来。</p>
           </template>
         </div>
+        <!--
+          ═══════════════════════════════════════════════════════════════
+          主区两种形态：决策图 ↔ 产出物预览
+          ═══════════════════════════════════════════════════════════════
+          产出物正文**全宽**渲染在这里，而不是塞进 320px 的右栏 ——
+          报告是一份文档，窄栏里读不下去（见 ArtifactPreview 的说明）。
+          右栏退回「列出产出了什么、让别人能拿走」。
+        -->
+        <template v-else-if="previewItem">
+          <ArtifactPreview
+            :d="previewItem"
+            :busy="exportBusy"
+            @export="onExport"
+            @close="previewId = ''"
+          />
+        </template>
         <template v-else>
           <PurchaseDecisionGraph
             :graph-data="graphData"
@@ -85,12 +101,14 @@
       </section>
 
       <section class="wb-col wb-col--right">
-        <DeliverablesPanel
+        <ArtifactsPanel
           :items="deliverables"
           :question="pendingQuestion"
+          :busy="exportBusy"
+          :active-id="previewId"
           @answer="onAnswer"
-          @download="onDownload"
-          @download-pdf="onDownloadPdf"
+          @preview="onPreview"
+          @export="onExport"
         />
       </section>
     </div>
@@ -121,7 +139,8 @@ import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
 import AgentExecStream from '@/components/purchase/AgentExecStream.vue'
 import PurchaseDecisionGraph from '@/components/purchase/PurchaseDecisionGraph.vue'
-import DeliverablesPanel from '@/components/purchase/DeliverablesPanel.vue'
+import ArtifactsPanel from '@/components/purchase/ArtifactsPanel.vue'
+import ArtifactPreview from '@/components/purchase/ArtifactPreview.vue'
 import { planningApi } from '@/apis/planning_api'
 import { demoStatus } from '@/apis/demoStatus'
 import {
@@ -364,8 +383,11 @@ const upsertDeliverable = (d) => {
     // 正文被丢掉 —— 面板就只剩文件名，只能靠弹窗再请求一次，
     // 而那次请求返回的又是同一段节点罗列。这是「交付物很简陋」的一半原因。
     data: d.data ?? null,
-    // 能不能导出 PDF（只有报告能）。事件里不带，靠收尾后 loadSnapshot 补齐。
-    pdf: Boolean(d.pdf),
+    // 产出物元信息（支持哪些格式、是否主件、说明）。
+    // 事件里带，兜底路径在 DELIVERABLE_FALLBACK 里给。
+    formats: d.formats || [],
+    primary: Boolean(d.primary),
+    desc: d.desc || '',
   }
   if (i >= 0) deliverables.value[i] = { ...deliverables.value[i], ...item }
   else deliverables.value.push(item)
@@ -405,11 +427,16 @@ const loadSnapshot = async () => {
           const got = await planningApi.getDeliverable(runId.value, d.id)
           upsertDeliverable({
             ...d,
+            formats: got?.formats || d.formats || [],
+            primary: got?.primary ?? d.primary ?? false,
+            desc: got?.desc || d.desc || '',
             state: got?.data ? 'ready' : 'empty',
             data: got?.data || null,
-            // 后端说这份能不能导 PDF（只有报告能）——
-            // 不带上的话按钮会按 undefined 判false，永远不显示
-            pdf: Boolean(got?.pdf),
+            // 产出物元信息：支持哪些格式、是否主件、一句话说明。
+            // 不带上的话下载按钮会是空的（它们按 formats 生成）
+            formats: got?.formats || d.formats || [],
+            primary: got?.primary ?? d.primary ?? false,
+            desc: got?.desc || d.desc || '',
           })
         } catch {
           // 取不到就如实标成无内容，不假装已生成
@@ -427,9 +454,12 @@ const loadSnapshot = async () => {
 }
 
 const DELIVERABLE_FALLBACK = [
-  // 报告排第一 —— 它是主件，另外三份是明细附件（与后端 DELIVERABLE_SPEC 一致）
-  { id: 'd-report', name: '采购规划报告', meta: '完整方案：结论、依据、预算与风险' },
-  { id: 'd-plan', name: '采购方案.md', meta: '含清单、顺序与依赖' },
+  // 与后端 ARTIFACT_SPEC 一致。formats 决定显示哪几个下载按钮 ——
+  // 兜底路径也要给，否则事件还没到时按钮是空的。
+  { id: 'd-report', name: '采购规划报告', meta: '完整方案：结论、依据、预算与风险',
+    formats: ['pdf', 'md'], primary: true, desc: '读这一份就够：先讲清约束与结论，再逐项给推荐与理由，最后是风险。' },
+  { id: 'd-list', name: '采购清单', meta: '照着下单：商品、数量、价格、item_id',
+    formats: ['csv', 'md'], primary: false, desc: '下单时用的那一份。含 item_id，可直接去淘宝搜同款；可导 CSV 做预算表。' },
   { id: 'd-compare', name: '候选对比表', meta: '按硬约束逐项横比' },
   { id: 'd-budget', name: '预算分配表', meta: '按类别拆分预算' }
 ]
@@ -491,42 +521,50 @@ const onAnswer = async (key) => {
   }
 }
 
-const onDownload = async (d) => {
-  if (!runId.value) return
-  try {
-    const data = await planningApi.getDeliverable(runId.value, d.id)
-    if (!data?.content) return
-    const blob = new Blob([data.content], { type: 'text/markdown;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${data.name || 'deliverable'}.md`
-    a.click()
-    URL.revokeObjectURL(url)
-  } catch (e) {
-    loadError.value = e?.message || '下载失败'
-  }
+/**
+ * 预览：把产出物的**正文**放到主区全宽渲染。
+ *
+ * ⚠️ 只切视图，不重新取数据 —— `d.data` 已经随事件下发了（收尾时也
+ * 会补一次）。重新取一遍会出现「点了预览、正文闪一下才出来」，
+ * 而且网络失败时明明有内容却显示空态。
+ */
+const previewId = ref('')
+const previewItem = computed(() =>
+  deliverables.value.find((x) => x.id === previewId.value) || null
+)
+
+const onPreview = (d) => {
+  previewId.value = previewId.value === d.id ? '' : d.id
 }
 
 /**
- * 导出 PDF。
+ * 导出：一份产出物 × 一种格式。
  *
- * 比 Markdown 多两件事要做对：
+ * 格式由产出物**自己声明**（`d.formats`），按钮也是按它生成的 ——
+ * 这里只负责把字节弄下来。
+ *
+ * 两件要做对的事：
  *   1. **忙态**：PDF 要服务端排版，有几秒钟。不加忙态用户会连点，
- *      导出多份。所以先把这一份标成 pdfBusy，再恢复。
+ *      导出好几份。忙态按 `${id}:${fmt}` 记，不同格式互不阻塞。
  *   2. **文件名**：报告标题里有「·」（「搬家 · 采购规划报告」），
- *      某些系统不允许。换成下划线。
+ *      某些文件系统不允许，换成下划线。
  */
-const onDownloadPdf = async (d) => {
-  if (!runId.value || d.pdfBusy) return
-  upsertDeliverable({ ...d, pdfBusy: true })
+const exportBusy = ref({})
+
+const onExport = async ({ d, fmt }) => {
+  if (!runId.value) return
+  const key = `${d.id}:${fmt}`
+  if (exportBusy.value[key]) return
+  exportBusy.value = { ...exportBusy.value, [key]: true }
   try {
-    const safe = String(d.name || '采购规划报告').replace(/[\\/:*?"<>|·]/g, '_')
-    await planningApi.downloadPdf(runId.value, d.id, `${safe}.pdf`)
+    const safe = String(d.name || 'export').replace(/[\\/:*?"<>|·]/g, '_')
+    await planningApi.exportArtifact(runId.value, d.id, fmt, `${safe}.${fmt}`)
   } catch (e) {
-    loadError.value = e?.message || 'PDF 导出失败'
+    loadError.value = e?.message || `导出 ${fmt.toUpperCase()} 失败`
   } finally {
-    upsertDeliverable({ ...d, pdfBusy: false })
+    const next = { ...exportBusy.value }
+    delete next[key]
+    exportBusy.value = next
   }
 }
 
@@ -787,8 +825,8 @@ onBeforeUnmount(() => { try { abort?.abort?.() } catch { /* ignore */ } })
   &:hover { color: var(--text); background: var(--bg-sunken); }
 }
 
-/* 交付物正文现在**就地**渲染在右栏（DeliverablesPanel），
-   不再有弹窗预览 —— 原先的 .wb-preview 是那个弹窗的样式，已随之删除。 */
+/* 产出物正文由 ArtifactPreview 在**主区全宽**渲染（2026-09-27 重构），
+   右栏 ArtifactsPanel 只列清单。原先 .wb-preview 是弹窗预览的样式，已删。 */
 
 @media (max-width: 1100px) {
   .wb-body {
