@@ -608,20 +608,10 @@ class GiftRun(Base):
     # 档案抬头 {name, initial, meta, sub, completeness}
     profile_head = Column(JSONB, nullable=False, default=dict)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 交付状态
-    # ═══════════════════════════════════════════════════════════════════
-    # 用户原话：「点击生成交付即可在历史记录将待交付转变成已交付」。
-    #
-    # 为什么要**落库**而不是前端记一个 ref：交付状态是这条采购记录跨会话
-    # 的属性 —— 关掉页面、换台设备、三天后回来看，它还是「已交付」。
-    # 前端 ref 一刷新就没了，历史列表也就无从显示。
-    #
-    # ⚠️ 与 `status` 的区别（两个不同的东西，别混）：
-    #   status      **推演**的状态：running / awaiting / converged / failed
-    #   delivered   用户的**交付动作**：跑完了 ≠ 交付了。收敛只说明方案算好了，
-    #               交付是用户确认「这份我拿走了」——要留痕、要能在历史里区分。
-    delivered_at = Column(DateTime, nullable=True)
+    # ⚠️ 2026-09-27：这里曾被误加 `delivered_at`（见下方说明），已移除 ——
+    # 送礼侧还没有交付流程，字段加了但 to_dict 与数据库都没有，导致
+    # `select gift_runs.delivered_at` 直接报 UndefinedColumn（入口页 500）。
+    # 需要时再加，并且要**同时**改 to_dict 与迁移。
 
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
