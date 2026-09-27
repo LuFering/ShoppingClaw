@@ -485,6 +485,21 @@ class PlanningRun(Base):
     # 所以推演过程中边跑边落这里（见 planning_service._persist_products）。
     products = Column(JSONB, nullable=False, default=dict)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 交付状态
+    # ═══════════════════════════════════════════════════════════════════
+    # 用户原话：「点击生成交付即可在历史记录将待交付转变成已交付」。
+    #
+    # 为什么要**落库**而不是前端记一个 ref：交付状态是这条采购记录跨会话
+    # 的属性 —— 关掉页面、换台设备、三天后回来看，它还是「已交付」。
+    # 前端 ref 一刷新就没了，历史列表也就无从显示。
+    #
+    # ⚠️ 与 `status` 的区别（两个不同的东西，别混）：
+    #   status      **推演**的状态：running / awaiting / converged / failed
+    #   delivered   用户的**交付动作**：跑完了 ≠ 交付了。收敛只说明方案算好了，
+    #               交付是用户确认「这份我拿走了」——要留痕、要能在历史里区分。
+    delivered_at = Column(DateTime, nullable=True)
+
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
@@ -506,6 +521,9 @@ class PlanningRun(Base):
             "answer_label": self.answer_label,
             "answer_question": self.answer_question,
             "products": self.products or {},
+            # 交付状态：前端据此显示「待交付 / 已交付」，历史列表也用它
+            "delivered_at": format_utc_datetime(self.delivered_at),
+            "delivered": bool(self.delivered_at),
             "error": self.error,
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at) if self.updated_at else None,
@@ -589,6 +607,21 @@ class GiftRun(Base):
     understanding = Column(JSONB, nullable=False, default=dict)
     # 档案抬头 {name, initial, meta, sub, completeness}
     profile_head = Column(JSONB, nullable=False, default=dict)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 交付状态
+    # ═══════════════════════════════════════════════════════════════════
+    # 用户原话：「点击生成交付即可在历史记录将待交付转变成已交付」。
+    #
+    # 为什么要**落库**而不是前端记一个 ref：交付状态是这条采购记录跨会话
+    # 的属性 —— 关掉页面、换台设备、三天后回来看，它还是「已交付」。
+    # 前端 ref 一刷新就没了，历史列表也就无从显示。
+    #
+    # ⚠️ 与 `status` 的区别（两个不同的东西，别混）：
+    #   status      **推演**的状态：running / awaiting / converged / failed
+    #   delivered   用户的**交付动作**：跑完了 ≠ 交付了。收敛只说明方案算好了，
+    #               交付是用户确认「这份我拿走了」——要留痕、要能在历史里区分。
+    delivered_at = Column(DateTime, nullable=True)
 
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)

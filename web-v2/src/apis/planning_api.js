@@ -93,6 +93,20 @@ export const planningApi = {
   },
 
   /**
+   * 标记这条采购已交付 —— 「生成交付」按钮的动作。
+   *
+   * 与「取交付物正文」是两件事：正文在收敛时就算好并下发过了；这个接口
+   * 记的是**用户的交付确认**，历史列表据此把「待交付」变成「已交付」。
+   * 未收敛时后端返回 409，这里如实抛错给界面提示。
+   */
+  async markDelivered(runId) {
+    const res = await apiPost(
+      `/api/planning/runs/${encodeURIComponent(runId)}/deliver`, {}, {}, true
+    )
+    return res?.data || null
+  },
+
+  /**
    * 导出产出物：`fmt` ∈ {pdf, csv, md}。拿到字节流 → 触发浏览器下载。
    *
    * 不走 `apiGet`：那个封装会 `res.json()`，而这些是二进制/纯文本文件。

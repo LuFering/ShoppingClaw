@@ -1,32 +1,28 @@
 <template>
   <div class="wb">
-    <!-- 页头：agent 身份 + 当前任务 + 操作 -->
-    <header class="wb-head">
-      <span class="wb-sig">采</span>
-      <div class="wb-id">
-        <p class="wb-name">采办 · 采购规划</p>
-        <p class="wb-task">{{ taskLabel }}</p>
-      </div>
-      <div class="wb-actions">
-        <button class="wb-btn" type="button" @click="router.push('/planning')">回入口</button>
-        <button v-if="demoStatus.planning" class="wb-btn" type="button" @click="loadSnapshot">
-          重试
-        </button>
-        <button
-          class="wb-btn"
-          type="button"
-          :disabled="runStatus !== 'converged' || saving"
-          @click="saveToArchive"
-        >{{ saved ? '已存入档案' : '存入档案' }}</button>
-        <button
-          class="wb-btn primary"
-          type="button"
-          :disabled="!deliverables.length || runStatus !== 'converged' || producing"
-          @click="produceAll"
-        >{{ producing ? '正在取回…' : '生成交付' }}</button>
-      </div>
-    </header>
-
+    <!--
+      页头：与全站 PageHeader 对齐。
+      ⚠️ 原先这里是自绘的 `.wb-sig` + `.wb-name` + `.wb-task` 三件套，
+      与 /planning 入口页、/agents 等标准页**对不齐**：印章尺寸、标题字号、
+      desc 行距都各写一套（用户看出「第一张图的 ui 需要改下，和其他界面
+      设计齐平」）。现在直接复用 PageHeader —— 它是全站统一的那一层，
+      印章配色走 --mark-bg/--mark-fg，采购沿用站点主色。
+    -->
+    <PageHeader title="采办 · 采购规划" :desc="taskLabel || '采购规划任务'">
+      <template #mark>采</template>
+      <template #stats>
+        <span class="stat-pill" :class="`is-${runStatus}`">{{ STATUS_LABEL[runStatus] || runStatus }}</span>
+        <span v-if="deliveredAt" class="stat-pill is-done">已交付</span>
+      </template>
+      <template #actions>
+        <a-button size="small" class="lucide-icon-btn" @click="router.push('/planning')">
+          <ArrowLeft :size="14" /><span>回入口</span>
+        </a-button>
+        <a-button v-if="demoStatus.planning" size="small" class="lucide-icon-btn" @click="loadSnapshot">
+          <RotateCw :size="14" /><span>重试</span>
+        </a-button>
+      </template>
+    </PageHeader>
     <!-- 三栏：过程 / 推理 / 产出 -->
     <div class="wb-body">
       <section class="wb-col wb-col--left">
@@ -106,9 +102,16 @@
           :question="pendingQuestion"
           :busy="exportBusy"
           :active-id="previewId"
+          :run-status="runStatus"
+          :delivered-at="deliveredAt"
+          :delivering="delivering"
+          :saving="saving"
+          :saved="saved"
           @answer="onAnswer"
           @preview="onPreview"
           @export="onExport"
+          @deliver="onDeliver"
+          @archive="saveToArchive"
         />
       </section>
     </div>
@@ -137,6 +140,8 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ArrowLeft, RotateCw } from 'lucide-vue-next'
+import PageHeader from '@/components/PageHeader.vue'
 import StageExecStream from '@/components/purchase/StageExecStream.vue'
 import PurchaseDecisionGraph from '@/components/purchase/PurchaseDecisionGraph.vue'
 import ArtifactsPanel from '@/components/purchase/ArtifactsPanel.vue'
@@ -179,6 +184,14 @@ const pushRow = (row) => {
   // 用前端到达时刻而不是后端写入时刻：两者差一个网络往返，而用户感知的
   // 静默是**界面**的静默，不是数据库的。
   stream.value.push({ ...row, at: new Date().toISOString(), uid: `r${++streamSeq}` })
+}
+
+/** run 状态 → 中文。页头的状态胶囊用它 —— 与入口页历史列表同一套词 */
+const STATUS_LABEL = {
+  running: '推演中',
+  awaiting: '待你确认',
+  converged: '已收敛',
+  failed: '失败',
 }
 
 const taskLabel = computed(() => {
@@ -457,6 +470,8 @@ const loadSnapshot = async () => {
   try {
     const run = await planningApi.getRun(runId.value)
     runStatus.value = run.status
+    // 交付状态从后端读 —— 它跨会话持久，不是前端的一次性标记
+    deliveredAt.value = run.delivered_at || ''
     graphData.value = run.graph
     graphMeta.value = run.meta || {}
     pendingQuestion.value = run.question
@@ -709,34 +724,57 @@ const briefThesis = () => {
   return `共 ${n} 个决策节点，选定 ${sel.length} 件：${sel.map((x) => x.name.slice(0, 8)).join('、')}`
 }
 
-const producing = ref(false)
+/**
+ * 交付时刻（ISO 串）。有值即表示这条采购已交付 —— 历史列表据此显示
+ * 「已交付」，右栏交付条据此换成已交付那一条。
+ */
+const deliveredAt = ref('')
+const delivering = ref(false)
 
 /**
- * 「生成交付」= 把三份交付物的正文取回来。
+ * 「生成交付」= **记下交付确认**，让这条采购从「待交付」变成「已交付」。
  *
- * 后端在收敛时就已算好并随事件下发过；这个按钮是给「事件丢了 / 中途刷新 /
- * 想重新拉一次」准备的，所以它是**真的去取**，而不是把状态标成 ready。
- * 原先这里只做 `state: 'ready'` 的映射 —— 没有正文也照样显示「已生成」，
- * 点开是空的。状态必须跟着内容走。
+ * ═══════════════════════════════════════════════════════════════════
+ * 2026-09-27：原实现点了没反应，因为这个动作原先不存在
+ * ═══════════════════════════════════════════════════════════════════
+ * 旧实现（produceAll）做的是「把交付物正文再取一遍」—— 而正文在收敛时
+ * 就已经算好并随事件下发过了（`_finish` 里发的 deliverable 事件），
+ * 所以点了之后界面上**什么都不会变**。用户的原话「生成交付按钮无效」，
+ * 准确。
+ *
+ * 现在它是真的一个动作：告诉后端「这份我拿走了」。产出物本身在收敛时就
+ * 已生成，这一步交付的是**用户的确认** —— 它要留痕（历史列表要能区分
+ * 待交付与已交付），所以走接口落库，不只是前端改个 ref。
+ *
+ * 顺带把产出物正文再取一次：万一先前的事件流丢过（中途刷新、断线），
+ * 交付这一刻是最后一次补齐的机会。
  */
-const produceAll = async () => {
-  if (!runId.value || producing.value) return
-  producing.value = true
+const onDeliver = async () => {
+  if (!runId.value || delivering.value) return
+  delivering.value = true
   try {
+    // 先补齐正文（正文可能因断线缺失，交付时最后兜一次）
     await Promise.all(deliverables.value.map(async (d) => {
+      if (d.state === 'ready' && d.data) return
       try {
         const got = await planningApi.getDeliverable(runId.value, d.id)
         upsertDeliverable({
           ...d,
           state: got?.data ? 'ready' : 'empty',
           data: got?.data || null,
+          formats: got?.formats || d.formats || [],
         })
       } catch {
         upsertDeliverable({ ...d, state: 'empty', data: null })
       }
     }))
+    const got = await planningApi.markDelivered(runId.value)
+    deliveredAt.value = got?.delivered_at || new Date().toISOString()
+    message.success('已交付，可在采购历史里查看')
+  } catch (e) {
+    loadError.value = e?.message || '交付失败，请重试'
   } finally {
-    producing.value = false
+    delivering.value = false
   }
 }
 
@@ -753,71 +791,9 @@ onBeforeUnmount(() => { try { abort?.abort?.() } catch { /* ignore */ } })
   background: var(--bg-base);
 }
 
-/* 页头 */
-.wb-head {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-surface);
-}
-.wb-sig {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  background: var(--accent-50);
-  color: var(--accent-700);
-  font-size: 0.78rem;
-  font-weight: 600;
-}
-.wb-id {
-  min-width: 0;
-}
-.wb-name {
-  margin: 0;
-  font-size: 0.86rem;
-  font-weight: 600;
-  color: var(--text-strong);
-}
-.wb-task {
-  margin: 1px 0 0;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.wb-actions {
-  margin-left: auto;
-  display: flex;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-.wb-btn {
-  font-family: var(--font-body);
-  font-size: 0.74rem;
-  padding: 5px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: color 0.15s ease-out, border-color 0.15s ease-out, background-color 0.15s ease-out;
-  &:hover { color: var(--text); }
-  &:disabled { opacity: 0.45; cursor: not-allowed; }
-  &.primary {
-    background: var(--accent-solid);
-    border-color: var(--accent-solid);
-    color: var(--on-accent);
-    &:hover:not(:disabled) { background: var(--accent-600); }
-  }
-}
+/* 页头改用全站的 PageHeader（见模板说明）—— 原先自绘的
+   .wb-head/.wb-sig/.wb-id/.wb-name/.wb-task/.wb-actions/.wb-btn 已删。
+   那些样式与标准页各写一套，正是「界面不齐平」的来源。 */
 
 /* 三栏 */
 .wb-body {

@@ -141,6 +141,30 @@ async def answer(
     return {"success": True, "data": run}
 
 
+@router.post("/runs/{run_id}/deliver")
+async def mark_delivered(
+    run_id: str,
+    current_user: User = Depends(get_required_user),
+):
+    """标记这条采购已交付 —— 「生成交付」按钮的动作。
+
+    ⚠️ 与「取交付物正文」是两件事，别混（这个区分原先不存在，导致按钮
+    点了没反应）：正文在收敛时就算好并随事件下发过了；这个接口记的是
+    **用户的交付确认**，历史列表据此把「待交付」变成「已交付」。
+
+    未收敛的任务如实拒绝（409），前端据此给提示 —— 不静默失败。
+    """
+    got = await planning_service.mark_delivered(run_id, _uid(current_user))
+    if got is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if got.get("rejected") == "not_converged":
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务还在「{got.get('status')}」，尚无可交付的成果",
+        )
+    return {"success": True, "data": got}
+
+
 @router.get("/runs/{run_id}/deliverables/{did}")
 async def get_deliverable(
     run_id: str,

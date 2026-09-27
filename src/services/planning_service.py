@@ -37,6 +37,7 @@ from src.agents.independent.common_llm import DeltaPump
 from src.storage.postgres.manager import pg_manager
 from src.agents.independent.planning.graph import get_planning_agent
 from src.storage.postgres.models_business import PlanningEvent, PlanningRun
+from src.utils.datetime_utils import utc_now_naive
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,12 @@ async def get_run(run_id: str, user_id: str) -> PlanningRun | None:
 
 
 async def list_runs(user_id: str, limit: int = 20) -> list[dict]:
-    """该用户的 run 列表（新的在前），供入口页显示「进行中 N 个」。"""
+    """该用户的 run 列表（新的在前）。
+
+    两个用途共用：入口页的「进行中 N 个」统计，以及**采购历史**那一栏。
+    历史那一栏要显示每条的交付状态与规模，所以这里顺带把 run 的产物摘要
+    一起算好 —— 前端不必为每一条再发一次请求（列表 20 条就是 20 个请求）。
+    """
     async with pg_manager.get_async_session_context() as session:
         r = await session.execute(
             select(PlanningRun)
@@ -135,7 +141,66 @@ async def list_runs(user_id: str, limit: int = 20) -> list[dict]:
             .order_by(desc(PlanningRun.created_at))
             .limit(limit)
         )
-        return [row.to_dict() for row in r.scalars().all()]
+        return [_with_summary(row) for row in r.scalars().all()]
+
+
+def _with_summary(run: PlanningRun) -> dict:
+    """补上历史列表要用的摘要：几个品类、多少钱。
+
+    ⚠️ 从 `products.plan` 里读**已经算好的**值，不在这里重算 ——
+    交付物那边是同一套 builder，两处各算一遍必然漂（这个项目里踩过多次）。
+    方案还没定下来时如实留空，不编。
+    """
+    d = run.to_dict()
+    plan = (run.products or {}).get("plan") or {}
+    items = [i for i in (plan.get("items") or []) if isinstance(i, dict)]
+    d["summary"] = {
+        "categories": len(items),
+        "total": plan.get("total"),
+        # 报告里的总额以 total_estimate 为准时，plan.total 可能为空 —— 退回逐件求和
+        "picked": len(items),
+    }
+    if d["summary"]["total"] is None and items:
+        subs = [i.get("subtotal") for i in items]
+        if subs and all(s is not None for s in subs):
+            d["summary"]["total"] = round(sum(float(s) for s in subs), 2)
+    return d
+
+
+async def mark_delivered(run_id: str, user_id: str) -> dict | None:
+    """标记这条采购已交付 —— 「生成交付」按钮的动作。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：这个动作原先**不存在**
+    ═══════════════════════════════════════════════════════════════════
+    页头那个「生成交付」按钮做的事其实是「把交付物正文再取一遍」——
+    而正文在收尾时就已经算好并下发过了，所以点了之后**界面上什么都不会变**。
+    用户的原话是「右侧的生成交付按钮无效」，准确。
+
+    现在它是真的一个动作：记下交付时刻，历史列表据此把「待交付」变成
+    「已交付」。产出物本身在收敛时就已生成，这一步交付的是**用户的确认**。
+
+    只有收敛（converged）的 run 能交付 —— 还在跑或失败的任务没有可交付的
+    东西，允许标记会让历史里出现「已交付但什么都没有」的记录。
+    """
+    async with pg_manager.get_async_session_context() as session:
+        r = await session.execute(
+            select(PlanningRun).where(
+                PlanningRun.id == run_id, PlanningRun.user_id == user_id
+            )
+        )
+        run = r.scalar_one_or_none()
+        if run is None:
+            return None
+        if run.status != "converged":
+            # 如实拒绝，并说清原因 —— 前端据此显示提示而不是静默失败
+            return {"rejected": "not_converged", "status": run.status}
+        # 幂等：重复点不该把时间刷成新的
+        if run.delivered_at is None:
+            run.delivered_at = utc_now_naive()
+        await session.commit()
+        await session.refresh(run)
+        return _with_summary(run)
 
 
 async def list_events(run_id: str, after_seq: int = 0, limit: int = 500) -> list[dict]:

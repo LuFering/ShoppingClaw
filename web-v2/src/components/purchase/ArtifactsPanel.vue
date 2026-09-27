@@ -5,6 +5,58 @@
       <span class="ap-sub mono">{{ readyCount }} / {{ items.length }}</span>
     </header>
 
+    <!--
+      ═══════════════════════════════════════════════════════════════
+      交付条：跟状态走
+      ═══════════════════════════════════════════════════════════════
+      用户原话：「右侧的生成交付按钮无效……点击生成交付即可在历史记录将
+      待交付转变成已交付」。
+
+      那个按钮在**页头**，作用是「把交付物正文再取一遍」—— 而正文在收敛时
+      就算好并下发过了，所以点了界面上什么都不会变。它还有一层门槛
+      （`runStatus !== 'converged'` 时 disabled），但**为什么不能点**没人说。
+
+      现在把它搬到右栏顶部，做成一条**说明当前状态**的条：
+        · 还在推演 → 说明还差什么（已选几个品类），不给按钮
+        · 已收敛   → 变成主操作：「生成交付」+「存入档案」
+        · 已交付   → 显示交付时刻，并指向采购历史
+      门槛不再是「灰着的按钮」，而是**一句话**。
+    -->
+    <div class="ap-bar" :class="`is-${deliverState}`">
+      <template v-if="deliverState === 'delivered'">
+        <span class="ap-bar-mark">✓</span>
+        <span class="ap-bar-text">
+          已交付 · {{ deliveredClock }}
+          <span class="ap-bar-sub">已归入采购历史</span>
+        </span>
+      </template>
+
+      <template v-else-if="deliverState === 'ready'">
+        <span class="ap-bar-text">交付成果已就绪</span>
+        <div class="ap-bar-acts">
+          <button class="ap-bar-btn primary" type="button" :disabled="delivering" @click="$emit('deliver')">
+            {{ delivering ? '正在交付…' : '生成交付' }}
+          </button>
+          <button class="ap-bar-btn" type="button" :disabled="saving || saved" @click="$emit('archive')">
+            {{ saved ? '已存入档案' : '存入档案' }}
+          </button>
+        </div>
+      </template>
+
+      <template v-else-if="deliverState === 'failed'">
+        <span class="ap-bar-mark">✕</span>
+        <span class="ap-bar-text">推演失败，没有可交付的成果</span>
+      </template>
+
+      <template v-else>
+        <span class="ap-bar-mark spin">◐</span>
+        <span class="ap-bar-text">
+          还在推演，完成后可交付
+          <span v-if="pickedCount" class="ap-bar-sub">已选 {{ pickedCount }} 个品类</span>
+        </span>
+      </template>
+    </div>
+
     <div class="ap-scroll">
       <!--
         ═══════════════════════════════════════════════════════════════
@@ -119,10 +171,47 @@ const props = defineProps({
   /** 正在导出中的 `${id}:${fmt}` 集合 —— 防连点，由父层管 */
   busy: { type: Object, default: () => ({}) },
   /** 当前在预览面里打开的产出物 id */
-  activeId: { type: String, default: '' }
+  activeId: { type: String, default: '' },
+  /** run 状态：running / awaiting / converged / failed —— 交付条据此切换 */
+  runStatus: { type: String, default: 'running' },
+  /** 已交付时刻（ISO 串）；有值即表示交付过了 */
+  deliveredAt: { type: String, default: '' },
+  /** 交付请求进行中 */
+  delivering: { type: Boolean, default: false },
+  /** 存入档案的状态（父层管） */
+  saving: { type: Boolean, default: false },
+  saved: { type: Boolean, default: false }
 })
 
-defineEmits(['preview', 'export', 'answer'])
+defineEmits(['preview', 'export', 'answer', 'deliver', 'archive'])
+
+/**
+ * 交付条的状态。四态互斥，顺序即优先级。
+ *
+ * ⚠️ 「已交付」优先于「已收敛」：交付是一个**独立于推演**的动作，
+ * 跑完了不等于交付了。用户要的正是这个区分（待交付 → 已交付）。
+ */
+const deliverState = computed(() => {
+  if (props.deliveredAt) return 'delivered'
+  if (props.runStatus === 'converged') return 'ready'
+  if (props.runStatus === 'failed') return 'failed'
+  return 'running'
+})
+
+/** 已选品类数：推演中显示「已选 N 个品类」，让等待有进度感 */
+const pickedCount = computed(() => {
+  const rep = props.items.find((x) => x.id === 'd-list')
+  return rep?.data?.rows?.length || 0
+})
+
+/** 交付时刻只显示时:分 —— 列表里日期与时间是两件事，这里空间小 */
+const deliveredClock = computed(() => {
+  if (!props.deliveredAt) return ''
+  const d = new Date(props.deliveredAt)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}`
+})
 
 const readyCount = computed(() => props.items.filter((d) => d.state === 'ready').length)
 
@@ -209,6 +298,86 @@ const brief = (d) => {
   margin-left: auto;
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+
+/* ── 交付条 ──
+   四种状态共用一块地方，配色区分：等待=低调、就绪=强调、已交付=绿、失败=警示。
+   它替代了原先页头那个「灰着的、不知道为什么不能点」的按钮。 */
+.ap-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font-size: 0.73rem;
+  color: var(--text-muted);
+
+  &.is-ready {
+    background: var(--accent-50);
+    color: var(--accent-700);
+  }
+  &.is-delivered {
+    background: var(--bg-sunken);
+    color: var(--pos);
+  }
+  &.is-failed {
+    color: var(--warn);
+  }
+}
+.ap-bar-mark {
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  /* 推演中的 ◐ 在转 —— 让「它在动」可见 */
+  &.spin { animation: ap-spin 1.6s linear infinite; }
+}
+@keyframes ap-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ap-bar-mark.spin { animation: none; }
+}
+.ap-bar-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.45;
+}
+/* 副信息（已选几个品类 / 已归入历史）比主句弱一档 */
+.ap-bar-sub {
+  display: block;
+  font-size: 0.66rem;
+  color: var(--text-faint);
+}
+.ap-bar-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+.ap-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
+  &:hover:not(:disabled) { color: var(--text); border-color: var(--text-faint); }
+  &:disabled { opacity: 0.55; cursor: default; }
+  &.primary {
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--on-accent);
+    &:hover:not(:disabled) { color: var(--on-accent); }
+  }
 }
 
 .ap-scroll {

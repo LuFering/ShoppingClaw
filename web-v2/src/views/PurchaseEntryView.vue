@@ -69,6 +69,55 @@
         </button>
       </div>
     </section>
+
+    <!--
+      ═══════════════════════════════════════════════════════════════
+      采购历史
+      ═══════════════════════════════════════════════════════════════
+      用户原话：「在入口加个类似聊天记录的采购历史对话，点击生成交付即可
+      在历史记录将待交付转变成已交付」。
+
+      它同时解决两件事：
+        · 入口页原先只有「开始新的」——推演完的记录没有回来的路（除非
+          记得从档案页绕）。这里列全，点一条直接回那个工作台。
+        · 「生成交付」的**结果**要看得见。交付前这里标「待交付」，交付后
+          变成「已交付 + 时刻」——历史列表就是那个变化的落点。
+
+      排序：进行中的在最上（用户最可能回去看），其余按时间倒序。
+    -->
+    <section v-if="history.length" class="page-section">
+      <div class="page-section-head">
+        <h2 class="page-section-title">采购历史</h2>
+        <span class="page-section-meta">共 {{ runs.length }} 条</span>
+      </div>
+
+      <div class="ph-list">
+        <button
+          v-for="r in history"
+          :key="r.id"
+          class="ph-row"
+          type="button"
+          @click="openRun(r)"
+        >
+          <!-- 左侧：交付/推演状态。一眼分清「哪些还在跑、哪些已经拿走了」 -->
+          <span class="ph-state" :class="`is-${stateOf(r)}`">
+            {{ STATE_LABEL[stateOf(r)] }}
+          </span>
+
+          <span class="ph-main">
+            <span class="ph-title">{{ r.scene || '未命名采购' }}<template
+              v-if="r.budget"> · {{ r.budget }}</template></span>
+            <span class="ph-sub">{{ r.subject || '—' }}</span>
+          </span>
+
+          <span class="ph-num mono">
+            <template v-if="r.summary?.categories">{{ r.summary.categories }} 个品类</template>
+            <template v-if="r.summary?.total != null"> · ¥{{ fmtMoney(r.summary.total) }}</template>
+          </span>
+          <span class="ph-when mono">{{ whenText(r) }}</span>
+        </button>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -106,6 +155,68 @@ const picked = ref({
 const runs = ref([])
 const runningCount = computed(() => runs.value.filter((r) => r.status === 'running').length)
 const awaitingCount = computed(() => runs.value.filter((r) => r.status === 'awaiting').length)
+
+/**
+ * 一条记录的状态 —— 四态。
+ *
+ * ⚠️ 「已交付」与「已收敛」是**两件事**，别合成一个：
+ *   converged  方案算好了，但用户还没拿走
+ *   delivered  用户点了「生成交付」，确认拿走
+ * 用户要的正是这个区分（「将待交付转变成已交付」）。合成一个的话，
+ * 历史列表里就分不清「哪些我还没处理」。
+ */
+const stateOf = (r) => {
+  if (r.delivered) return 'delivered'
+  if (r.status === 'converged') return 'pending'
+  if (r.status === 'failed') return 'failed'
+  return 'running'
+}
+
+const STATE_LABEL = {
+  delivered: '已交付',
+  pending: '待交付',
+  running: '推演中',
+  failed: '失败',
+}
+
+/**
+ * 历史排序：**等待用户动作的排最前**，其余按时间倒序。
+ *
+ * 理由：这一栏的用处是「回到某次采购」。用户最可能回去的是「刚交付完
+ * 想去看看」和「还在跑、想盯进度」的，而不是上周那条已经归档的。
+ */
+const history = computed(() => {
+  const rank = { pending: 0, running: 1, delivered: 2, failed: 3 }
+  return [...runs.value].sort((a, b) => {
+    const d = (rank[stateOf(a)] ?? 9) - (rank[stateOf(b)] ?? 9)
+    if (d !== 0) return d
+    return new Date(b.created_at || 0) - new Date(a.created_at || 0)
+  })
+})
+
+const fmtMoney = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  return Number.isInteger(n) ? n.toLocaleString('en-US') : n.toFixed(2)
+}
+
+/** 相对时间：今天只给时:分，一周内给「N 天前」，更早给日期 */
+const whenText = (r) => {
+  const t = r.delivered_at || r.created_at
+  if (!t) return ''
+  const d = new Date(t)
+  if (Number.isNaN(d.getTime())) return ''
+  const diff = Date.now() - d.getTime()
+  const day = 86400000
+  const p = (n) => String(n).padStart(2, '0')
+  if (diff < day && new Date().getDate() === d.getDate()) return `${p(d.getHours())}:${p(d.getMinutes())}`
+  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`
+  return `${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+const openRun = (r) => {
+  router.push({ path: '/planning/run', query: { run: r.id } })
+}
 
 onMounted(async () => {
   runs.value = await planningApi.listRuns()
@@ -255,6 +366,85 @@ const startFromPreset = (preset) => {
   margin: 8px 0 0;
   font-size: 0.76rem;
   color: var(--neg);
+}
+
+/* ── 采购历史 ──
+   一行一条，四段：状态 / 主体 / 规模 / 时间。
+   状态在左且带色 —— 这一栏要回答的第一件事就是「哪些还要我管」。 */
+.ph-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.ph-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease-out;
+  &:last-child { border-bottom: none; }
+  &:hover { background: var(--bg-sunken); }
+}
+/* 状态胶囊：颜色是这一栏的主要信息载体 */
+.ph-state {
+  flex: 0 0 auto;
+  width: 52px;
+  text-align: center;
+  font-size: 0.66rem;
+  padding: 2px 0;
+  border-radius: 3px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  &.is-delivered { color: var(--pos); }
+  &.is-pending { color: var(--accent-700); background: var(--accent-50); }
+  &.is-running { color: var(--info); }
+  &.is-failed { color: var(--warn); }
+}
+.ph-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ph-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ph-sub {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ph-num {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.ph-when {
+  flex: 0 0 auto;
+  width: 62px;
+  text-align: right;
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  white-space: nowrap;
 }
 
 /* 预设方案卡：容器用全局 .tile-grid / .tile，这里只调排版。
