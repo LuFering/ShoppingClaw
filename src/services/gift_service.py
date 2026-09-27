@@ -426,7 +426,12 @@ async def _on_model_token(run_id: str, chunk: Any, pump: DeltaPump) -> None:
 # 现在走法由模型定，service 只能按它调的工具归类。
 # 同一个步骤可能被调多次（多轮搜索）—— 前端按 key 聚合成一个块。
 _TOOL_META: dict[str, tuple[str, str, str]] = {
-    "read_recipient": ("understand", "理解关系", "读收礼人的档案"),
+    # ⚠️ 两个工具映射到**同一个左栏步骤**（对用户仍是「理解关系」一步）。
+    # 拆成两个是为了让档案**分两批到达** —— 它们本来就是两次独立的查询
+    #（历史一次、偏好一次），各自返回后立即推一批，这才是真实的生长节奏。
+    # 合并成一个工具的话五组会在 15 毫秒内一起到，界面上就是一「啪」全出来。
+    "read_history": ("understand", "理解关系", "读历史决策记录"),
+    "read_preferences": ("understand", "理解关系", "读长期偏好"),
     "search_gifts": ("search", "检索商品", "用品类词搜真实商品"),
     "screen_candidates": ("verify", "比价验货", "排除不合适的"),
     "compose_gift": ("combine", "组合礼盒", "让模型决定这几件如何构成一体"),
@@ -519,8 +524,10 @@ def _describe_call(name: str, args: dict) -> tuple[str, str, list]:
     """把工具调用翻成人话。标题写模型**要做什么**，不是工具名。"""
     if name == "search_gifts":
         return (f"搜「{args.get('keyword') or ''}」", "找真实商品", [])
-    if name == "read_recipient":
-        return ("读收礼人的档案", "看历史决策与长期偏好", [])
+    if name == "read_history":
+        return ("读历史决策记录", "以前送过什么、什么阶段", [])
+    if name == "read_preferences":
+        return ("读长期偏好", "品牌、预算、场景、在意点", [])
     if name == "screen_candidates":
         names = args.get("names") or []
         return (f"排除 {len(names)} 件", str(args.get("reason") or ""), [])
@@ -645,20 +652,21 @@ async def _after_tool(run_id: str, tool: str, acc: dict,
     if meta and left.get(meta[0], 0) > 0:
         return   # 同批还有未返回的，等最后一个回来时一起发
 
-    if tool == "read_recipient":
-        # ⚠️ 档案必须在这里**发事件 + 落库** —— 旧流程里这是 `_on_node`
-        # 的 understand 分支干的事，改成 ReAct 后我漏掉了，后果是中栏五组
-        # 全是「尚未读到…」、完整度显示 0/0，而左栏却写着「读到母亲 · 52 岁」
-        #（左栏读的是工具返回文本，中栏读的是 profile 事件 —— 两条路）。
+    if tool in ("read_history", "read_preferences"):
+        # 各自推**自己那批**（`build_profile(only=...)` 已经筛过了）。
+        # 前端按 key 更新，所以后一批会补进已有档案，而不是替换。
         profile = acc.get("profile") or []
         if profile:
-            await _patch_run(run_id, profile=profile)
             for g in profile:
                 await emit(run_id, "profile", {
                     "key": g["key"], "state": g["state"],
                     "text": g["text"], "note": g.get("note"),
                     "source": g.get("source"),
                 })
+        # ⚠️ 档案必须在这里**发事件 + 落库** —— 旧流程里这是 `_on_node`
+        # 的 understand 分支干的事，改成 ReAct 后我漏掉了，后果是中栏五组
+        # 全是「尚未读到…」、完整度显示 0/0，而左栏却写着「读到母亲 · 52 岁」
+        #（左栏读的是工具返回文本，中栏读的是 profile 事件 —— 两条路）。
 
     elif tool == "search_gifts":
         await _emit_finding(run_id, "searched",

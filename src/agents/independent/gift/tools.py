@@ -88,31 +88,67 @@ def _to_stage_state(state: dict) -> dict:
 # ══════════════════════════════════════════════════════════════
 
 @tool
-async def read_recipient(
+async def read_history(
     state: Annotated[dict, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
-    """读收礼人的历史决策与长期偏好，组装人物档案。
+    """读收礼人的**历史决策记录**（以前送过什么、什么阶段、什么反馈）。
 
-    **开始任何送礼推演前都该先调这个** —— 不知道对方是谁、喜欢什么，
-    后面搜什么都只能靠猜。读不到会如实告诉你「暂无记录」，
-    那就按通用方向准备，**不要假装了解对方**。
+    这是了解一个人最实的一块：TA 收到过什么、哪些被排除过。
+    与 `read_preferences` 是**两次独立的查询**，你可以只调其中一个。
+
+    读不到会如实告诉你「没有记录」—— 那就按通用方向准备，
+    **不要假装了解对方**。
     """
     from src.agents.independent.gift import stages as st
 
     history = await st.read_history(state)
-    prefs = await st.read_preferences(state)
-    ctx = {"history": history, "prefs": prefs, "raw_ok": bool(history or prefs)}
-    profile = st.build_profile(state, ctx)
+    ctx = {"history": history, "prefs": [], "raw_ok": bool(history)}
+    # 这两组依赖历史：禁忌来自「已排除」记录，生活状态靠历史是否有记录来推断
+    profile = st.build_profile(state, ctx, only=("relation", "life", "taboo",
+                                                "giftpref"))
 
-    lines = []
-    for g in profile:
-        lines.append(f"· {g['label']}：{g.get('text') or '（无）'}"
-                     + (f"（{g['source']}）" if g.get("source") else ""))
-    body = ("读到的档案：\n" + "\n".join(lines)
-            if any(g.get("state") == "confirmed" for g in profile)
-            else "档案里没有关于这位收礼人的记录（只有通用信息）。\n"
-                 "后续请按通用方向准备，并在结论里说明「无具体偏好依据」。")
+    if history:
+        lines = [f"· {h.get('target') or h.get('recommend') or '（无题）'}"
+                 f"（{h.get('phase') or '—'}）" for h in history[:5]]
+        body = f"读到 {len(history)} 条历史决策：\n" + "\n".join(lines)
+    else:
+        body = ("没有关于这位收礼人的历史决策记录。\n"
+                "后续请按通用方向准备，并在结论里说明「无历史依据」。")
+
+    return Command(update={
+        "context": ctx,
+        "profile": profile,
+        "messages": [_note(body, tool_call_id)],
+    })
+
+
+@tool
+async def read_preferences(
+    state: Annotated[dict, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """读用户的**长期偏好**（品牌、预算、场景、在意点等档案字段）。
+
+    这是第二次独立查询 —— 与 `read_history` 的结果互为补充。
+    读不到会如实说明，**不要编造偏好**。
+    """
+    from src.agents.independent.gift import stages as st
+
+    prefs = await st.read_preferences(state)
+    prev = state.get("context") or {}
+    ctx = {"history": prev.get("history") or [], "prefs": prefs,
+           "raw_ok": bool(prev.get("raw_ok") or prefs)}
+    # 已知喜好依赖偏好查询；这里同时补上完整五组，供下游（combine）使用
+    profile = st.build_profile(state, ctx, only=("likes",))
+
+    if prefs:
+        # 只显示**值**：键名是机器名（gift_for_mom_budget_max），
+        # 原样铺出来只是一串读不懂的字段
+        vals = [str(p.get("value") or p) for p in prefs if isinstance(p, dict)]
+        body = f"读到 {len(prefs)} 条长期偏好：\n" + "、".join(vals[:8])
+    else:
+        body = "没有读到长期偏好记录。"
 
     return Command(update={
         "context": ctx,
@@ -365,7 +401,8 @@ def ask_user(
 
 
 GIFT_TOOLS = [
-    read_recipient,
+    read_history,
+    read_preferences,
     search_gifts,
     screen_candidates,
     compose_gift,

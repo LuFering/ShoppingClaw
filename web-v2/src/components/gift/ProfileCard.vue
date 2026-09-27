@@ -10,7 +10,11 @@
       <div class="pc__id">
         <div class="pc__namerow">
           <h2 class="pc__name">{{ head.name }}</h2>
-          <span class="pc__complete">{{ head.completeness }}</span>
+          <!--
+            ⚠️ 这里原本还有一个「档案完整 2/5」的胶囊，与下方进度条重复。
+            同一个数字出现两次既冗余、又占掉了名字右边的空间（窄屏会挤掉名字）。
+            完整度统一由进度条表达 —— 它还能逐格点亮，比一个静态数字更有信息量。
+          -->
         </div>
         <p class="pc__rel">{{ head.meta }}</p>
 
@@ -34,6 +38,39 @@
       {{ opening.text }}
       <span class="pc__opening-sub">{{ opening.sub }}</span>
     </p>
+
+    <!--
+      ═══════════════════════════════════════════════════════════════
+      档案绘制进度 —— 「从 0 开始绘制」的可见载体
+      ═══════════════════════════════════════════════════════════════
+      用户的原话：「没有那种让我感觉到 agent 正在从 0 绘制个人档案的感觉」。
+
+      查实的原因：五组档案在 **15 毫秒**内全部到达 —— 后端确实是一批批发的
+      （历史一批、偏好一批，相隔 400ms），但两次查询都是本地的，加起来
+      还不够一次眨眼。**光靠到达时刻做不出「绘制感」**。
+
+      所以这里补一层视觉：五个格子从一开始就画出来（空心的），每读到一个
+      就点亮一个。用户看到的是「0/5 → 1/5 → 2/5」这个**计数器在动**，
+      而不是「五条一起出现」。
+
+      ⚠️ 它不造假：格子数 = 档案组数（固定 schema），点亮数 = 真实已确认数
+      （由后端 build_profile_head 算）。推进慢是因为数据来得慢，不是因为
+      我们拖时间。
+    -->
+    <div class="pc__meter" :class="{ 'is-complete': confirmedCount >= totalGroups }">
+      <span class="pc__meter-label">
+        档案完整
+        <b class="mono">{{ confirmedCount }}/{{ totalGroups }}</b>
+      </span>
+      <span class="pc__meter-cells">
+        <i
+          v-for="n in totalGroups"
+          :key="n"
+          class="pc__cell"
+          :class="{ on: n <= confirmedCount }"
+        />
+      </span>
+    </div>
 
     <!-- 人物侧写：编辑式排版，小标签 + 大正文 -->
     <section class="pc__section">
@@ -201,6 +238,19 @@ const props = defineProps({
 defineEmits(['act'])
 
 const stateLabel = (s) => (s === 'inferred' ? '推测' : s === 'pending' ? '待确认' : '')
+
+/**
+ * 绘制进度：已确认组数 / 档案组总数。
+ *
+ * ⚠️ 分母用 props.groups 的长度（五组是固定 schema，从第一秒就在），
+ * 不用「已到达的组数」—— 后者会让分母也一起涨，进度条永远满格，
+ * 反而看不出「填了多满」。分子只算 confirmed：那是**真读到了**的，
+ * 含 inferred/pending 会把「没有依据的推测」也算成已绘制。
+ */
+const totalGroups = computed(() => props.groups.length || 5)
+const confirmedCount = computed(
+  () => props.groups.filter((g) => g.state === 'confirmed').length
+)
 
 /** 到达时刻（时:分:秒）—— 「这一条是什么时候读到的」 */
 const clock = (d) => {
@@ -448,6 +498,51 @@ const dangerGroups = computed(() => props.groups.filter((g) => g.danger))
 }
 @media (prefers-reduced-motion: reduce) {
   .gr--fresh { animation: none; }
+}
+
+/* 绘制进度：五格一条，逐格点亮。比抬头那个「档案完整 2/5」更醒目 ——
+   它是这一版「从 0 绘制」的主视觉。 */
+.pc__meter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 20px 4px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.pc__meter-label {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  b { margin-left: 3px; color: var(--text-strong); }
+}
+.pc__meter-cells {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 4px;
+}
+.pc__cell {
+  flex: 1 1 0;
+  height: 5px;
+  border-radius: 3px;
+  /* 空心 = 还没读到。它从一开始就在，让「总共要填几格」可见 */
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  box-sizing: border-box;
+  transition: background-color 0.35s ease-out, border-color 0.35s ease-out;
+  &.on {
+    background: var(--gift-accent);
+    border: 1px solid var(--gift-accent);
+  }
+}
+/* 全部点亮时整条变绿，给一个「填满了」的收束感 */
+.pc__meter.is-complete {
+  background: color-mix(in srgb, var(--gift-accent-soft) 55%, transparent);
+  .pc__meter-label { color: var(--gift-accent); b { color: var(--gift-accent); } }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pc__cell { transition: none; }
 }
 
 /* 开场陈述：起点那句「我还不了解 TA」。比正文弱一档 —— 它是过渡语，

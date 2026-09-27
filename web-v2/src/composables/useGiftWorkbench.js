@@ -64,12 +64,23 @@ export function useGiftWorkbench({ runId } = {}) {
     () => deliverables.value.filter((d) => d.state === 'ready' || d.state === 'needs').length
   )
 
+  /**
+   * 标记「这一条刚到」，触发一次脉冲动画。
+   *
+   * ⚠️ 不能 `forEach` 把别人的 fresh 清掉 —— 档案是**成批到达**的
+   *（历史那批一次来 4 组）。每来一条就清一次的话，只有最后一条会闪光，
+   * 前三条静悄悄地出现 —— 那正是「看不出在绘制」的原因之一。
+   *
+   * 现在改成**只点亮当前这条**、定时统一熄灭。一批 4 条各闪各的，
+   * 视觉上就是「连着亮了几下」。
+   */
   const markFresh = (key) => {
     freshKey.value = key
-    profile.value.forEach((g) => { g.fresh = g.key === key })
+    const g = profile.value.find((x) => x.key === key)
+    if (g) g.fresh = true
     clearTimeout(freshTimer)
     freshTimer = setTimeout(() => {
-      profile.value.forEach((g) => { g.fresh = false })
+      profile.value.forEach((x) => { x.fresh = false })
       freshKey.value = ''
     }, 2400)
   }

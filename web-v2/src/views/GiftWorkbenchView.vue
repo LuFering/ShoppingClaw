@@ -144,9 +144,11 @@ const head = computed(() => profileHead.value || {
   initial: (task.value?.recipient || '礼').slice(0, 1),
   meta: task.value?.occasion || '送礼',
   sub: `预算 ¥${task.value?.budget || '—'}`,
-  // 「读取中…」而不是编一个「档案完整 4/5」—— 完整度由后端按真实
-  // 已确认组数算（build_profile_head），前端不猜。
-  completeness: '档案读取中…'
+  // ⚠️ 完整度**不在这里给** —— 卡片自己有一条「档案完整 N/5」的进度条，
+  // 按真实已确认组数逐格点亮（见 ProfileCard 的 pc__meter）。
+  // 原先这里塞了个「档案读取中…」，与进度条同时显示两个完整度，
+  // 看着像两个互相矛盾的指标。留空即不渲染。
+  completeness: ''
 })
 
 const toast = ref('')
