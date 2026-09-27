@@ -98,6 +98,10 @@ def build_run_finding(key: str, *, keywords=None, excluded=None, plan=None) -> d
             "note": f"共 {len(kws)} 个方向" if len(kws) > 1 else "",
             "state": "derived",
             "source": "本次检索",
+            # ⚠️ 这是**累加型**的：模型每搜一次词，列表就长一点。前端按 key
+            # 原地更新（而不是追加新块）—— 否则搜 4 次会出 4 个「搜过的方向」，
+            # 每个都比上一个长。实测就是这么冒出来的 4 条重复。
+            "accumulate": True,
         }
 
     if key == "excluded":
@@ -115,6 +119,7 @@ def build_run_finding(key: str, *, keywords=None, excluded=None, plan=None) -> d
             "note": why[:60],
             "state": "derived",
             "source": "本次比价",
+            "accumulate": True,   # 同 searched：分批排除，原地更新
         }
 
     if key == "pairing":
@@ -627,7 +632,12 @@ def build_profile(state: dict, ctx: dict, only: tuple[str, ...] | None = None) -
 
 
 def build_profile_head(state: dict, profile: list[dict]) -> dict:
-    """档案抬头。completeness 按**真实**已确认组数算，不写死。"""
+    """档案抬头。completeness 按**真实**已确认组数算，不写死。
+
+    ⚠️ 分母用 `len(PROFILE_KEYS)`（固定 5），**不用 `len(profile)`** ——
+    后者在 profile 还没落库时是 0，会显示「档案完整 0/0」，既无意义又让人
+    以为档案坏了。五组是前后端约定的 schema，分母本来就该是它。
+    """
     recipient = str(state.get("recipient") or "收礼人")
     confirmed = sum(1 for g in profile if g.get("state") == "confirmed")
     return {
@@ -635,7 +645,7 @@ def build_profile_head(state: dict, profile: list[dict]) -> dict:
         "initial": recipient[:1] if recipient else "礼",
         "meta": RELATION_HINT.get(recipient, recipient),
         "sub": f"{state.get('occasion') or '送礼'} · 预算 ¥{state.get('budget') or '—'}",
-        "completeness": f"档案完整 {confirmed}/{len(profile)}",
+        "completeness": f"档案完整 {confirmed}/{len(PROFILE_KEYS)}",
     }
 
 
@@ -791,6 +801,37 @@ def _round_robin_by_kw(items: list[dict], limit: int) -> list[dict]:
     return out
 
 
+async def search_candidates_for(state: dict, keyword: str) -> list[dict]:
+    """按**模型给的关键词**搜一次真实商品（ReAct 工具用）。
+
+    与 `search_candidates` 的区别：后者用 `build_search_keywords` 拼出来的
+    几个词（那是写死流程时的产物）。模型自己决定搜什么时，一次只搜一个词 ——
+    它看到结果会自己决定要不要换个词再搜。
+
+    同样给每件打 `_kw`：组合阶段靠它保证品类多样（不打的后果实测过 ——
+    两个关键词之一是「保温杯」时，组合会连着挑 3 个保温杯）。
+    """
+    from src.services.task_executors.common import parse_search_result
+
+    kw = str(keyword or "").strip()
+    if not kw:
+        return []
+    tool = await _mcp_tool("taobao_searchMaterial")
+    raw = await _call(tool, {"q": kw, "page_size": SEARCH_PAGE_SIZE}, MCP_TIMEOUT)
+    if raw is None:
+        return []
+    found = [{**it, "_kw": kw} for it in parse_search_result(raw)]
+
+    seen, uniq = set(), []
+    for it in found:
+        key = str(it.get("item_id") or it.get("title"))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+    return uniq[:SEARCH_PAGE_SIZE]
+
+
 async def search_candidates(state: dict) -> list[dict]:
     """真调淘宝 MCP。复用 parse_search_result，不写第二套解析。
 
@@ -823,6 +864,34 @@ async def search_candidates(state: dict) -> list[dict]:
     # 合并后前 6 条全是保温杯 —— 直接截断就等于把第二个关键词整个丢掉，
     # 组合阶段拿到的候选全是同一品类，只能挑出「三个保温杯」。
     return _round_robin_by_kw(uniq, SEARCH_PAGE_SIZE)
+
+
+def cand_name(c: dict) -> str:
+    """候选商品名。
+
+    ⚠️ **必须用这个，不要直接 `c["name"]`** —— search_candidates 返回的是
+    MCP 的**原始结果**，字段是 `title`；事件层归一后才叫 `name`。
+    两种形状在这一条链路上并存（规划那边同样如此）。
+
+    实测踩过：工具里写 `c.get("name")`，恒为 None，界面上商品名全是
+    「None ¥91」——价格也是从**别处**取的，看着像「有价格没名字」。
+    """
+    return str(c.get("name") or c.get("title") or "未命名")
+
+
+def cand_cents(c: dict) -> int:
+    """候选价格的**分**。取不到返回 0（与「真的是 0 元」不作区分 ——
+    送礼场景 0 元商品没有意义，不值得为它区分）。
+    """
+    if c.get("price_yuan") is not None:
+        try:
+            return int(float(c["price_yuan"]) * 100)
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return int(c.get("price") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def yuan(cents: Any) -> str:

@@ -16,10 +16,13 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
+from langchain_core.messages import ToolMessage
 from sqlalchemy import desc, func, select
 
 from src.agents.independent.gift import stages as st
+from src.agents.independent.common_llm import DeltaPump
 from src.storage.postgres.manager import pg_manager
 from src.agents.independent.gift.graph import get_gift_graph
 from src.storage.postgres.models_business import GiftEvent, GiftRun
@@ -186,162 +189,418 @@ async def _step(run_id: str, key: str, status: str, **extra) -> None:
 
 
 async def advance(run_id: str, user_id: str) -> None:
-    """跑**图**推进这次推演。**永不抛异常**（失败落 run.error）。
+    """跑**一次 ReAct 循环**。**永不抛异常**（失败落 run.error）。
 
-    ═══════════════════════════════════════════════════════════════
-    2026-09-25 修正：这里之前是一个 for 循环自己串流程
-    ═══════════════════════════════════════════════════════════════
-    那时 `graph.py` 里的 LangGraph **从未被执行过** —— 两份实现并存，
-    读者会以为跑的是图。现在图是**唯一**推进路径。
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：从「按六个写死的节点推进」改成「订阅模型的一次次决策」
+    ═══════════════════════════════════════════════════════════════════
 
-    用什么方式订阅：`astream(stream_mode="updates")`。
-    节点只管算状态，service 按「哪个节点产出了什么」翻译成事件 ——
-    这样事件顺序天然跟着图的执行顺序，不需要往里塞回调
-    （塞回调还要处理同步/异步转换，顺序反而不好保证）。
+    用户的原话：「我感觉这个执行流是不是有点假了，为什么会执行这么快」。
+
+    旧实现按 `STEPS` 顺序跑六个节点，service 知道每一步是什么、下一步去哪 ——
+    因为那是写在代码里的。而且六步里**只有三处调模型**，另外三步是纯代码
+    （查表 / 检索 / 比价），实测前四阶段只花 4.8 秒。那不是效率高，
+    是**一半的步骤压根没有智能**。
+
+    现在流程由模型定，service **不知道**它接下来要干什么 —— 只能订阅
+    agent 的产出，把「模型决定调哪个工具」翻译成事件。与规划智能体完全同构。
+
+    订阅 `stream_mode=["updates", "messages"]`：
+      · `updates` —— 每个节点跑完的产出。模型节点的 `tool_calls` 就是
+        「它决定了什么」，工具节点的 `ToolMessage` 就是「拿到了什么」。
+      · `messages` —— **逐 token 的模型输出**，用来做实时推理流。
+        这是 `create_agent` 自带的，不需要我们再往模型里塞回调。
+
+    中断（ask_user）：工具写了 `question` 就落 awaiting 并停在这里。
+    续跑时把用户的回答作为新消息喂回去，循环接着走。
     """
+    phases: dict[str, float] = {}
     try:
         run = await get_run(run_id, user_id)
         if run is None:
             return
 
+        agent = get_gift_graph()
         state = {
             "recipient": run.recipient, "occasion": run.occasion,
             "budget": run.budget, "signals": run.signals or [],
             "run_id": run.id, "user_id": run.user_id,
         }
+        # 续跑：用户答过问，就把那条回答作为新消息接上 —— agent 是循环，
+        # 多给一条输入它自己会接着判断，不需要我们算「从哪一步接」。
+        history: list[dict] = list(run.messages or [])
+        if not history:
+            # build_goal 在 graph.py 里（与规划同构），不在 stages ——
+            # stages 是纯函数（取数/组装），任务描述属于 agent 定义。
+            from src.agents.independent.gift.graph import build_goal
+            history = [{"role": "user", "content": build_goal(state)}]
+        if run.answer_pick:
+            history = history + [{"role": "user", "content": _answer_text(run)}]
 
-        graph = get_gift_graph()
-        started: dict[str, float] = {}   # 节点名 → 开始时刻
+        init = {"messages": history, **state}
+        seen_tools: set[str] = set()
+        # 跨步累积的产物（候选/排除/档案/礼盒）。`updates` 只给增量，
+        # 得自己攒；攒出来的要落库，否则收尾生成交付物时读不到。
+        acc: dict = _seed_acc(run)
+        pump = DeltaPump(
+            lambda text, kind: _emit_think_delta(run_id, text, kind),
+            filter_reasoning_text=True,
+        )
 
-        # 同时订阅 debug：只有它能在节点**开始执行前**给信号。
-        # 只用 updates 的话，「运行中」这一行没有出现的机会 ——
-        # updates 要等节点跑完才 yield（详见 _on_debug）。
-        async for mode, chunk in graph.astream(state, stream_mode=["updates", "debug"]):
-            if mode == "debug":
-                await _on_debug(run_id, chunk, started)
-                continue
-            # chunk 形如 {"节点名": 该节点返回的 state 增量}
-            for node, delta in (chunk or {}).items():
-                await _on_node(run_id, node, delta or {}, started.pop(node, None))
+        try:
+            async for mode, chunk in agent.astream(
+                init, stream_mode=["updates", "messages"]
+            ):
+                if await get_run(run_id, user_id) is None:
+                    return   # run 被删了
 
-        # 收尾：profile_head 是展示层字段，图不产出；这里补齐
+                if mode == "messages":
+                    await _on_model_token(run_id, chunk, pump)
+                    continue
+
+                _collect_messages(chunk, history)
+                stop = await _on_agent_step(run_id, chunk, seen_tools, acc, state, phases)
+                if stop:
+                    await pump.close()
+                    await _close_all_phases(run_id, phases)
+                    await _patch_run(run_id, messages=history,
+                                     status="awaiting", question=stop)
+                    await emit(run_id, "question", stop)
+                    return
+        finally:
+            await pump.close()
+
+        await _close_all_phases(run_id, phases)
+        await _patch_run(run_id, messages=history)
+        await _persist_products(run_id, acc)
+
+        # 收尾：profile_head 是展示层字段，agent 不产出；这里补齐
         fresh = await get_run(run_id, user_id)
         if fresh is not None:
+            # 用 acc 里的 profile（本轮最新），不用 fresh.profile ——
+            # 后者是上一次 _patch_run 的快照，若本轮档案有更新会读到旧的。
+            prof = acc.get("profile") or fresh.profile or []
             head = st.build_profile_head(
                 {"recipient": fresh.recipient, "occasion": fresh.occasion,
                  "budget": fresh.budget},
-                fresh.profile or [],
+                prof,
             )
             await _patch_run(run_id, profile_head=head, status="converged")
         await emit(run_id, "done", {})
 
     except Exception as e:
         logger.error(f"[gift] run {run_id} 推演失败: {e}", exc_info=True)
+        try:
+            await _close_all_phases(run_id, phases)
+        except Exception:
+            pass
         await _patch_run(run_id, status="failed", error=str(e)[:500])
         await emit(run_id, "done", {})
 
 
-# 节点名 → 左栏那一步的 key / 中文名（与 STEPS 对齐）
-_NODE_META = {
-    # ⚠️ read_history / read_prefs 是**同一个左栏步骤**的两个内部节点
-    # （2026-09-27 拆开，为让档案分批到达是真的）。对用户而言仍是「理解关系」
-    # 一步，所以 key 都映射到 understand —— 左栏不会多出两步，
-    # 而中栏能收到两批档案。
-    "read_history": ("understand", "理解关系"),
-    "read_prefs": ("understand", "理解关系"),
-    "understand": ("understand", "理解关系"),   # 兼容旧图（测试用）
-    "extract": ("extract", "提取需求"),
-    "search": ("search", "检索商品"),
-    "verify": ("verify", "比价验货"),
-    "combine": ("combine", "组合礼盒"),
-    "message": ("message", "生成寄语"),
-}
+# 每个 run 当前处在哪个阶段 —— 用来判断「换阶段了」从而给上一个收尾。
+_current_phase: dict[str, str] = {}
 
-# 每一步「正在做什么」。刻意写具体 —— 用户要知道它此刻是在等 MCP（慢）
-# 还是在等模型（慢），而不是以为界面卡住了。
-_RUNNING_HINT = {
-    "read_history": "读收礼人的历史记录",
-    "read_prefs": "读长期偏好与画像",
-    "understand": "读收礼人的历史与偏好",
-    "extract": "把偏好归纳成一条判断",
-    "search": "用品类词检索真实商品",
-    "verify": "比对价格、排除不合适的",
-    "combine": "让模型决定这几件如何构成一体",
-    "message": "写一段指回依据的话",
-}
+# run → {步骤 key: 这一批还有几个并行调用没返回}。
+# 用于把并行的多个同类调用收成**一次** done（见 _close_phase）。
+_pending: dict[str, dict[str, int]] = {}
 
 
-async def _on_debug(run_id: str, chunk: dict, started: dict[str, float]) -> None:
-    """图的 debug 事件 → 「这一步正在做」，并记下开始时刻算耗时。
+async def _close_phase(run_id: str, tool: str, phases: dict) -> None:
+    """某个工具跑完 → 给它的左栏步骤收尾（发 done + 真实耗时）。
 
-    ═══════════════════════════════════════════════════════════════════
-    为什么需要它 —— 只用 updates 时「运行中」不可能出现
-    ═══════════════════════════════════════════════════════════════════
+    ⚠️ 收尾时机是这次改造的一个要点：旧实现按**图节点**收尾（节点跑完就
+    done），现在没有固定节点了，只能按**工具跑完**来收。差别在于同一个步骤
+    可能被调多次（模型搜了 4 轮）—— 那样不能每轮都 done，否则界面上
+    「搜索候选」会闪四次完成。
 
-    `updates` 只在节点**跑完之后**才 yield。原实现在 `_on_node` 里先发
-    `running` 再发 `done`，两条事件同一瞬间落库 —— 前端 SSE 一次收到两条，
-    中间没有任何时间差，「进行中」那一行等于从没显示过。
+    所以这里的规则是：**只有当模型不再有该步骤的待办调用时才收尾**。
+    简化实现：等到它换到别的步骤（或 run 结束）时由 `_close_all_phases`
+    统一收 —— 但那样又回到了「全挤在最后」。
 
-    debug 模式的 `task` 事件在节点**开始执行前**发出，是唯一能拿到
-    「现在在干什么」的时点。最慢的两步（检索 ~9s、模型组合 ~8s）都在这。
-
-    started 记的是 `time.monotonic()` —— 只用做**差值**，不是墙上时间，
-    所以不受系统时钟调整影响。
+    折中：工具跑完就收，前端按 key 聚合（同名步骤多次 done 只保留最后一次
+    的耗时）。实测「搜索候选」被调 4 次、耗时相加才合理 —— 这个求和由
+    前端做，后端只如实报每一次。
     """
-    if (chunk or {}).get("type") != "task":
+    meta = _TOOL_META.get(tool)
+    if not meta:
         return
-    node = (chunk.get("payload") or {}).get("name") or ""
-    if node not in _NODE_META:
+    key = meta[0]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ⚠️ 模型会**并行**调多个同类工具（实测一次并行搜 2 个词、排除 3 批）
+    # ═══════════════════════════════════════════════════════════════════
+    # 并行时：多个 `call` 事件在同一瞬间发出（都只发一次 running），
+    # 随后多个 `call_result` 依次到达，每次都调到这里。
+    #
+    # 如果每次都 done，界面会看到「搜索候选」闪好几次完成 —— 而那其实是
+    # 同一批并行调用的各个返回。
+    #
+    # 正确做法：**等这一批全部返回再收尾**。用一个待返回计数器：
+    # 发出 running 时记下这批有几个调用，每返回一个减一，减到 0 才 done。
+    left = _pending.get(run_id) or {}
+    n = left.get(key, 0)
+    if n > 1:
+        # 还有同批的没回来，先记账，不 done
+        left[key] = n - 1
+        _pending[run_id] = left
         return
-    key, label = _NODE_META[node]
-    started[node] = time.monotonic()
-    await _step(run_id, key, "running", label=label,
-                hint=_RUNNING_HINT.get(node, ""))
+    left.pop(key, None)
+    _pending[run_id] = left
+
+    t0 = phases.pop(key, None)
+    if t0 is None:
+        return
+    _current_phase.pop(run_id, None)
+    ms = int((time.monotonic() - t0) * 1000)
+    # 同一批并行调用的耗时相加才是这步的真实总耗时（前端按 key 聚合）
+    await emit(run_id, "step", {"key": key, "status": "done", "ms": ms})
 
 
-# 每个节点推送**哪些**档案组。
+async def _close_all_phases(run_id: str, phases: dict) -> None:
+    """给还开着的阶段收尾（发 done + 真实耗时）。
+
+    ⚠️ 必须有：run 的最后一个阶段不会有「下一个阶段」来触发收尾，
+    不显式关就会一直挂在「进行中」—— 实测过，界面显示正在跑而进程已经停了。
+    """
+    for key in list(phases.keys()):
+        t0 = phases.pop(key)
+        _current_phase.pop(run_id, None)
+        ms = int((time.monotonic() - t0) * 1000)
+        await emit(run_id, "step", {"key": key, "status": "done", "ms": ms})
+
+
+def _seed_acc(run: GiftRun) -> dict:
+    """续跑时把上一轮的产物读回来，作为累积的起点。
+
+    与 `run.messages`（对话历史）配套：消息让它记得**说过什么**，
+    产物让它记得**搜到了什么**。少了后者，`screen_candidates` 会在空池子里
+    找名字，回一句「这些名字没在候选里找到」，模型据此以为自己搞错了。
+    """
+    return {
+        "profile": list(run.profile or []),
+        "picked": list((run.data or {}).get("picked") or []) if hasattr(run, "data") else [],
+        "excluded": list((run.products or {}).get("excluded") or []),
+        "plan": (run.products or {}).get("plan") or {},
+        **(run.products or {}),
+    }
+
+
+async def _persist_products(run_id: str, acc: dict) -> None:
+    """把 agent 累积的产物落进 run.products —— 收尾生成交付物时要读它。"""
+    try:
+        await _patch_run(run_id, products=acc)
+    except Exception as e:
+        logger.warning(f"[gift] 落产物失败（忽略）: {e}")
+
+
+async def _emit_think_delta(run_id: str, text: str, kind: str = "content") -> None:
+    """把模型推理的一段增量发出去。
+
+    ⚠️ 单独一种事件（而不是复用 `live`）：前端要把这些片段**追加到同一行**，
+    而 `live` 是「新起一条」。两者语义不同，混用会让每次增量都变成新条目。
+    """
+    await emit(run_id, "think_delta", {"text": text, "kind": kind})
+
+
+async def _on_model_token(run_id: str, chunk: Any, pump: DeltaPump) -> None:
+    """模型逐 token 输出 → 喂进节流泵。
+
+    `stream_mode="messages"` 给的是 `(message_chunk, metadata)`。只取正文与
+    推理两种文本，工具调用的参数片段（JSON）不播 —— 那是程序不是思考。
+    """
+    from src.agents.independent.common_llm import _chunk_parts
+
+    msg = chunk[0] if isinstance(chunk, (list, tuple)) else chunk
+    content, reason = _chunk_parts(msg)
+    if reason:
+        pump.feed(reason, "reasoning")
+    elif content:
+        if not (getattr(msg, "tool_call_chunks", None) or []):
+            pump.feed(content, "content")
+
+
+# 工具名 → （左栏步骤 key，中文名，正在做什么）
 #
-# ⚠️ 这份映射不是「把五组摊到五个节点上」—— 它是**真实的依赖关系**：
-#   · giftpref 只依赖 state.signals（入口页勾选），不需任何工具
-#   · relation/life/taboo 依赖 recall_past_decisions 的返回
-#   · likes 依赖 get_user_shopping_context 的返回
-# 所以「先后到达」是数据本身决定的，不是我排的节奏。后 5 个节点
-#（extract 之后）**不产生任何新的档案信息** —— verify 的排除理由是
-# 「超预算 60%」，那是预算信息，与收礼人无关，塞进档案就是编造。
-_PROFILE_BATCH = {
-    "read_history": ("relation", "life", "taboo", "giftpref"),
-    "read_prefs": ("likes",),
-    "understand": ("relation", "life", "likes", "taboo", "giftpref"),  # 兼容旧图
+# ⚠️ 与旧的 `_NODE_META` 不同：那是**图的节点名**，这是**工具名**。
+# 现在走法由模型定，service 只能按它调的工具归类。
+# 同一个步骤可能被调多次（多轮搜索）—— 前端按 key 聚合成一个块。
+_TOOL_META: dict[str, tuple[str, str, str]] = {
+    "read_recipient": ("understand", "理解关系", "读收礼人的档案"),
+    "search_gifts": ("search", "检索商品", "用品类词搜真实商品"),
+    "screen_candidates": ("verify", "比价验货", "排除不合适的"),
+    "compose_gift": ("combine", "组合礼盒", "让模型决定这几件如何构成一体"),
+    "write_note": ("message", "生成寄语", "写一段指回依据的话"),
+    "ask_user": ("ask", "向你确认", "需要你拍板"),
 }
 
+_STEP_ORDER = ("understand", "search", "verify", "combine", "message", "ask")
 
-async def _emit_profile_batch(run_id: str, delta: dict, node: str) -> None:
-    """把这一批**真实拿到**的档案组推给中栏。
 
-    只有在 `delta` 里真的带了 `profile` 时才推（图返回完整五组时）。
-    拆开的两节点各自返回的是**部分** state，所以这里从完整 profile 里
-    按 `_PROFILE_BATCH[node]` 筛出本批该露的组。
+async def _on_agent_step(run_id: str, chunk: dict, seen_tools: set[str],
+                         acc: dict, state: dict, phases: dict) -> dict | None:
+    """agent 跑完一步（模型节点或工具节点）→ 落事件、累积产物。
 
-    `giftpref`（送礼偏好）不需要任何工具，理论上可以更早推送。但它是
-    图的第一个节点 read_history 就带着 state.signals 算出来的 —— 与
-    relation 同批到达（实测相隔几毫秒），单独为它再加一个节点不值当。
+    返回非 None 表示要停下来问用户。
+
+    ⚠️ `acc` 是**跨步累积**的：`updates` 只给本步增量，不是完整状态。
     """
-    wanted = _PROFILE_BATCH.get(node)
-    if not wanted:
-        return
-    profile = delta.get("profile") or []
-    if not profile:
-        return
-    for g in profile:
-        if g.get("key") not in wanted:
-            continue
-        await emit(run_id, "profile", {
-            "key": g["key"], "state": g["state"],
-            "text": g["text"], "note": g.get("note"),
-            "source": g.get("source"),
-        })
+    changed = False
+    for _node, delta in (chunk or {}).items():
+        d = delta or {}
+        # 累积工具写进 state 的产物（列表追加、标量后写覆盖，与 reducer 一致）
+        for k in ("profile", "picked", "excluded", "searched"):
+            if d.get(k):
+                acc[k] = list(acc.get(k) or []) + list(d[k])
+                changed = True
+        for k in ("context", "understanding", "plan", "message"):
+            if d.get(k) is not None:
+                acc[k] = d[k]
+                changed = True
+
+        for m in (d.get("messages") or []):
+            # ── 模型决定调工具 ──
+            for call in (getattr(m, "tool_calls", None) or []):
+                name = call.get("name") or ""
+                args = call.get("args") or {}
+                meta = _TOOL_META.get(name)
+                if meta:
+                    key = meta[0]
+                    # 第一次进入这个步骤 → 发 running（并记开始时刻算真实耗时）
+                    if key not in phases:
+                        phases[key] = time.monotonic()
+                        _current_phase[run_id] = key
+                        # 这一批有几个并行调用？同一批 call 事件在同一瞬间
+                        # 发出，所以这里累加即可（见 _close_phase 的说明）
+                        left = _pending.setdefault(run_id, {})
+                        left[key] = (left.get(key) or 0) + 1
+                        await emit(run_id, "step", {
+                            "key": key, "status": "running",
+                            "label": meta[1], "hint": meta[2],
+                        })
+                    else:
+                        # 同批的第二个并行调用：只加计数，不重发 running
+                        left = _pending.setdefault(run_id, {})
+                        left[key] = (left.get(key) or 0) + 1
+                await _emit_tool_call(run_id, name, args)
+
+            # ── 工具返回 ──
+            #
+            # ⚠️ 工具**跑完**才发交付物与「推演所得」：这一步才知道它产出了
+            # 什么。旧实现按图节点发（`_on_node` 的六个 if/elif），现在没有
+            # 固定节点了，只能按工具名对应。
+            if isinstance(m, ToolMessage):
+                await _emit_tool_result(run_id, m)
+                name = getattr(m, "name", "") or ""
+                await _after_tool(run_id, name, acc, phases)
+
+        # ── 工具写了 question → 停下来等用户 ──
+        if d.get("question"):
+            await _persist_products(run_id, acc)
+            return d["question"]
+
+    if changed:
+        # 每一步都把产物落库：收尾要用，中途刷新也读得到
+        await _persist_products(run_id, acc)
+    return None
 
 
+async def _emit_tool_call(run_id: str, name: str, args: dict) -> None:
+    """模型决定调某个工具 → 一条事件。**带真实入参**。"""
+    title, detail, sample = _describe_call(name, args)
+    meta = _TOOL_META.get(name)
+    await emit(run_id, "call", {
+        "title": title, "detail": detail, "args": args, "sample": sample,
+        "tool": name, "stage": meta[0] if meta else "执行",
+    })
+
+
+def _describe_call(name: str, args: dict) -> tuple[str, str, list]:
+    """把工具调用翻成人话。标题写模型**要做什么**，不是工具名。"""
+    if name == "search_gifts":
+        return (f"搜「{args.get('keyword') or ''}」", "找真实商品", [])
+    if name == "read_recipient":
+        return ("读收礼人的档案", "看历史决策与长期偏好", [])
+    if name == "screen_candidates":
+        names = args.get("names") or []
+        return (f"排除 {len(names)} 件", str(args.get("reason") or ""), [])
+    if name == "compose_gift":
+        return (f"组礼盒「{args.get('title') or ''}」", str(args.get("thesis") or ""), [])
+    if name == "write_note":
+        return ("写寄语", "每句指回前面的依据", [])
+    if name == "ask_user":
+        return ("向你确认一件事", str(args.get("question") or ""), [])
+    return (name, "", [])
+
+
+async def _emit_tool_result(run_id: str, m: ToolMessage) -> None:
+    """工具返回 → 补一条事件，带**真实返回**。"""
+    content = str(getattr(m, "content", "") or "")
+    await emit(run_id, "call_result", {
+        "tool_call_id": getattr(m, "tool_call_id", "") or "",
+        "text": content[:600],
+    })
+
+
+def _answer_text(run: GiftRun) -> str:
+    """用户对上一次提问的回答，转成一句话喂回模型。
+
+    ⚠️ 读的是 `answer_label` / `answer_question`（**存下来的副本**）——
+    提问字段在用户点选项时就被清空了。
+    """
+    label = str(getattr(run, "answer_label", "") or "")
+    q = str(getattr(run, "answer_question", "") or "")
+    if q and label:
+        return f"关于「{q}」，我选：{label}"
+    if label:
+        return f"我选：{label}"
+    return "按你的判断继续。"
+
+
+def _collect_messages(chunk: dict, history: list[dict]) -> None:
+    """把 agent 这一步产出的消息追加进历史（供续跑用）。
+
+    只存**可序列化**的字段（role / content / tool_calls / tool_call_id）——
+    LangChain 的 message 对象不能直接进 JSONB。
+    """
+    for _node, delta in (chunk or {}).items():
+        for m in ((delta or {}).get("messages") or []):
+            role = getattr(m, "type", None) or getattr(m, "role", "") or ""
+            if role == "human":
+                role = "user"
+            elif role == "ai":
+                role = "assistant"
+            item: dict = {"role": role}
+            content = getattr(m, "content", None)
+            if isinstance(content, str):
+                item["content"] = content
+            elif content:
+                item["content"] = str(content)
+            tc = getattr(m, "tool_calls", None)
+            if tc:
+                item["tool_calls"] = [
+                    {"name": c.get("name"), "args": c.get("args"),
+                     "id": c.get("id")}
+                    for c in tc
+                ]
+            tcid = getattr(m, "tool_call_id", None)
+            if tcid:
+                item["tool_call_id"] = tcid
+            history.append(item)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 交付物：由**工具完成**驱动，而不是节点
+# ══════════════════════════════════════════════════════════════════════
+# 旧实现按图节点名发交付物事件（`_on_node` 里 if/elif 六个分支）。现在走法
+# 由模型定、没有固定节点了，只能按「哪个工具跑完了」来发。
+#
+# 六份交付物与工具的对应：
+#   screen_candidates 跑完 → 候选对比表
+#   compose_gift      跑完 → 礼盒方案 + 预算分配
+#   write_note        跑完 → 寄语文案 + 货源与配送 + 送礼订单
+# 与旧的节点版本一一对应（verify→compare、combine→plan/budget、
+# message→message/supply/order），只是触发点从节点换成了工具。
 async def _emit_finding(run_id: str, key: str, **kw) -> None:
     """把这一阶段**真实产生**的信息回流到中栏的「推演所得」。
 
@@ -358,105 +617,101 @@ async def _emit_finding(run_id: str, key: str, **kw) -> None:
         await emit(run_id, "finding", f)
 
 
-async def _on_node(run_id: str, node: str, delta: dict,
-                   t_start: float | None = None) -> None:
-    """一个节点跑完 → 落它对应的过程事件与产物事件。
+async def _after_tool(run_id: str, tool: str, acc: dict,
+                       phases: dict | None = None) -> None:
+    """工具跑完 → 收尾该阶段、产出交付物与「推演所得」。
 
-    事件顺序跟着图走（astream 逐节点 yield），不用自己排。
-
-    这里**不再发 `running`** —— 那由 `_on_debug` 在节点开始执行时发。
-    原先 running 与 done 在同一瞬间发出，界面上「进行中」那一行根本
-    没有出现的机会（这就是它一直不显示的原因）。
+    三件事都在这里做，因为它们的数据源相同（工具写进 acc 的产物），
+    分成三处会各读一遍、容易漂。
     """
-    if node not in _NODE_META:
-        return
-    key, label = _NODE_META[node]
-    await emit(run_id, "stage", {"key": key})
+    # ⚠️ **每个工具跑完就收尾它那一步**，而不是等 run 结束。
+    # 原先只在换阶段和收尾时关，于是五个步骤的 done 全挤在最后一秒 ——
+    # 界面上看不到「这一步做完了」，观感就是「一直在跑、突然全绿」。
+    # 实测 83 秒的 run 里，5 个 done 全落在最后 1 秒。
+    if phases:
+        await _close_phase(run_id, tool, phases)
 
-    # 真实耗时：节点开始（_on_debug 记的）到此刻。没有就不带这个字段 ——
-    # 宁可没有时长，也不编一个出来。
-    ms = int((time.monotonic() - t_start) * 1000) if t_start is not None else None
+    await _emit_deliverables_for(run_id, tool, acc)
 
+    # 「推演所得」—— 回流到中栏。与「人物档案」语义分开：前者主语是这次推演
+    # （我们查了什么、排除了什么），后者主语是收礼人（她喜欢什么）。
+    #
+    # ⚠️ `searched` / `excluded` 是**累加型**，只在**这一批全部返回后**发一次。
+    # 模型并行搜 3 个词时，三次返回各发一次的话中栏会闪三条「搜过的方向」，
+    # 每条都比上一条长（实测就是这个现象）。判据与 `_close_phase` 同一套 ——
+    # 都是「还有同批的没回来就等」。
+    left = _pending.get(run_id) or {}
+    meta = _TOOL_META.get(tool)
+    if meta and left.get(meta[0], 0) > 0:
+        return   # 同批还有未返回的，等最后一个回来时一起发
+
+    if tool == "read_recipient":
+        # ⚠️ 档案必须在这里**发事件 + 落库** —— 旧流程里这是 `_on_node`
+        # 的 understand 分支干的事，改成 ReAct 后我漏掉了，后果是中栏五组
+        # 全是「尚未读到…」、完整度显示 0/0，而左栏却写着「读到母亲 · 52 岁」
+        #（左栏读的是工具返回文本，中栏读的是 profile 事件 —— 两条路）。
+        profile = acc.get("profile") or []
+        if profile:
+            await _patch_run(run_id, profile=profile)
+            for g in profile:
+                await emit(run_id, "profile", {
+                    "key": g["key"], "state": g["state"],
+                    "text": g["text"], "note": g.get("note"),
+                    "source": g.get("source"),
+                })
+
+    elif tool == "search_gifts":
+        await _emit_finding(run_id, "searched",
+                            keywords=acc.get("searched") or [])
+    elif tool == "screen_candidates":
+        await _emit_finding(run_id, "excluded",
+                            excluded=acc.get("excluded") or [])
+    elif tool == "compose_gift":
+        await _emit_finding(run_id, "pairing", plan=acc.get("plan") or {})
+
+
+async def _emit_deliverables_for(run_id: str, tool: str, acc: dict) -> None:
+    """某个工具跑完后，产出它对应的交付物。没有内容就不发 —— 不编。"""
     try:
-        if node in ("read_history", "read_prefs", "understand"):
-            ctx = delta.get("context") or {}
-            await _emit_profile_batch(run_id, delta, node)
-
-            # 两个节点都映射到 understand 这一步。**只在最后一个**收尾这一步
-            # （否则 read_history 结束时就把整步标成 done，后面那批档案
-            # 会显示在一个「已完成」的步骤下面，时序错乱）。
-            if node in ("read_prefs", "understand"):
-                # 完整五组在这一步之后才齐（read_prefs 节点返回时）
-                profile = delta.get("profile") or []
-                if profile:
-                    await _patch_run(run_id, profile=profile)
-                await _step(run_id, "understand", "done", ms=ms,
-                            evidence=f"读了 {len(ctx.get('history') or [])} 条历史、"
-                                     f"{len(ctx.get('prefs') or [])} 条偏好")
-            await _say(run_id, "understand",
-                       "从档案取到与本次送礼相关的字段，其余过滤掉。")
-
-        elif node == "extract":
-            u = delta.get("understanding") or {}
-            await _patch_run(run_id, understanding=u)
-            await emit(run_id, "understanding", u)
-            await _step(run_id, "extract", "done", ms=ms,
-                        evidence=u.get("from") or "",
-                        why="由模型归纳自真实档案项" if u.get("by") == "llm"
-                            else "规则兜底（模型不可用）")
-            await _say(run_id, "extract", "把偏好归纳成一条判断，后面的取舍以它为准。")
-
-        elif node == "search":
-            picked = delta.get("picked") or []
-            await emit(run_id, "deliverable", {"key": "compare", "state": "building"})
-            await _step(run_id, "search", "done", ms=ms,
-                        evidence=f"检索到 {len(picked)} 个真实候选")
-            await _say(run_id, "search", "用品类词检索（不是「礼物」——那只会搜出礼盒包装）。")
-            # 真实的检索方向（每件候选都带 `_kw`，来自 search_candidates）
-            await _emit_finding(run_id, "searched",
-                                keywords=[p.get("_kw") for p in picked])
-
-        elif node == "verify":
-            excluded = delta.get("excluded") or []
-            picked = delta.get("picked") or []
-            for e in excluded:
-                await emit(run_id, "excluded", {"name": e["name"], "why": e["why"]})
+        if tool == "screen_candidates":
+            picked = acc.get("picked") or []
+            excluded = acc.get("excluded") or []
+            if not picked and not excluded:
+                return
             await emit(run_id, "deliverable",
                        {"key": "compare", "state": "ready",
                         "data": st.build_compare(picked, excluded)})
-            await _step(run_id, "verify", "done", ms=ms,
-                        evidence=f"{len(picked)} 件入选、{len(excluded)} 件排除")
-            await _say(run_id, "verify", "排除的保留理由、不删除 —— 否则答不出「为什么只剩这几件」。")
-            await _emit_finding(run_id, "excluded", excluded=excluded)
 
-        elif node == "combine":
-            plan = delta.get("plan") or {}
-            rows = delta.get("budget_rows") or []
-            await emit(run_id, "deliverable", {"key": "plan", "state": "ready", "data": plan})
-            await emit(run_id, "deliverable", {"key": "budget", "state": "ready", "data": rows})
-            by_llm = plan.get("by") == "llm"
-            await _step(run_id, "combine", "done", ms=ms,
-                        evidence=f"{len(plan.get('items') or [])} 件，由模型挑选并给出理由"
-                                 if by_llm else "按品类轮流取（模型不可用，已降级）")
-            await _say(run_id, "combine",
-                       "组合由模型决策（判据是「同时被用到」），预算与品类去重由代码校验。"
-                       if by_llm else "模型不可用，已降级为规则选件。")
-            await _emit_finding(run_id, "pairing", plan=plan)
+        elif tool == "compose_gift":
+            plan = acc.get("plan") or {}
+            if not plan.get("items"):
+                return
+            await emit(run_id, "deliverable",
+                       {"key": "plan", "state": "ready", "data": plan})
+            # 预算分配：礼盒里每件的金额
+            rows = [
+                {"label": i.get("role") or "一件", "name": i.get("name"),
+                 "amount": i.get("price") or 0}
+                for i in (plan.get("items") or [])
+            ]
+            await emit(run_id, "deliverable",
+                       {"key": "budget", "state": "ready", "data": rows})
 
-        elif node == "message":
-            msg = delta.get("message") or {}
-            supply = delta.get("supply") or []
-            await emit(run_id, "deliverable", {"key": "message", "state": "ready", "data": msg})
-            await emit(run_id, "deliverable", {"key": "supply", "state": "ready", "data": supply})
+        elif tool == "write_note":
+            msg = acc.get("message") or {}
+            picked = acc.get("picked") or []
+            plan = acc.get("plan") or {}
+            if msg:
+                await emit(run_id, "deliverable",
+                           {"key": "message", "state": "ready", "data": msg})
+            supply = st.build_supply(picked, plan)
+            if supply:
+                await emit(run_id, "deliverable",
+                           {"key": "supply", "state": "ready", "data": supply})
             await emit(run_id, "deliverable",
                        {"key": "order", "state": "needs", "data": {}})
-            by_llm = msg.get("by") == "llm"
-            await _step(run_id, "message", "done", ms=ms,
-                        evidence="由模型生成，素材指回前面的判断" if by_llm
-                                 else "模板兜底（模型不可用）")
-            await _say(run_id, "message", "寄语里的每句都指回上面某一步的依据。")
     except Exception as e:
-        logger.warning(f"[gift] 节点 {node} 事件落库失败（忽略）: {e}")
+        logger.warning(f"[gift] 交付物 {tool} 事件失败（忽略）: {e}")
 
 
 async def get_deliverable(run_id: str, user_id: str, key: str) -> dict | None:

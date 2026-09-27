@@ -613,6 +613,26 @@ class GiftRun(Base):
     # `select gift_runs.delivered_at` 直接报 UndefinedColumn（入口页 500）。
     # 需要时再加，并且要**同时**改 to_dict 与迁移。
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ReAct 循环需要的三组字段（2026-09-27 改循环时补）
+    # ═══════════════════════════════════════════════════════════════════
+    # 送礼改成 `create_agent()` 的 ReAct 循环后，与规划智能体一样需要：
+    #
+    #   messages     对话历史。**中断续跑时必须带上** —— 否则 agent 从零
+    #                开始，之前搜过的、排除过的全部重做（规划那边实测过：
+    #                6 次搜索变成 12 次，候选池从 ~20 膨胀到 42）。
+    #   products     agent 累积的产物（候选/排除/礼盒…）。收尾生成交付物时
+    #                agent 早跑完了、state 也没了，不落库就读不到 ——
+    #                交付物会全是空的。
+    #   answer_*     用户对提问的回答副本。提问字段在用户点选项时就被清空，
+    #                续跑时再读只能拿到空对象，会拼出「关于「」，我选：opt0」
+    #                这种废话（规划那边踩过，模型据此跑偏）。
+    messages = Column(JSONB, nullable=False, default=list)
+    products = Column(JSONB, nullable=False, default=dict)
+    answer_pick = Column(String(64), nullable=True)
+    answer_label = Column(String(200), nullable=True)
+    answer_question = Column(Text, nullable=True)
+
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
@@ -628,6 +648,9 @@ class GiftRun(Base):
             "profile": self.profile or [],
             "understanding": self.understanding or {},
             "profileHead": self.profile_head or {},
+            "products": self.products or {},
+            "answer_label": self.answer_label,
+            "answer_question": self.answer_question,
             "error": self.error,
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at) if self.updated_at else None,

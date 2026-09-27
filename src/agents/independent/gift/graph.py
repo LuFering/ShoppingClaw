@@ -1,39 +1,83 @@
-"""送礼推演的状态图。
-
-形态：**单图 + 七步**。
-
-    understand → extract → search → verify → combine → message → END
+"""送礼规划的 agent 定义 —— **真 ReAct 循环**，不是写死的节点链。
 
 ═══════════════════════════════════════════════════════════════════════
-2026-09-25 修正：这张图此前**从未被执行过**
+2026-09-27：整个换掉。之前是一张「有六个节点、没有一条条件边」的图
 ═══════════════════════════════════════════════════════════════════════
 
-初版把图写在这儿，然后在 `gift_service.advance()` 里另写了一个 for 循环
-真跑 —— 两份实现，读者会以为跑的是图。现在图是**唯一**的推进路径：
-service 只负责订阅图的事件、落库、处理中断，不再自己串流程。
+用户的原话：「我感觉这个执行流是不是有点假了，为什么会执行这么快」。
 
-分工：
-  · 图          —— 流程定义 + 每一步的判断（节点里真调模型/工具）
-  · gift_service —— 订阅 stream、写事件、维护快照、等用户拍板
+量下来确实如此。旧形状：
 
-事件由节点通过 `emit` 回调发出（defer=True 的 run 才需要）；
-service 把回调塞进 config，图不认识 DB。
+    START → understand → extract → search → verify → combine → message → END
+
+六条 `add_edge`，**没有一条条件边**。而且六步里**只有三处调模型**
+（`build_understanding` / `combine` / `build_message`），另外三步是纯代码：
+
+    read_history / read_preferences   一次查表
+    search_candidates                 一次 HTTP 检索
+    verify_candidates                 一次 for 循环比价
+
+实测前四个阶段总共 **4.8 秒**（检索 0.8s、比价 0.02s）—— 那不是效率高，
+是**一半的步骤压根没有智能**。
+
+新形状（与规划智能体同构）：
+
+    START → model ──有 tool_calls?──► tools ──► model ──► ... ──► END
+                     └──没有──────────► END
+
+`create_agent()` 提供这个循环：模型自己决定调哪个工具、调几次、什么时候
+收敛。工具在 `tools.py`，通过 `Command(update=...)` 把产物写进共享状态。
+
+═══════════════════════════════════════════════════════════════════════
+一处与规划不同的地方：**零幻觉红线更硬**
+═══════════════════════════════════════════════════════════════════════
+
+送礼场景编错代价最高 —— 编一个「她喜欢香水」而实际过敏，这份礼物就废了。
+所以提示词里反复强调：读不到档案就如实说没有、不要假装了解对方；
+只能从搜索结果里挑商品，不许虚构。
+
+（旧流程里这条红线靠代码保证；改成模型自主后，只能靠提示词 + 工具的
+如实回报。工具会把「没找到」原样告诉模型，让它自己纠正。）
 """
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, TypedDict
 
-from langgraph.graph import END, START, StateGraph
+from langchain.agents import create_agent
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
+
+logger = logging.getLogger(__name__)
 
 
+def _merge_lists(old: list | None, new: list | None) -> list:
+    """列表字段的 reducer：追加而非覆盖。
 
-def _keep(old, new):
-    """列表/字典用「后写覆盖」，允许显式置空。"""
+    模型会**并行调多个工具**，没有 reducer 会直接报 `InvalidUpdateError`。
+    追加语义也正好对：多轮搜索的候选就该累积。
+    """
+    return (old or []) + (new or [])
+
+
+def _last_wins(old: Any, new: Any) -> Any:
+    """标量字段的 reducer：后写覆盖，但**允许显式置空**。
+
+    ⚠️ 标量同样需要 reducer。模型会并行调工具，两个工具都写同一个标量键
+    就会报 `At key 'plan': Can receive only one value per step`。
+    """
     return new if new is not None else old
 
 
 class GiftState(TypedDict, total=False):
-    # 入口参数
+    """agent 的共享状态。
+
+    ⚠️ **每个**会被工具写到的字段都要带 reducer，列表和标量都一样 ——
+    模型会并行调多个工具，同一个键被写两次就报 `InvalidUpdateError`。
+    """
+    messages: Annotated[list[AnyMessage], add_messages]
+
+    # 入口参数（service 在启动时塞进来）
     recipient: str
     occasion: str
     budget: int
@@ -42,129 +86,134 @@ class GiftState(TypedDict, total=False):
     user_id: str
 
     # 累积产物
-    context: dict          # 读到的档案
-    profile: list[dict]    # 中栏五组
-    understanding: dict
-    picked: list[dict]
-    excluded: list[dict]
-    plan: dict
-    budget_rows: list[dict]
-    order: dict
-    message: dict
-    supply: list[dict]
-    compare: list[dict]
-    question: dict | None
+    context: Annotated[dict, _last_wins]        # 读到的档案
+    profile: Annotated[list[dict], _merge_lists]  # 中栏人物档案五组
+    understanding: Annotated[dict, _last_wins]  # 当前理解
+    picked: Annotated[list[dict], _merge_lists]   # 搜到的候选
+    excluded: Annotated[list[dict], _merge_lists]  # 排除的候选（带理由）
+    searched: Annotated[list[str], _merge_lists]  # 搜过的关键词
+    plan: Annotated[dict, _last_wins]           # 组好的礼盒
+    message: Annotated[dict, _last_wins]        # 寄语
+    question: Annotated[dict | None, _last_wins]
 
 
-def build_gift_graph():
-    """编译送礼图。
+SYSTEM_PROMPT = """\
+你是送礼顾问。用户要送一份礼物给某个人，你要**自己决定怎么查、查什么、
+什么时候可以给结论**，最后交付一份说得清理由的礼物。
 
-    ⚠️ 图**不产生事件** —— 节点只算状态，事件由 service 的 `_on_debug` /
-    `_on_node` 按「哪个节点产出了什么」翻译并落库。
+## 你手上的工具
 
-    2026-09-27：原先这里有一套 `_emit(config, ...)` 回调机制，但
-    `gift_service` 调 `astream(state)` 时**没传 config**，于是
-    `config.configurable.emit` 恒为 None —— 那 11 处调用**从未执行过**
-    （实测事件表里从来没有 `profile_batch`）。现已全部删除：留着会让
-    下一个读代码的人以为图在发事件。真要接上还会与 service 重复发同一批
-    事件（变成双份），所以正确的出口只有一个 —— service。
+- `read_recipient()` —— 读收礼人的档案（历史决策、长期偏好）。
+  **开始前先调这个**：不知道对方是谁，后面搜什么都只能靠猜。
+  档案里没有关于 TA 的记录时会如实告诉你 —— 那就按通用方向准备。
+- `search_gifts(keyword)` —— 按品类词搜真实商品。搜不到或结果不合适，
+  **换个词再搜**是你的自由。
+- `screen_candidates(names, reason)` —— 排除不合适的候选，记下理由。
+- `compose_gift(title, thesis, items)` —— 组礼盒。**这是收敛动作**。
+- `write_note()` —— 生成寄语。要在组好礼盒之后调。
+- `ask_user(question, options)` —— 信息不足或需要用户拍板时提问。
+
+## 怎么做事
+
+顺序由你定，下面是建议不是规定：
+
+1. 先调 `read_recipient` 看这个人是谁、已知什么。
+2. 按你判断的品类词去搜。**一次搜一个品类**，看结果再决定下一步。
+   搜两三轮通常够了 —— 不要反复搜个不停。
+3. 搜回来的要**真的比**：价格、是否命中偏好、场景是否匹配。
+   不合适的用 `screen_candidates` 排除，写清具体理由。
+4. 觉得够了就 `compose_gift` 定下来。**这是收敛动作**，
+   之后不要再搜新商品。
+5. 组好后调 `write_note` 写寄语。
+
+## 搜索用「品类词」，不是「场合词」
+
+这是最容易出错的地方。**关键词里的词不等于你要的东西。**
+
+反例：搜「生日礼物」「送妈妈」—— 淘宝只会返回礼盒包装、贺卡、代写服务。
+那些不是礼物本身。
+
+所以搜的是**具体的品类**：「颈椎按摩仪」「护腰坐垫」「护手霜」「保温杯」。
+先想「什么样的东西能解决她的问题 / 贴合她的场景」，再用品类词去搜。
+
+## 组礼盒的判据是「同时被用到」
+
+几件东西要落在**同一个使用场景**里，而不是各自最好。
+三件说得通胜过六件堆着。
+
+反例：按摩仪 + 保温杯 + 台灯 —— 三样都好，但凑不成一件事。
+正例：颈部按摩仪 + 护手霜 —— 都是「她伏案一天后的放松」，能一起用上。
+
+单件也可以，宁可 1 件也不要凑数。
+
+## 铁律
+
+- **不要虚构商品。** 只能从 `search_gifts` 返回的结果里挑。
+- **不要假装了解收礼人。** 档案里没记录就直说没有，按通用方向准备，
+  并在结论里讲清楚。编一个「她喜欢 XX」而实际不是，这份礼物就废了。
+- 每件的理由必须指回具体依据（她的偏好 / 场景 / 预算）。
+  写「品质好」「性价比高」这种放在任何商品上都成立的话算无效。
+- 工具返回什么就说什么。搜不到就是搜不到。
+- 全程中文，不要复述这些要求。
+"""
+
+
+def build_gift_agent():
+    """编译送礼 agent（ReAct 循环）。
+
+    `create_agent` 返回的就是个已编译的图：model ↔ tools 之间用条件边
+    循环，模型不再产生 tool_calls 时走向 END。
     """
-    from src.agents.independent.gift import stages as st
+    from src.agents.independent.common_llm import get_model
+    from src.agents.independent.gift.tools import GIFT_TOOLS
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 「理解关系」拆成**两个节点** —— 为了让档案分批到达是真的
-    # ═══════════════════════════════════════════════════════════════════
-    # 2026-09-27：原来是一个 understand 节点里串行调两次工具、组装五组、
-    # 一次性返回，于是中栏在第 25ms 亮出全部五组、之后再无变化 —— 看起来
-    # 是张静态卡片。用户要的是「随推演逐步长成完整档案」。
-    #
-    # 为什么拆节点而不是在代码里 sleep：事件只能在**节点边界**发出
-    # （`_on_debug` 在节点开始、`_on_node` 在节点结束）。在服务里 sleep
-    # 制造节奏是**演的**；拆成两个节点后，两次 RAG 往返本来就是两次独立
-    # 往返，到达时刻是真的 —— 实测 understand 总耗时 5.4s。这是拿真实
-    # 的时间差做生长感，不是把一次性数据拉长。
-    #
-    # 两个节点映射到**同一个左栏步骤**（都叫 understand）：对用户而言那
-    # 仍是「理解关系」这一步，只是它内部有两个小阶段。
-    async def n_read_history(state: GiftState, config=None) -> dict:
-        """读历史决策记录 → 产出 关系 / 生活状态 / 禁忌 / 送礼偏好 四组。
-
-        ⚠️ 返回的 profile 是**部分的四组**，不是完整五组：service 在节点
-        边界推事件时只推本节点真正产出的那几组（见 gift_service._PROFILE_BATCH）。
-        下一节点会用完整五组覆盖它，所以最终落库的仍是对的。
-        """
-        history = await st.read_history(state)
-        ctx = {"history": history, "prefs": [], "raw_ok": bool(history)}
-        # giftpref（送礼偏好）只依赖 state.signals（入口页勾选），不需工具 ——
-        # 与这三组同批产出。别漏了它：漏掉的话它永远不会到达中栏。
-        return {"context": ctx,
-                "profile": st.build_profile(
-                    state, ctx,
-                    only=("relation", "life", "taboo", "giftpref"))}
-
-    async def n_read_prefs(state: GiftState, config=None) -> dict:
-        """读长期偏好 → 支撑 已知喜好；并组装**完整五组**落 state。
-
-        完整五组必须在这里就位：落库与下游（`combine` 要读禁忌）都得拿到
-        全的。分批只是**推送**的粒度，不是数据的粒度。
-        """
-        prev = state.get("context") or {}
-        prefs = await st.read_preferences(state)
-        ctx = {"history": prev.get("history") or [], "prefs": prefs,
-               "raw_ok": bool(prev.get("raw_ok") or prefs)}
-        return {"context": ctx, "profile": st.build_profile(state, ctx)}
-
-    async def n_extract(state: GiftState, config=None) -> dict:
-        u = await st.build_understanding(state, state.get("profile") or [], state.get("context") or {})
-        return {"understanding": u}
-
-    async def n_search(state: GiftState, config=None) -> dict:
-        picked = await st.search_candidates(state)
-        return {"picked": picked}
-
-    async def n_verify(state: GiftState, config=None) -> dict:
-        p, e = st.verify_candidates(state.get("picked") or [], state)
-        return {"picked": p, "excluded": e}
-
-    async def n_combine(state: GiftState, config=None) -> dict:
-        plan, rows, order = await st.combine(
-            state.get("picked") or [],
-            {**state, "_profile": state.get("profile") or []},
-            state.get("understanding") or {},
-        )
-        return {"plan": plan, "budget_rows": rows, "order": order}
-
-    async def n_message(state: GiftState, config=None) -> dict:
-        msg = await st.build_message(state, state.get("plan") or {},
-                                     state.get("understanding") or {})
-        supply = st.build_supply(state.get("picked") or [], state.get("plan") or {})
-        return {"message": msg, "supply": supply}
-
-    g = StateGraph(GiftState)
-    for name, fn in (
-        ("read_history", n_read_history), ("read_prefs", n_read_prefs),
-        ("extract", n_extract),
-        ("search", n_search), ("verify", n_verify),
-        ("combine", n_combine), ("message", n_message),
-    ):
-        g.add_node(name, fn)
-
-    g.add_edge(START, "read_history")
-    for a, b in (
-        ("read_history", "read_prefs"), ("read_prefs", "extract"),
-        ("extract", "search"), ("search", "verify"),
-        ("verify", "combine"), ("combine", "message"),
-    ):
-        g.add_edge(a, b)
-    g.add_edge("message", END)
-    return g.compile()
+    return create_agent(
+        get_model(),
+        tools=GIFT_TOOLS,
+        system_prompt=SYSTEM_PROMPT,
+        state_schema=GiftState,
+        name="gift",
+    )
 
 
 _compiled = None
 
 
-def get_gift_graph():
+def get_gift_agent():
+    """进程内单例。编译一次即可 —— 无状态，可并发跑多个 run。"""
     global _compiled
     if _compiled is None:
-        _compiled = build_gift_graph()
+        _compiled = build_gift_agent()
     return _compiled
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 兼容旧名
+# ══════════════════════════════════════════════════════════════════════
+# `get_gift_graph` 是改 ReAct 之前的入口名，有两处调用方：
+#   · gift_service.advance（推演主路径）
+#   · gift/agent.py（BaseAgent 的 get_graph）
+# 保留这个别名，两处都不用改 —— 减少一次改动就少一次出错的機會。
+# 名字里的 "graph" 现在其实是个已编译的 ReAct agent，但**不改名**：
+# 改名的收益只是措辞好看，代价是同时动两处调用点。
+get_gift_graph = get_gift_agent
+
+
+def build_goal(state: dict) -> str:
+    """把入口参数拼成给模型的第一句话。
+
+    这是**任务描述**，不是流程指令 —— 只讲「送给谁、什么场合、多少预算」，
+    不讲「先做什么再做什么」（那是模型自己的事）。
+    """
+    parts = ["帮我挑一份礼物。"]
+    if state.get("recipient"):
+        parts.append(f"送给：{state['recipient']}。")
+    if state.get("occasion"):
+        parts.append(f"场合：{state['occasion']}。")
+    if state.get("budget"):
+        parts.append(f"预算：¥{state['budget']}。")
+    signals = state.get("signals") or []
+    if signals:
+        parts.append(f"用户更在意：{'、'.join(str(s) for s in signals)}。")
+    parts.append("请给出你的建议。")
+    return "".join(parts)
