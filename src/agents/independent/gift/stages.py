@@ -47,6 +47,100 @@ PROFILE_ICONS = {
     "taboo": "ban", "giftpref": "gift",
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# 「推演所得」—— 中栏的第二类内容，**随推演逐步长出来**
+# ══════════════════════════════════════════════════════════════════════
+# 2026-09-27：调研 Letta（原 MemGPT）后改的。它的做法是：agent 在整轮工作里
+# **持续改写**自己的记忆块（系统提示明写「发现新的用户偏好就写进记忆块」），
+# 而不是开头算一次。它的 `human` 块初始内容也很有意思 —— 不是空白，而是
+# 一句诚实的「我还没认识这个人」，加一段「我打算怎么去了解」。
+#
+# 对照我们这边：5 组档案确实只在 understand 一个节点产出（那是数据本身
+# 决定的，硬摊开就是造假）。但**推演过程中真的在产生新信息** —— 搜了哪些
+# 方向、排除了什么、为什么这么搭配 —— 这些现在只进了右栏交付物。
+# 把它们回流到中栏，生长就是真的：不用多跑一次模型，不用 sleep 演节奏。
+#
+# ⚠️ 与 `PROFILE_KEYS` 分开命名，不混进「人物档案」：
+#   前者的主语是**收礼人**（她喜欢什么、忌讳什么）
+#   后者的主语是**这次推演**（我们查了什么、排除了什么、怎么搭的）
+# 混在一起会让「已知喜好：颈椎按摩仪」这种话看起来像她的喜好，其实是我们的检索词。
+RUN_FINDING_KEYS = ("searched", "excluded", "pairing")
+
+RUN_FINDING_LABELS = {
+    "searched": "搜过的方向",
+    "excluded": "已排除",
+    "pairing": "搭配逻辑",
+}
+RUN_FINDING_ICONS = {
+    "searched": "search", "excluded": "minus", "pairing": "link",
+}
+
+
+def build_run_finding(key: str, *, keywords=None, excluded=None, plan=None) -> dict | None:
+    """组装一条「推演所得」。没有真实内容时返回 None —— **不编**。
+
+    三条各自的真实来源：
+      searched  检索阶段实际用过的关键词（`_kw`，来自 search_candidates）
+      excluded  比价验货阶段真正排掉的商品与理由（带 why，不删）
+      pairing   组合阶段模型给出的搭配逻辑（plan.thesis）
+    """
+    if key == "searched":
+        kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+        # 去重保序：同一方向可能搜多轮
+        kws = list(dict.fromkeys(kws))
+        if not kws:
+            return None
+        return {
+            "key": "searched",
+            "label": RUN_FINDING_LABELS["searched"],
+            "icon": RUN_FINDING_ICONS["searched"],
+            "text": "、".join(kws[:6]),
+            "note": f"共 {len(kws)} 个方向" if len(kws) > 1 else "",
+            "state": "derived",
+            "source": "本次检索",
+        }
+
+    if key == "excluded":
+        rows = [e for e in (excluded or []) if isinstance(e, dict)]
+        if not rows:
+            return None
+        names = [str(e.get("name") or "")[:14] for e in rows[:3]]
+        # 理由取第一条 —— 同批排除的理由通常同源（超预算 / 配件 / 场景不符）
+        why = str((rows[0].get("why") or "")).strip()
+        return {
+            "key": "excluded",
+            "label": RUN_FINDING_LABELS["excluded"],
+            "icon": RUN_FINDING_ICONS["excluded"],
+            "text": f"{len(rows)} 件：" + "、".join(n for n in names if n),
+            "note": why[:60],
+            "state": "derived",
+            "source": "本次比价",
+        }
+
+    if key == "pairing":
+        p = plan or {}
+        thesis = str(p.get("thesis") or "").strip()
+        items = [i for i in (p.get("items") or []) if isinstance(i, dict)]
+        if not thesis and not items:
+            return None
+        # 搭配的构成：主力/搭配/点缀 + 各自名字，这是模型给的真实角色划分
+        roles = [
+            f"{i.get('role') or '一件'}：{str(i.get('name') or '')[:12]}"
+            for i in items[:3]
+        ]
+        return {
+            "key": "pairing",
+            "label": RUN_FINDING_LABELS["pairing"],
+            "icon": RUN_FINDING_ICONS["pairing"],
+            "text": thesis[:80] if thesis else "、".join(roles),
+            "note": " · ".join(roles) if thesis and roles else "",
+            "state": "derived",
+            "source": "本次组合",
+        }
+
+    return None
+
+
 # ── 右栏六类交付物（key 固定，前端 DeliverPanel 按 key 渲染）──
 DELIVERABLE_KEYS = ("plan", "compare", "budget", "message", "supply", "order")
 DELIVERABLE_LABELS = {

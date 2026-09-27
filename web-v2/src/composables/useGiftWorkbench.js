@@ -35,6 +35,12 @@ export function useGiftWorkbench({ runId } = {}) {
   const stageKey = ref('')
   const freshKey = ref('')
 
+  // 「起始陈述」与「推演所得」—— 中栏除人物档案之外的另两块内容。
+  // 前者是开场那句「我还不了解 TA」（学 Letta 的 human 块写法），
+  // 后者是随推演逐步长出来的真实所得（搜过的方向 / 已排除 / 搭配逻辑）。
+  const opening = ref(null)
+  const findings = ref([])
+
   const steps = ref(skeletonSteps())
   const excluded = ref([])
   const profile = ref(skeletonProfile())
@@ -130,6 +136,21 @@ export function useGiftWorkbench({ runId } = {}) {
         // 让「刚长出来的」与「早就在的」可分辨（这是生长感的载体）
         g.arrivedAt = new Date()
         markFresh(p.key)
+        break
+      }
+
+      case 'opening':
+        // 开场陈述：建 run 时发一次，是「空白档案」的那个起点
+        opening.value = { ...p }
+        break
+
+      case 'finding': {
+        // 推演所得：随 search / verify / combine 逐步到达。
+        // 同 key 更新（可能多轮），新 key 追加 —— 与 profile 同样的到达语义。
+        const i = findings.value.findIndex((x) => x.key === p.key)
+        const item = { ...p, arrivedAt: new Date() }
+        if (i >= 0) findings.value[i] = { ...findings.value[i], ...item }
+        else findings.value.push(item)
         break
       }
 
@@ -236,6 +257,8 @@ export function useGiftWorkbench({ runId } = {}) {
     settled.value = false
     // 重置三栏骨架（「重来」按钮会再走一次）
     steps.value = skeletonSteps()
+    opening.value = null
+    findings.value = []
     excluded.value = []
     profile.value = skeletonProfile()
     understanding.value = { text: '', from: '' }
@@ -257,6 +280,8 @@ export function useGiftWorkbench({ runId } = {}) {
     task,
     profileHead,
     steps,
+    opening,
+    findings,
     excluded,
     profile,
     understanding,

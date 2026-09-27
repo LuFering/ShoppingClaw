@@ -137,6 +137,31 @@ async def create_run(user_id: str, params: dict) -> dict:
         session.add(run)
         await session.commit()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 起始状态：先写一句「我还不了解 TA」
+    # ═══════════════════════════════════════════════════════════════════
+    # 学 Letta 的 `human` 记忆块 —— 它的初始内容不是空白，而是：
+    #
+    #     I haven't gotten to know this person yet.
+    #     I'm curious about them - not just their preferences, but who they are.
+    #     As we collaborate, I'll build up an understanding of how they think...
+    #
+    # 一句**诚实的自我陈述** + 一段「我打算怎么去了解」。这比空槽好：
+    # 空槽只说明「这里没有东西」，而这句话说明「正在建立，而且我知道要建什么」。
+    # 而且它给了中栏一个合理的**起点** —— 用户从第一秒就知道这块在干什么。
+    #
+    # 先发事件再起后台任务，保证它排在所有推演事件之前（seq 最小）。
+    brief = f"{run.recipient or '对方'}的{run.occasion or '这次送礼'}"
+    await emit(run_id, "opening", {
+        "text": f"我还不了解{run.recipient or 'TA'}。",
+        "sub": f"这次要给{brief}挑一份礼物（预算 ¥{budget or '—'}）。"
+               f"我会从档案、检索与比价里逐步把该知道的补齐 —— "
+               f"每得到一条就写进这里。",
+        "name": run.recipient or "收礼人",
+        "occasion": run.occasion or "",
+        "budget": budget,
+    })
+
     asyncio.create_task(advance(run_id, user_id))
 
     fresh = await get_run(run_id, user_id)
@@ -317,6 +342,22 @@ async def _emit_profile_batch(run_id: str, delta: dict, node: str) -> None:
         })
 
 
+async def _emit_finding(run_id: str, key: str, **kw) -> None:
+    """把这一阶段**真实产生**的信息回流到中栏的「推演所得」。
+
+    ⚠️ 与「人物档案」是两类东西，用不同的事件 kind（`finding` 而不是
+    `profile`）：前者的主语是收礼人（她喜欢什么），后者的主语是这次推演
+    （我们查了什么、排除了什么、怎么搭的）。混用会让前端把它们排进同一组，
+    「已知喜好：颈椎按摩仪」看起来就成了她的喜好 —— 那其实是我们的检索词。
+
+    没有真实内容时 `build_run_finding` 返回 None，这里直接不发 ——
+    宁可中栏少一块，也不编一块出来。
+    """
+    f = st.build_run_finding(key, **kw)
+    if f:
+        await emit(run_id, "finding", f)
+
+
 async def _on_node(run_id: str, node: str, delta: dict,
                    t_start: float | None = None) -> None:
     """一个节点跑完 → 落它对应的过程事件与产物事件。
@@ -371,6 +412,9 @@ async def _on_node(run_id: str, node: str, delta: dict,
             await _step(run_id, "search", "done", ms=ms,
                         evidence=f"检索到 {len(picked)} 个真实候选")
             await _say(run_id, "search", "用品类词检索（不是「礼物」——那只会搜出礼盒包装）。")
+            # 真实的检索方向（每件候选都带 `_kw`，来自 search_candidates）
+            await _emit_finding(run_id, "searched",
+                                keywords=[p.get("_kw") for p in picked])
 
         elif node == "verify":
             excluded = delta.get("excluded") or []
@@ -383,6 +427,7 @@ async def _on_node(run_id: str, node: str, delta: dict,
             await _step(run_id, "verify", "done", ms=ms,
                         evidence=f"{len(picked)} 件入选、{len(excluded)} 件排除")
             await _say(run_id, "verify", "排除的保留理由、不删除 —— 否则答不出「为什么只剩这几件」。")
+            await _emit_finding(run_id, "excluded", excluded=excluded)
 
         elif node == "combine":
             plan = delta.get("plan") or {}
@@ -396,6 +441,7 @@ async def _on_node(run_id: str, node: str, delta: dict,
             await _say(run_id, "combine",
                        "组合由模型决策（判据是「同时被用到」），预算与品类去重由代码校验。"
                        if by_llm else "模型不可用，已降级为规则选件。")
+            await _emit_finding(run_id, "pairing", plan=plan)
 
         elif node == "message":
             msg = delta.get("message") or {}

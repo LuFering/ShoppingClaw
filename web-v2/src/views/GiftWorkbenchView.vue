@@ -62,6 +62,8 @@
               :task="task"
               :groups="profile"
               :understanding="understanding"
+              :opening="opening"
+              :findings="findings"
               @act="onAct"
             />
           </div>
@@ -121,6 +123,8 @@ const {
   excluded,
   profile,
   understanding,
+  opening,
+  findings,
   deliverables,
   running,
   settled,

@@ -24,6 +24,17 @@
       </div>
     </header>
 
+    <!--
+      开场陈述 —— 学 Letta 的 `human` 记忆块写法：起点不是空白，而是
+      一句诚实的「我还不了解 TA」+「我打算怎么去了解」。
+      空槽只说明「这里没有东西」；这句话说明「正在建立，而且我知道要建什么」。
+      推演一开始就有，随第一条真实信息到达而淡出（它已经完成使命了）。
+    -->
+    <p v-if="opening" class="pc__opening">
+      {{ opening.text }}
+      <span class="pc__opening-sub">{{ opening.sub }}</span>
+    </p>
+
     <!-- 人物侧写：编辑式排版，小标签 + 大正文 -->
     <section class="pc__section">
       <h3 class="pc__sectitle">人物侧写</h3>
@@ -117,6 +128,34 @@
       </div>
     </section>
 
+    <!--
+      ── 推演所得 ──
+      中栏的第二类内容，与「人物档案」语义分开（前者主语是收礼人，
+      后者主语是这次推演）。这些是 search / verify / combine 各阶段
+      **真实产生**的信息，逐步回流到这里 —— 这就是「随推演生长」的载体。
+    -->
+    <section v-if="findings.length" class="pc__section pc__findings">
+      <h3 class="pc__sectitle">推演所得</h3>
+      <div class="pc__rows">
+        <div
+          v-for="f in findings"
+          :key="f.key"
+          class="gr gr--finding"
+          :class="{ 'gr--fresh': f.fresh }"
+        >
+          <span class="gr__rail"><i class="gr__dot is-derived" /></span>
+          <div class="gr__main">
+            <span class="gr__label">{{ f.label }}</span>
+            <p class="gr__text">
+              {{ f.text }}
+              <span v-if="f.note" class="gr__note">{{ f.note }}</span>
+              <span v-if="f.arrivedAt" class="gr__at mono">{{ clock(f.arrivedAt) }}</span>
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 当前理解：签名式引文 -->
     <div v-if="understanding.text" class="pc__und">
       <span class="pc__undlabel">当前理解</span>
@@ -152,7 +191,11 @@ const props = defineProps({
   head: { type: Object, required: true },
   task: { type: Object, required: true },
   groups: { type: Array, default: () => [] },
-  understanding: { type: Object, default: () => ({ text: '', from: '' }) }
+  understanding: { type: Object, default: () => ({ text: '', from: '' }) },
+  /** 开场陈述（建 run 时下发一次） */
+  opening: { type: Object, default: null },
+  /** 推演所得：随 search/verify/combine 逐步到达 */
+  findings: { type: Array, default: () => [] }
 })
 
 defineEmits(['act'])
@@ -405,6 +448,32 @@ const dangerGroups = computed(() => props.groups.filter((g) => g.danger))
 }
 @media (prefers-reduced-motion: reduce) {
   .gr--fresh { animation: none; }
+}
+
+/* 开场陈述：起点那句「我还不了解 TA」。比正文弱一档 —— 它是过渡语，
+   不是结论；第一条真实信息到达后它就功成身退了。 */
+.pc__opening {
+  margin: 2px 20px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--gift-accent-soft) 42%, transparent);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--text);
+}
+.pc__opening-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/* 推演所得：与人物侧写用同一套行样式，但点用「派生」态（空心蓝）区分 */
+.gr--finding .gr__text { color: var(--text-muted); }
+.gr__dot.is-derived {
+  background: transparent;
+  border: 1px solid var(--gift-accent);
+  box-sizing: border-box;
 }
 
 /* ---- 当前理解：签名式引文 ---- */
