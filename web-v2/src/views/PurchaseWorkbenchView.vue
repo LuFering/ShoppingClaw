@@ -174,7 +174,11 @@ const pendingQuestion = ref(null)
  */
 let streamSeq = 0
 const pushRow = (row) => {
-  stream.value.push({ ...row, uid: `r${++streamSeq}` })
+  // ⚠️ 每行都带 `at`（到达时刻）。左栏的「正在思考」行靠它算「距最后一条
+  // 事件多久」——那是判断「界面有没有在动」的唯一可靠依据。
+  // 用前端到达时刻而不是后端写入时刻：两者差一个网络往返，而用户感知的
+  // 静默是**界面**的静默，不是数据库的。
+  stream.value.push({ ...row, at: new Date().toISOString(), uid: `r${++streamSeq}` })
 }
 
 const taskLabel = computed(() => {
@@ -430,6 +434,15 @@ const nowClock = () => {
 // ── 载入 ──────────────────────────────────────────────────
 let abort = null
 
+/**
+ * 本次 run 的起点时刻（毫秒可读的 ISO 串）。
+ *
+ * 用途单一：左栏「正在思考」行在**一条事件都还没到**时算已等待多久
+ * （实测建 run 后有 13.6s 空窗）。有事件之后改用「最后一条事件的时刻」，
+ * 这个就不再用到。
+ */
+const runStartedAt = ref('')
+
 const loadSnapshot = async () => {
   if (!runId.value) {
     loading.value = false
@@ -438,6 +451,9 @@ const loadSnapshot = async () => {
   }
   loading.value = true
   loadError.value = ''
+  // 起点时刻：左栏「正在思考」行在还没收到任何事件时算已等待多久。
+  // 只在**第一次**设 —— 刷新/重订阅不该把已经等过的时间清零。
+  if (!runStartedAt.value) runStartedAt.value = new Date().toISOString()
   try {
     const run = await planningApi.getRun(runId.value)
     runStatus.value = run.status
@@ -589,6 +605,8 @@ const finishInfo = computed(() => {
     categories: h.categories ?? 0,
     total: h.total ?? null,
     error: loadError.value || '',
+    // 建 run 的时刻：一条事件都还没来时，「正在思考」的秒数从它算起
+    startedAt: runStartedAt.value,
   }
 })
 

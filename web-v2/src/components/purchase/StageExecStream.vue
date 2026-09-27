@@ -30,7 +30,18 @@
           已完成的阶段默认**收起**，只留这一行 —— 这就是「思路清晰」的来源：
           整条流程是 5 行，而不是 30 行。
         -->
-        <button class="xg-head" type="button" @click="toggle(g)">
+        <!--
+          「继续执行」不是阶段，是**一次中断的边界** —— 用户拍板后 agent
+          从中断处接着走。它不该占一个阶段行（那会让人以为有个叫「继续执行」
+          的步骤），做成一条淡分隔线：既标出「这里断过一次」，又不冒充步骤。
+        -->
+        <p v-if="g.separator" class="xg-sep">
+          <span class="xg-sep-line" />
+          <span class="xg-sep-text">{{ g.title }}</span>
+          <span class="xg-sep-line" />
+        </p>
+
+        <button v-else class="xg-head" type="button" @click="toggle(g)">
           <span class="xg-dot" :class="`is-${g.state}`">
             <i v-if="g.state === 'running'" class="xg-dot-pulse" />
           </span>
@@ -50,7 +61,7 @@
         </button>
 
         <!-- 展开：这个阶段里具体做了什么（仍是状态行，不是日志） -->
-        <div v-if="isOpen(g)" class="xg-body">
+        <div v-if="!g.separator && isOpen(g)" class="xg-body">
           <div v-for="r in g.rows" :key="r.uid" class="xs-row">
             <span class="xs-dot" :class="`is-${r.state}`" />
             <span v-if="r.grouped?.length" class="xs-mul mono">×{{ r.grouped.length }}</span>
@@ -70,6 +81,19 @@
           <p v-if="!g.rows.length" class="xs-none">（这一步没有留下明细）</p>
         </div>
       </section>
+
+      <!--
+        「正在思考」行 —— 模型思考期间界面不能毫无动静。
+        ⚠️ 实测数据：建 run 之后有 **13.6 秒**没有任何事件（模型冷启动），
+        一次 run 内还有 5 段 ≥5s 的静默。那段时间左栏完全静止，用户以为
+        卡死了 —— 这正是「没有主智能体那样的缓冲等待体验」的来源。
+        主智能体的做法是三点动画 + 文案 + 秒数，这里沿用同一套。
+      -->
+      <div v-if="waiting" class="xs-wait">
+        <span class="xs-wait-dots"><i /><i /><i /></span>
+        <span class="xs-wait-text">{{ waitText }}</span>
+        <span class="xs-wait-sec mono">{{ waitSeconds }}s</span>
+      </div>
 
       <!-- 收尾总结：让它「有终」 -->
       <div v-if="summary" class="xs-sum" :class="`is-${summary.state}`">
@@ -122,6 +146,9 @@ const props = defineProps({
 
 const BY_LABEL = { llm: '模型', kb: '知识库', rule: '规则' }
 
+/** 工作台在用户拍板后续跑处插入的标记阶段名（见 PurchaseWorkbenchView） */
+const RESUME_PHASE = '__resume__' 
+
 const scrollEl = ref(null)
 const atBottom = ref(true)
 
@@ -141,6 +168,13 @@ const groups = computed(() => {
       // 但**耗时不能简单相加**：那样只是把零碎的时间堆起来，读者无法据此
       // 判断「哪一步慢」。取**最长的那一次**（模型回头重搜通常是补搜，
       // 第一次才是主搜索），并在徽章里注明进入了几轮。
+      // 「继续执行」不是阶段，是中断边界 —— 做成分隔线，不进阶段列表
+      if (it.phase === RESUME_PHASE) {
+        cur = { key: `sep${out.length}`, separator: true, title: it.title || '继续执行',
+                rows: [], state: 'done', ms: 0, passes: 0, startedAt: null }
+        out.push(cur)
+        continue
+      }
       let g = byPhase.get(it.phase)
       if (!g) {
         g = { key: `g${out.length}`, phase: it.phase, title: it.title,
@@ -181,6 +215,7 @@ const groups = computed(() => {
   // 合并连续同类调用（「搜索」×4）—— 与上一版同样的规则，但只在阶段**内部**合并，
   // 所以不会出现「中间夹着被隐藏的思考行导致合不上」而重复两行的问题。
   for (const g of out) {
+    if (g.separator) continue
     g.rows = mergeRows(g.rows)
     // 取**最后**一条 running 而不是第一条：并行调用时前面几条可能已经返回，
     // 真正在做的是最新那条
@@ -225,8 +260,6 @@ function mergeRows(rows) {
  */
 function badgeOf(g) {
   if (g.state === 'running') return ''
-  // 续跑分隔行不是真阶段，没有「结果」可言
-  if (g.phase === '__resume__') return ''
   const texts = g.rows.flatMap((r) => [
     String(r.result || ''), ...(r.grouped || []).map((x) => String(x.result || ''))
   ])
@@ -253,6 +286,98 @@ const isOpen = (g) => userOpen.value[g.key] ?? (g.state === 'running')
 const toggle = (g) => {
   userOpen.value = { ...userOpen.value, [g.key]: !isOpen(g) }
 }
+
+// ── 实时秒数 ──
+// tick 只是触发重算的计数器：已用时长必须每次重算，存进数据里就成了
+// 「只算一次的假时钟」。10fps 够了，不必每帧。
+// ⚠️ 声明必须在 `waiting` / `waitSeconds` **之前** —— 那两个 computed
+// 引用它重算，而 `const` 有暂时性死区，放在后面会直接报错。
+const tick = ref(0)
+let rafId = null
+let lastTick = 0
+const frame = (now) => {
+  rafId = requestAnimationFrame(frame)
+  if (now - lastTick < 100) return
+  lastTick = now
+  tick.value++
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 「正在思考」行
+// ══════════════════════════════════════════════════════════════════
+// 模型思考期间界面必须有动静。实测的空窗是**真实存在**的：
+//   · 建 run → 首条事件：13.6s（模型冷启动）
+//   · 一次 run 内 ≥5s 的静默：5 段，合计 35s
+// （对照：用户答题 → 首条新事件只要 0.4s，那段其实没停。）
+//
+// 判据用「距最后一条事件多久」，而不是「有没有 running 行」：
+// 前者才真正对应「界面有没有在动」。阈值 1.2s —— 低于它，正常的事件流
+// 会把它闪来闪去；高于它，短静默又盖不住。
+const WAIT_AFTER_MS = 1200
+
+/**
+ * 最后一条事件的到达时刻（由父组件随 items 一起给）。
+ *
+ * ⚠️ 不能在这里用 `Date.now()` 自己记 —— 组件重渲染、页面刷新、
+ * 事件重放都会重置它，那个秒数就成了「只算一次的假时钟」。
+ */
+const lastEventAt = computed(() => {
+  const items = props.items
+  const last = items[items.length - 1]
+  return last?.at ? new Date(last.at).getTime() : 0
+})
+
+/** 流是否还在跑（跑完了就不该再显示「正在思考」） */
+const streaming = computed(() => {
+  const st = props.finish?.status
+  return st === 'running' || st === 'awaiting'
+})
+
+/**
+ * 真的要显示等待行吗。
+ *
+ * 三个条件同时成立才显示：
+ *   ① 流还在跑（否则跑完了还转圈）
+ *   ② 距最后一条事件超过阈值
+ *   ③ 当前没有正在跑的阶段行 —— 有的话那行自己就带呼吸点与秒数，
+ *      再叠一个「正在思考」是重复的
+ */
+const waiting = computed(() => {
+  tick.value
+  if (!streaming.value) return false
+  if (!lastEventAt.value) return true          // 一条事件都还没来，正是最该显示的时候
+  const idle = Date.now() - lastEventAt.value
+  if (idle < WAIT_AFTER_MS) return false
+  const g = groups.value.find((x) => x.state === 'running' && !x.separator)
+  if (g && g.current) return false             // 有明确的「正在做」就不重复报
+  return true
+})
+
+/**
+ * 等待文案。
+ *
+ * 分两种，因为它们对用户的含义不同：
+ *   · 一条事件都还没来 → 「正在启动」：这是冷启动（实测最长 45.2s），
+ *     用户在等系统就绪，不是等模型回答
+ *   · 已有事件、但静默了一阵 → 「正在思考」：模型在推演，属于正常过程
+ * 混为一谈的话，45 秒的冷启动会被读成「它想了 45 秒」，观感差很多。
+ */
+const waitText = computed(() => {
+  const hasPhase = props.items.some((x) => x.kind === 'phase')
+  if (!hasPhase) return '正在启动…'
+  return '正在思考…'
+})
+
+/** 已等待秒数（从最后一条事件算起） */
+const waitSeconds = computed(() => {
+  tick.value
+  if (!lastEventAt.value) {
+    // 还没有任何事件：从组件挂载算起（父组件会立刻推开始时间）
+    const t0 = props.finish?.startedAt
+    return t0 ? Math.max(0, Math.round((Date.now() - new Date(t0).getTime()) / 1000)) : 0
+  }
+  return Math.max(0, Math.round((Date.now() - lastEventAt.value) / 1000))
+})
 
 const totalCalls = computed(() => props.items.filter((x) => x.kind === 'call').length)
 
@@ -339,16 +464,6 @@ const fmtMs = (ms) => {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-// ── 实时秒数（同前：tick 触发重算，不是存下来的假时钟）──
-const tick = ref(0)
-let rafId = null
-let lastTick = 0
-const frame = (now) => {
-  rafId = requestAnimationFrame(frame)
-  if (now - lastTick < 100) return
-  lastTick = now
-  tick.value++
-}
 const elapsedOf = (g) => {
   tick.value
   if (!g.startedAt) return ''
@@ -633,6 +748,71 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
 .xs-none {
   margin: 0;
   font-size: 0.68rem;
+  color: var(--text-faint);
+}
+
+/* ── 中断分隔线（「继续执行」）──
+   不是阶段，所以视觉上要比阶段头弱：细线 + 小字，居中断开。 */
+.xg-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 9px 0 5px;
+  padding: 0 2px;
+}
+.xg-sep-line {
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+.xg-sep-text {
+  flex: 0 0 auto;
+  font-size: 0.63rem;
+  color: var(--text-faint);
+}
+
+/* ── 「正在思考」行 ──
+   三点动画 + 文案 + 秒数。与主智能体对话界面的 .generating-status 同一套
+   语言（那套已经验证过观感），只是这里的宽度只有 300px，所以更紧凑。 */
+.xs-wait {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.xs-wait-dots {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--info);
+    animation: xs-dot 1.4s infinite ease-in-out both;
+    &:nth-child(1) { animation-delay: -0.32s; }
+    &:nth-child(2) { animation-delay: -0.16s; }
+    &:nth-child(3) { animation-delay: 0s; }
+  }
+}
+@keyframes xs-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .xs-wait-dots i { animation: none; opacity: 0.6; }
+}
+.xs-wait-text { flex: 0 1 auto; min-width: 0; }
+.xs-wait-sec {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 0.66rem;
   color: var(--text-faint);
 }
 
