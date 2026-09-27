@@ -67,10 +67,9 @@
             <ProfileCard
               :head="head"
               :task="task"
-              :groups="profile"
+              :entries="profile"
               :understanding="understanding"
               :opening="opening"
-              :findings="findings"
               @act="onAct"
             />
           </div>
@@ -80,8 +79,10 @@
           <DeliverPanel
             :items="deliverables"
             :ready-count="readyCount"
+            :question="question"
             @confirm="onConfirm"
             @revise="onRevise"
+            @answer="onAnswer"
           />
         </div>
       </template>
@@ -131,7 +132,7 @@ const {
   opening,
   profile,
   understanding,
-  findings,
+  question,
   deliverables,
   running,
   settled,
@@ -140,7 +141,8 @@ const {
   start,
   abort,
   reload,
-  revise
+  revise,
+  answer
 } = useGiftWorkbench({ runId })
 
 /** 抬头兜底：后端还没返回时（推演刚开始）也要能显示，不能空着 */
@@ -198,18 +200,30 @@ const say = (text) => {
   toastTimer = setTimeout(() => { toast.value = '' }, 2400)
 }
 
-/** 中栏的信息可追溯：来源要能说出来；「改一下」真的调后端标记待补充 */
-const onAct = async (g, kind) => {
+/**
+ * 中栏条目的操作。
+ *
+ * ⚠️ 档案从「固定五组」改成**可编辑条目**之后，这里的语义跟着变：
+ * 「删」原来只是一句 toast（旧结构根本表达不了删除），现在归档交给
+ * **agent 自己**用 write_profile 做 —— 用户点「改」是把它标成待补充，
+ * 提示 agent 重推时重新审视这条。
+ */
+const onAct = async (it, kind) => {
   if (kind === 'source') {
-    say(`来源 · ${g.source}`)
-  } else if (kind === 'edit') {
-    await revise(g.key)
-    say(`已把「${g.label}」标记为待补充 —— 补充后我会重新收窄`)
-  } else if (kind === 'remove') {
-    say(`删「${g.label}」—— 删除会同时影响左栏的依据链`)
+    say(`依据 · ${it.because || it.source || '（未记录）'}`)
+  } else if (kind === 'revise') {
+    await revise(it.id)
+    say(`已把「${it.text}」标记为待补充`)
   } else {
-    say(`${g.label} · ${g.state === 'pending' ? '待确认' : '已记录'} · 来源 ${g.source}`)
+    say(`${it.rail} · ${it.source || '本次推演'}`)
   }
+}
+
+/** 回答 agent 的提问 —— 它从停下的地方接着跑 */
+const onAnswer = async (key) => {
+  const r = await answer(key)
+  if (!r) say('提交回答失败，请重试')
+  else say('已收到 —— 我接着往下走')
 }
 
 const onConfirm = () => say('下单链路待接入 —— 订单已可确认，落库与支付等后端')

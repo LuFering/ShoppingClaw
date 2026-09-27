@@ -51,16 +51,53 @@ export const PROFILE_HEAD = null
  *   inferred  智能推测 —— 空心圈
  *   pending   待确认 / 暂时没有 —— 灰虚线圈
  */
-export const PROFILE_GROUPS = [
-  { key: 'relation', label: '关系与称谓', icon: 'people', text: '', state: 'todo' },
-  { key: 'life', label: '生活状态', icon: 'life', text: '', state: 'todo' },
-  { key: 'likes', label: '已知喜好', icon: 'heart', text: '', state: 'todo' },
-  {
-    key: 'taboo', label: '明确禁忌', icon: 'ban',
-    text: '', state: 'todo', danger: true
-  },
-  { key: 'giftpref', label: '送礼偏好', icon: 'gift', text: '', state: 'todo' }
-]
+/**
+ * 中栏 · **建议栏名**的展示元数据。
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * 2026-09-28：这里原本是 PROFILE_GROUPS —— 五个**预置空槽**
+ * ═══════════════════════════════════════════════════════════════════
+ * 旧结构是「固定五组、每组一条」，后果（实测）：五组档案全在 run 的
+ * 第 8~12 条事件里写满（全程 **7%**），剩下 93% 一条都不写。
+ * 用户反馈：「执行流一开始就写完了近半的档案，然后后续思考时多以调用
+ * 为主，导致需要较长时间才能输入」。
+ *
+ * 现在档案是**开放式条目列表**（每条 {id, rail, text, because, source}），
+ * 由 agent 每执行一步用 write_profile 写入，可增可改可删。
+ * 栏名是开放集合 —— 下面这张表只是**查图标**用的：
+ * 命中已知栏名给专属图标，自建栏名走兜底图标。
+ *
+ * ⚠️ 栏名也**刻意换了一套**（用户明确否决了旧五组：
+ *    「不能是这几个，因为之前的测试就是这几个，结果效果不佳」）。
+ * 选这组的判据是「每栏的数据来自不同步骤」—— 这是生长能分步发生的原因：
+ *   人物信息 ← 入口  送礼往来 ← 读历史  在意什么 ← 读偏好
+ *   行情锚点 ← 检索  这盒的取舍 ← 比价  这盒怎么搭 ← 组合
+ */
+export const RAIL_META = {
+  人物信息: { key: 'person', icon: 'people' },
+  送礼往来: { key: 'history', icon: 'gift' },
+  在意什么: { key: 'cares', icon: 'heart' },
+  行情锚点: { key: 'market', icon: 'search' },
+  这盒的取舍: { key: 'triage', icon: 'minus' },
+  这盒怎么搭: { key: 'pairing', icon: 'link' }
+}
+
+/** 自建栏名的兜底图标 —— 不编一个不存在的专属图标 */
+export const RAIL_ICON_FALLBACK = 'dot'
+
+/**
+ * 「禁忌」类栏名 → 危险区渲染的判据。
+ * 从**栏名文字**判断而不是查死表：模型自建「海鲜过敏」这类栏时也该进
+ * 危险区，否则最要命的信息会被当普通条目渲染。
+ */
+const DANGER_HINTS = ['禁忌', '忌讳', '不能', '过敏']
+
+export const isDangerRail = (rail) =>
+  DANGER_HINTS.some((h) => String(rail || '').includes(h))
+
+/** 栏名 → {key, icon}，自建栏返回兜底 */
+export const railMeta = (rail) =>
+  RAIL_META[rail] || { key: `x-${rail || 'misc'}`, icon: RAIL_ICON_FALLBACK }
 
 /** 中栏 · 底部「当前理解」 */
 export const UNDERSTANDING = {

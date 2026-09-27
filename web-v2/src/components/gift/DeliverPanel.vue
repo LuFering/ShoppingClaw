@@ -105,6 +105,25 @@
         </template>
       </template>
     </div>
+
+    <!--
+      agent 停下来等拍板的问题。
+      放在清单**之后**：它是当前最需要动作的东西，视线自然落到底部。
+    -->
+    <div v-if="question" class="dp__ask">
+      <p class="dp__ask-k">需要你拍板</p>
+      <p class="dp__ask-text">{{ question.text }}</p>
+      <div class="dp__ask-opts">
+        <button
+          v-for="opt in question.options"
+          :key="opt.key"
+          class="dp__ask-btn"
+          :class="{ 'is-primary': opt.primary }"
+          type="button"
+          @click="$emit('answer', opt.key)"
+        >{{ opt.label }}</button>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -122,10 +141,16 @@ import { computed } from 'vue'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
-  readyCount: { type: Number, default: 0 }
+  readyCount: { type: Number, default: 0 },
+  /**
+   * agent 停下来等拍板的问题 {text, options:[{key,label,primary}]}。
+   * 与规划工作台的 ArtifactsPanel 同构 —— 同一件事在两个 agent 里
+   * 用同一套交互，不各写一个。
+   */
+  question: { type: Object, default: null }
 })
 
-defineEmits(['confirm', 'revise'])
+defineEmits(['confirm', 'revise', 'answer'])
 
 const stateText = (s) =>
   ({ todo: '等待', building: '生成中', ready: '已生成', needs: '待确认' }[s] || s)
@@ -137,6 +162,48 @@ const budgetMax = computed(() => {
 </script>
 
 <style lang="less" scoped>
+/* ── 需要你拍板 ──
+   危险色系里的强调色：它不是错误，但必须被看见、必须有人答。
+   与规划那栏同一套观感（accent 描边 + 主选项实心）。 */
+.dp__ask {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--gift-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--gift-accent-soft) 45%, transparent);
+}
+.dp__ask-k {
+  margin: 0 0 5px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--gift-accent);
+}
+.dp__ask-text {
+  margin: 0 0 9px;
+  font-size: 0.76rem;
+  line-height: 1.62;
+  color: var(--text);
+}
+.dp__ask-opts { display: flex; flex-direction: column; gap: 6px; }
+.dp__ask-btn {
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text);
+  cursor: pointer;
+  &:hover { border-color: var(--gift-accent); }
+  &.is-primary {
+    border-color: var(--gift-accent);
+    background: var(--gift-accent);
+    color: var(--on-accent);
+  }
+}
+
 .dp { padding: 4px 0 24px; }
 
 .dp__hd {

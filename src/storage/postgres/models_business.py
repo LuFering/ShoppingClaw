@@ -629,6 +629,16 @@ class GiftRun(Base):
     #                这种废话（规划那边踩过，模型据此跑偏）。
     messages = Column(JSONB, nullable=False, default=list)
     products = Column(JSONB, nullable=False, default=dict)
+
+    # ── 当前待确认的问题（agent 调 ask_user 时停下）──
+    # {text, options: [{key, label, primary}]}
+    #
+    # ⚠️ 2026-09-28 补：此前**缺这一列**，而 service 已经在写
+    # `_patch_run(..., question=stop)` —— 写到一个未映射属性上，静默丢失。
+    # 后果是 agent 停下来提问之后，问题存不下来、前端也拿不到，
+    # run 永久停在 awaiting（实测撞到过）。
+    question = Column(JSONB, nullable=True)
+
     answer_pick = Column(String(64), nullable=True)
     answer_label = Column(String(200), nullable=True)
     answer_question = Column(Text, nullable=True)
@@ -649,6 +659,7 @@ class GiftRun(Base):
             "understanding": self.understanding or {},
             "profileHead": self.profile_head or {},
             "products": self.products or {},
+            "question": self.question or None,
             "answer_label": self.answer_label,
             "answer_question": self.answer_question,
             "error": self.error,

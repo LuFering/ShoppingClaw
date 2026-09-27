@@ -14,14 +14,21 @@
 import { ref, computed, onBeforeUnmount } from 'vue'
 import { giftApi } from '@/apis/gift_api'
 import { demoStatus } from '@/apis/demoStatus'
-import { PROFILE_GROUPS, ACTIONS, DELIVERABLES } from '@/data/giftProfile'
+import { ACTIONS, DELIVERABLES, railMeta, isDangerRail } from '@/data/giftProfile'
 
 /** 三栏的骨架：后端只发「变化」，骨架在前端定，避免首屏空窗 */
 const skeletonSteps = () =>
   ACTIONS.map((a) => ({ ...a, status: 'todo', live: '', why: '' }))
 
-const skeletonProfile = () =>
-  PROFILE_GROUPS.map((g) => ({ ...g, fresh: false }))
+/**
+ * 档案例子的骨架 = **空**。
+ *
+ * ⚠️ 旧实现是 PROFILE_GROUPS.map(…) —— 五个预置空槽，界面第一秒就有
+ * 五个位置等着填。那既造成「一开始就有半张档案」的观感，也让「从 0 生长」
+ * 无从谈起（0 不可能是 5 个空槽）。
+ * 现在中栏从真正的 0 条开始，条目全部来自后端事件。
+ */
+const skeletonProfile = () => []
 
 const skeletonDeliverables = () =>
   DELIVERABLES.map((d) => ({ ...d, state: 'todo', data: null }))
@@ -35,11 +42,23 @@ export function useGiftWorkbench({ runId } = {}) {
   const stageKey = ref('')
   const freshKey = ref('')
 
-  // 「起始陈述」与「推演所得」—— 中栏除人物档案之外的另两块内容。
-  // 前者是开场那句「我还不了解 TA」（学 Letta 的 human 块写法），
-  // 后者是随推演逐步长出来的真实所得（搜过的方向 / 已排除 / 搭配逻辑）。
+  // 开场陈述 —— 学 Letta 的 `human` 块写法，起点不是空白而是
+  // 一句诚实的「我还不了解 TA」。
+  //
+  // ⚠️ 「推演所得」这块**已并入档案**：搜过的方向 / 排除了什么 / 怎么搭的
+  // 现在都由 agent 用 write_profile 写进对应栏（行情锚点 / 这盒的取舍 /
+  // 这盒怎么搭），带 `because` 依据。旧的那份是**代码自动派生**的、
+  // 没有依据 —— 曾被实测误把「我们搜的品类词」当成「她的喜好」。
   const opening = ref(null)
-  const findings = ref([])
+
+  /**
+   * agent 停下来等拍板的问题 {text, options:[{key,label,primary}]}。
+   *
+   * ⚠️ 此前前端**完全没有这条链路** —— 后端能停（ask_user 写了 question
+   * 就落 awaiting），但没人能答，run 永久卡住。实测撞到过：agent 问了
+   * 一个很好的问题（「妈妈日常更贴近久坐型还是劳累型」），然后就死在那。
+   */
+  const question = ref(null)
 
   /**
    * 左栏的**事件行**。与采购 `PurchaseWorkbenchView.stream` 同构。
@@ -97,7 +116,7 @@ export function useGiftWorkbench({ runId } = {}) {
    */
   const markFresh = (key) => {
     freshKey.value = key
-    const g = profile.value.find((x) => x.key === key)
+    const g = profile.value.find((x) => x.id === key)
     if (g) g.fresh = true
     clearTimeout(freshTimer)
     freshTimer = setTimeout(() => {
@@ -237,25 +256,41 @@ export function useGiftWorkbench({ runId } = {}) {
         break
       }
 
+      // ── 档案条目：增 / 改 / 删 ──
+      // 后端推的是**差集**（见 gift_service._push_profile_delta）：
+      //   add    新写的一条
+      //   update 改写了某条（含状态变化）
+      //   drop   删掉了某条 —— 这是本次重构才有的能力，
+      //          旧的「固定五组」结构表达不了删除
+      // 全部按 `id` 定位，不再按栏名/key。
       case 'profile': {
-        // ⚠️ 组是**逐步到达**的（后端按两次 RAG 往返分批推，见
-        // gift_service._PROFILE_BATCH）。原先这里找不到就 `break` 丢弃 ——
-        // 那是「骨架预置了全部五组、只等更新」的写法，现在骨架是空槽，
-        // 组必须能被**新增**，否则中栏永远长不出来。
-        let g = profile.value.find((x) => x.key === p.key)
-        if (!g) {
-          const base = PROFILE_GROUPS.find((x) => x.key === p.key) || { key: p.key }
-          g = { ...base }
-          profile.value.push(g)
+        const id = String(p.id || '')
+        if (!id) break
+        const i = profile.value.findIndex((x) => x.id === id)
+
+        if (p.op === 'drop') {
+          if (i >= 0) profile.value.splice(i, 1)
+          break
         }
-        g.state = p.state
-        if (p.text) g.text = p.text
-        if (p.note !== undefined && p.note !== null) g.note = p.note
-        if (p.source) g.source = p.source
-        // 到达时刻：卡片上标出「这一条是什么时候读到的」，
-        // 让「刚长出来的」与「早就在的」可分辨（这是生长感的载体）
-        g.arrivedAt = new Date()
-        markFresh(p.key)
+
+        const meta = railMeta(p.rail)
+        const item = {
+          id,
+          rail: p.rail || '其他',
+          railKey: meta.key,
+          icon: meta.icon,
+          danger: isDangerRail(p.rail),
+          text: p.text || '',
+          because: p.because || '',
+          source: p.source || '',
+          state: p.state || 'confirmed',
+          // 到达时刻：卡片上标出「这一条是什么时候写进来的」，
+          // 让「刚长出来的」与「早就在的」可分辨（这是生长感的载体）
+          arrivedAt: new Date()
+        }
+        if (i >= 0) profile.value[i] = { ...profile.value[i], ...item }
+        else profile.value.push(item)
+        markFresh(id)
         break
       }
 
@@ -264,15 +299,14 @@ export function useGiftWorkbench({ runId } = {}) {
         opening.value = { ...p }
         break
 
-      case 'finding': {
-        // 推演所得：随 search / verify / combine 逐步到达。
-        // 同 key 更新（可能多轮），新 key 追加 —— 与 profile 同样的到达语义。
-        const i = findings.value.findIndex((x) => x.key === p.key)
-        const item = { ...p, arrivedAt: new Date() }
-        if (i >= 0) findings.value[i] = { ...findings.value[i], ...item }
-        else findings.value.push(item)
+      // agent 停下来提问 → 右栏浮出「需要你拍板」
+      case 'question':
+        question.value = {
+          text: payload.text || '',
+          options: (payload.options || []).map((o) => ({ ...o }))
+        }
+        running.value = true          // 它没跑完，只是在等
         break
-      }
 
       case 'understanding':
         understanding.value = { text: p.text || '', from: p.from || '' }
@@ -316,16 +350,25 @@ export function useGiftWorkbench({ runId } = {}) {
         recipient: run.recipient, occasion: run.occasion, budget: run.budget
       }
       if (run.profile?.length) {
-        // 后端返回的是真实五组，直接铺到骨架上（保留前端图标等展示字段）
+        // 后端返回的是**真实条目列表**。补齐展示字段（图标 / 是否危险栏），
+        // 这些由前端查表得到，不进库 —— 换图标不该动后端数据。
         profile.value = run.profile.map((g) => {
-          const base = PROFILE_GROUPS.find((x) => x.key === g.key) || {}
-          return { ...base, ...g, fresh: false }
+          const meta = railMeta(g.rail)
+          return {
+            ...g,
+            railKey: meta.key,
+            icon: meta.icon,
+            danger: isDangerRail(g.rail),
+            fresh: false
+          }
         })
       }
       if (run.profileHead && Object.keys(run.profileHead).length) {
         profileHead.value = run.profileHead
       }
       if (run.understanding?.text) understanding.value = run.understanding
+      // 刷新时恢复待确认问题（后端把它存在 run.question 里）
+      if (run.question) question.value = run.question
       settled.value = run.status === 'converged'
       subscribe()
       // 已收敛时把交付物拉全（快照里没有交付物内容，靠事件补）
@@ -386,7 +429,7 @@ export function useGiftWorkbench({ runId } = {}) {
     liveThought.value = ''
     thinkingKind = ''
     opening.value = null
-    findings.value = []
+    question.value = null
     excluded.value = []
     profile.value = skeletonProfile()
     understanding.value = { text: '', from: '' }
@@ -411,7 +454,7 @@ export function useGiftWorkbench({ runId } = {}) {
     stream,
     liveThought,
     opening,
-    findings,
+    question,
     excluded,
     profile,
     understanding,
@@ -429,6 +472,16 @@ export function useGiftWorkbench({ runId } = {}) {
     start,
     abort: abortAll,
     reload: loadSnapshot,
+    /** 回答 agent 的提问 → 后端清掉问题并续跑 */
+    answer: async (key) => {
+      if (!runId?.value) return null
+      try {
+        const run = await giftApi.answer(runId.value, key)
+        question.value = null       // 问题已收掉，agent 接着跑
+        running.value = true
+        return run
+      } catch { return null }
+    },
     revise: async (key) => {
       if (!runId?.value) return null
       try {

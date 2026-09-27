@@ -5,6 +5,7 @@
   GET  /api/gift/runs?limit=              → {success, data: [run]}
   GET  /api/gift/runs/{id}                → {success, data: run}
   GET  /api/gift/runs/{id}/events         → SSE（after_seq 续传）
+  POST /api/gift/runs/{id}/answer         → {success, data: run}  body {key}
   POST /api/gift/runs/{id}/revise         → {success, data: run}  body {key}
   GET  /api/gift/runs/{id}/deliverables/{key} → {success, data: {key,label,data,generated_at}}
 
@@ -109,6 +110,23 @@ async def stream_events(
     )
 
 
+@router.post("/runs/{run_id}/answer")
+async def answer(
+    run_id: str,
+    key: str = Body(..., embed=True),
+    current_user: User = Depends(get_required_user),
+):
+    """用户回答待确认问题 → 把回答喂回 agent 续跑。
+
+    ⚠️ 这个端点此前**不存在**，而 agent 早就能用 `ask_user` 停下来提问 ——
+    结果是 run 永久卡在 awaiting（实测撞到过：问得很好，但没人能答）。
+    """
+    run = await gift_service.answer_question(run_id, _uid(current_user), key)
+    if run is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"success": True, "data": run}
+
+
 @router.post("/runs/{run_id}/revise")
 async def revise(
     run_id: str,
@@ -123,17 +141,21 @@ async def revise(
     run = await gift_service.get_run(run_id, _uid(current_user))
     if run is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    # ⚠️ 按**条目 id** 定位。2026-09-28 档案从「固定五组」改成
+    # 可编辑条目列表后，`key` 参数承载的是条目 id（p1/p2/…）。
     profile = list(run.profile or [])
     hit = False
     for g in profile:
-        if g.get("key") == key:
+        if str(g.get("id") or "") == str(key):
             g["state"] = "pending"
-            g["note"] = "（已标记待补充）"
             hit = True
+            await gift_service.emit(run_id, "profile", {
+                "op": "update", "id": g.get("id"), "rail": g.get("rail"),
+                "text": g.get("text"), "because": g.get("because"),
+                "source": g.get("source"), "state": "pending",
+            })
     if hit:
         await gift_service._patch_run(run_id, profile=profile)
-        await gift_service.emit(run_id, "profile", {"key": key, "state": "pending",
-                                                    "note": "（已标记待补充）"})
     fresh = await gift_service.get_run(run_id, _uid(current_user))
     return {"success": True, "data": fresh.to_dict() if fresh else {}}
 

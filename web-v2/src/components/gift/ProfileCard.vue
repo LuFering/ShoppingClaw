@@ -41,157 +41,132 @@
 
     <!--
       ═══════════════════════════════════════════════════════════════
-      档案绘制进度 —— 「从 0 开始绘制」的可见载体
+      档案条数 —— 「从 0 开始记」的可见载体
       ═══════════════════════════════════════════════════════════════
-      用户的原话：「没有那种让我感觉到 agent 正在从 0 绘制个人档案的感觉」。
+      用户的原话：「没有那种让我感觉到 agent 正在从 0 绘制个人档案的感觉」，
+      以及「执行流一开始就写完了近半的档案，后续很长时间不再输入」。
 
-      查实的原因：五组档案在 **15 毫秒**内全部到达 —— 后端确实是一批批发的
-      （历史一批、偏好一批，相隔 400ms），但两次查询都是本地的，加起来
-      还不够一次眨眼。**光靠到达时刻做不出「绘制感」**。
+      前者是节奏问题，后者是**结构**问题 —— 档案原本是「固定 5 组、
+      每组一条」，而 5 组的数据全来自开头那两次查询，所以 7% 处就写完了
+      （实测：164 条事件里 profile 全在第 8~12 条），分母也就固定是 5。
 
-      所以这里补一层视觉：五个格子从一开始就画出来（空心的），每读到一个
-      就点亮一个。用户看到的是「0/5 → 1/5 → 2/5」这个**计数器在动**，
-      而不是「五条一起出现」。
+      现在档案是开放式条目列表，agent 每执行一步都可能写入，可增可改可删。
+      所以这里显示**真实条数**，不再是 N/5：
 
-      ⚠️ 它不造假：格子数 = 档案组数（固定 schema），点亮数 = 真实已确认数
-      （由后端 build_profile_head 算）。推进慢是因为数据来得慢，不是因为
-      我们拖时间。
+        ⚠️ 旧的「N/5」在骨架拆掉后就是**假数字** —— agent 写到第 6 条时
+        分母还是 5，自建新栏时它也不会变。分母是架构决定的，架构变了就得删。
+
+      条数为 0 时显示「档案 0 条」而不是空白 —— 0 是这次推演的真实起点。
     -->
-    <div class="pc__meter" :class="{ 'is-complete': confirmedCount >= totalGroups }">
+    <div class="pc__meter">
       <span class="pc__meter-label">
-        档案完整
-        <b class="mono">{{ confirmedCount }}/{{ totalGroups }}</b>
+        档案
+        <b class="mono">{{ entries.length }}</b> 条
       </span>
-      <span class="pc__meter-cells">
-        <i
-          v-for="n in totalGroups"
-          :key="n"
-          class="pc__cell"
-          :class="{ on: n <= confirmedCount }"
-        />
+      <span class="pc__meter-live" v-if="freshRail">
+        正在写入「{{ freshRail }}」…
       </span>
     </div>
 
-    <!-- 人物侧写：编辑式排版，小标签 + 大正文 -->
-    <section class="pc__section">
+    <!-- 人物侧写：按栏分组，每栏可有多条 -->
+    <section v-if="normalRails.length" class="pc__section">
       <h3 class="pc__sectitle">人物侧写</h3>
       <div class="pc__rows">
-        <div
-          v-for="g in normalGroups"
-          :key="g.key"
-          class="gr"
-          :class="{ 'gr--fresh': g.fresh }"
-          role="button"
-          tabindex="0"
-          :aria-label="`${g.label}：${g.text}（${stateLabel(g.state)}），可展开来源与操作`"
-          @click="$emit('act', g, 'open')"
-          @keydown.enter.prevent="$emit('act', g, 'open')"
-        >
-          <span class="gr__rail">
-            <i class="gr__dot" :class="`is-${g.state}`" />
-          </span>
-          <div class="gr__main">
-            <span class="gr__label">{{ g.label }}</span>
-            <!--
-              空槽（还没读到）与「读到了但没有」是**两件事**，界面上要分得清：
-                todo     —— 淡虚线占位 + 「尚未读到」，表示还在等
-                pending  —— 显示后端给的具体文案（如「未记录」），表示已经问过了
-              混为一谈的话，用户分不清「它还没查」与「查了但没有」。
-            -->
-            <p v-if="g.state === 'todo'" class="gr__text gr__text--empty">
-              尚未读到…
-            </p>
-            <p v-else class="gr__text">
-              {{ g.text }}
-              <span v-if="g.note" class="gr__note">{{ g.note }}</span>
-              <span v-if="g.arrivedAt" class="gr__at mono">{{ clock(g.arrivedAt) }}</span>
-            </p>
+        <template v-for="rail in normalRails" :key="rail.rail">
+          <div class="pc__railtitle">
+            <span class="pc__railname">{{ rail.rail }}</span>
+            <span class="pc__railn mono">{{ rail.items.length }}</span>
           </div>
-          <span v-if="g.state !== 'todo'" class="gr__acts">
-            <button type="button" @click.stop="$emit('act', g, 'source')">来源</button>
-            <button type="button" @click.stop="$emit('act', g, 'edit')">改</button>
-            <button type="button" @click.stop="$emit('act', g, 'remove')">删</button>
-          </span>
-        </div>
+          <div
+            v-for="it in rail.items"
+            :key="it.id"
+            class="gr"
+            :class="{ 'gr--fresh': it.fresh }"
+            role="button"
+            tabindex="0"
+            :aria-label="`${it.text}，来自 ${it.source}，可展开依据与操作`"
+            @click="$emit('act', it, 'open')"
+            @keydown.enter.prevent="$emit('act', it, 'open')"
+          >
+            <span class="gr__rail">
+              <i class="gr__dot" :class="`is-${it.state || 'confirmed'}`" />
+            </span>
+            <div class="gr__main">
+              <p class="gr__text">
+                {{ it.text }}
+                <span v-if="it.arrivedAt" class="gr__at mono">{{ clock(it.arrivedAt) }}</span>
+              </p>
+              <!--
+                依据：每一条都带 `because`（后端强制），指回它来自哪次真实
+                结果。这是「可核对」的落点 —— 没有依据的条目不该存在，
+                所以有就显示、不是可选装饰。
+              -->
+              <p v-if="it.because" class="gr__because">依据 · {{ it.because }}</p>
+            </div>
+            <span class="gr__acts">
+              <button type="button" @click.stop="$emit('act', it, 'source')">来源</button>
+              <button type="button" @click.stop="$emit('act', it, 'revise')">改</button>
+            </span>
+          </div>
+        </template>
       </div>
     </section>
 
-    <!-- 明确禁忌：独立成区，危险色包裹，不与侧写混排 -->
-    <section v-if="dangerGroups.length" class="pc__section pc__avoid">
+    <!-- 档案还是空的：如实说明它在等什么，不预置空槽 -->
+    <p v-else class="pc__empty">
+      还没有记下任何信息。每查一步，它会把关于 TA 的要点写进这里。
+    </p>
+
+    <!--
+      禁忌：独立成区，危险色包裹，不与侧写混排。
+      ⚠️ 判据是**栏名里带「禁忌/忌语/不能/过敏」**（见 data/giftProfile 的
+      isDangerRail），不是查死表 —— 模型自建「海鲜过敏」这类栏时也该进这里，
+      否则最要命的信息会被当普通条目渲染。
+    -->
+    <section v-if="dangerRails.length" class="pc__section pc__avoid">
       <h3 class="pc__sectitle pc__sectitle--danger">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <path d="M8 1.8 14.4 13.5H1.6L8 1.8Z" /><path d="M8 6.4v3.1" /><circle cx="8" cy="11.4" r="0.5" fill="currentColor" stroke="none" />
         </svg>
-        明确禁忌
+        {{ dangerRails.map((r) => r.rail).join(' · ') }}
       </h3>
       <div class="pc__rows">
-        <div
-          v-for="g in dangerGroups"
-          :key="g.key"
-          class="gr gr--danger"
-          :class="{ 'gr--fresh': g.fresh }"
-          role="button"
-          tabindex="0"
-          :aria-label="`${g.label}：${g.text}（${stateLabel(g.state)}），可展开来源与操作`"
-          @click="$emit('act', g, 'open')"
-          @keydown.enter.prevent="$emit('act', g, 'open')"
-        >
-          <span class="gr__rail">
-            <i class="gr__dot" :class="`is-${g.state}`" />
-          </span>
-          <div class="gr__main">
-            <span class="gr__label">{{ g.label }}</span>
-            <!--
-              空槽（还没读到）与「读到了但没有」是**两件事**，界面上要分得清：
-                todo     —— 淡虚线占位 + 「尚未读到」，表示还在等
-                pending  —— 显示后端给的具体文案（如「未记录」），表示已经问过了
-              混为一谈的话，用户分不清「它还没查」与「查了但没有」。
-            -->
-            <p v-if="g.state === 'todo'" class="gr__text gr__text--empty">
-              尚未读到…
-            </p>
-            <p v-else class="gr__text">
-              {{ g.text }}
-              <span v-if="g.note" class="gr__note">{{ g.note }}</span>
-              <span v-if="g.arrivedAt" class="gr__at mono">{{ clock(g.arrivedAt) }}</span>
-            </p>
+        <template v-for="rail in dangerRails" :key="rail.rail">
+          <div
+            v-for="it in rail.items"
+            :key="it.id"
+            class="gr gr--danger"
+            :class="{ 'gr--fresh': it.fresh }"
+            role="button"
+            tabindex="0"
+            :aria-label="`${it.text}，来自 ${it.source}，可展开依据与操作`"
+            @click="$emit('act', it, 'open')"
+            @keydown.enter.prevent="$emit('act', it, 'open')"
+          >
+            <span class="gr__rail"><i class="gr__dot" :class="`is-${it.state || 'confirmed'}`" /></span>
+            <div class="gr__main">
+              <p class="gr__text">
+                {{ it.text }}
+                <span v-if="it.arrivedAt" class="gr__at mono">{{ clock(it.arrivedAt) }}</span>
+              </p>
+              <p v-if="it.because" class="gr__because">依据 · {{ it.because }}</p>
+            </div>
+            <span class="gr__acts">
+              <button type="button" @click.stop="$emit('act', it, 'source')">来源</button>
+              <button type="button" @click.stop="$emit('act', it, 'revise')">改</button>
+            </span>
           </div>
-          <span v-if="g.state !== 'todo'" class="gr__acts">
-            <button type="button" @click.stop="$emit('act', g, 'source')">来源</button>
-            <button type="button" @click.stop="$emit('act', g, 'edit')">改</button>
-            <button type="button" @click.stop="$emit('act', g, 'remove')">删</button>
-          </span>
-        </div>
+        </template>
       </div>
     </section>
 
     <!--
-      ── 推演所得 ──
-      中栏的第二类内容，与「人物档案」语义分开（前者主语是收礼人，
-      后者主语是这次推演）。这些是 search / verify / combine 各阶段
-      **真实产生**的信息，逐步回流到这里 —— 这就是「随推演生长」的载体。
+      「推演所得」区已并入上面的栏 —— 这次的检索 / 比价 / 组合结论现在由
+      agent 用 write_profile 写进「行情锚点」「这盒的取舍」「这盒怎么搭」，
+      带 because 依据。独立一块的意义没了：同一份信息出现两次，
+      而且旧的那份**没有依据**（代码自动派生，曾被实测误把「我们搜的品类词」
+      当成「她的喜好」）。
     -->
-    <section v-if="findings.length" class="pc__section pc__findings">
-      <h3 class="pc__sectitle">推演所得</h3>
-      <div class="pc__rows">
-        <div
-          v-for="f in findings"
-          :key="f.key"
-          class="gr gr--finding"
-          :class="{ 'gr--fresh': f.fresh }"
-        >
-          <span class="gr__rail"><i class="gr__dot is-derived" /></span>
-          <div class="gr__main">
-            <span class="gr__label">{{ f.label }}</span>
-            <p class="gr__text">
-              {{ f.text }}
-              <span v-if="f.note" class="gr__note">{{ f.note }}</span>
-              <span v-if="f.arrivedAt" class="gr__at mono">{{ clock(f.arrivedAt) }}</span>
-            </p>
-          </div>
-        </div>
-      </div>
-    </section>
 
     <!-- 当前理解：签名式引文 -->
     <div v-if="understanding.text" class="pc__und">
@@ -223,16 +198,18 @@
  * 三态标记、hover 才显操作、随左栏更新的轻微脉冲也都沿用。
  */
 import { computed } from 'vue'
+// 禁忌栏的判据（按栏名文字，不是查死表）—— 用**函数**判断而不是查表，
+// 因为它对「海鲜过敏」这类模型自建的栏名也必须成立。
+import { isDangerRail } from '@/data/giftProfile'
 
 const props = defineProps({
   head: { type: Object, required: true },
   task: { type: Object, required: true },
-  groups: { type: Array, default: () => [] },
+  /** 档案条目（扁平列表，每条 {id, rail, text, because, source}） */
+  entries: { type: Array, default: () => [] },
   understanding: { type: Object, default: () => ({ text: '', from: '' }) },
   /** 开场陈述（建 run 时下发一次） */
-  opening: { type: Object, default: null },
-  /** 推演所得：随 search/verify/combine 逐步到达 */
-  findings: { type: Array, default: () => [] }
+  opening: { type: Object, default: null }
 })
 
 defineEmits(['act'])
@@ -240,17 +217,32 @@ defineEmits(['act'])
 const stateLabel = (s) => (s === 'inferred' ? '推测' : s === 'pending' ? '待确认' : '')
 
 /**
- * 绘制进度：已确认组数 / 档案组总数。
+ * 按栏分组 —— 保持栏目首次出现的顺序（后端写入的顺序即推演顺序）。
  *
- * ⚠️ 分母用 props.groups 的长度（五组是固定 schema，从第一秒就在），
- * 不用「已到达的组数」—— 后者会让分母也一起涨，进度条永远满格，
- * 反而看不出「填了多满」。分子只算 confirmed：那是**真读到了**的，
- * 含 inferred/pending 会把「没有依据的推测」也算成已绘制。
+ * ⚠️ 分组在这里做而不是后端做：后端推的是差集（add/update/drop），
+ * 分组是纯展示。后端也有一份 `group_by_rail`，那是给**模型**看的
+ * （工具回显当前档案），两者用途不同、不必共用。
  */
-const totalGroups = computed(() => props.groups.length || 5)
-const confirmedCount = computed(
-  () => props.groups.filter((g) => g.state === 'confirmed').length
-)
+const rails = computed(() => {
+  const order = []
+  const map = new Map()
+  for (const it of props.entries) {
+    const r = it.rail || '其他'
+    if (!map.has(r)) { map.set(r, []); order.push(r) }
+    map.get(r).push(it)
+  }
+  return order.map((r) => ({ rail: r, items: map.get(r) }))
+})
+
+/** 禁忌类单独成区（判据是栏名文字，见 data/giftProfile 的 isDangerRail） */
+const dangerRails = computed(() => rails.value.filter((r) => isDangerRail(r.rail)))
+const normalRails = computed(() => rails.value.filter((r) => !isDangerRail(r.rail)))
+
+/** 最近写入的那一栏 —— 头部显示「正在写入「X」…」，让生长可见 */
+const freshRail = computed(() => {
+  const hit = props.entries.find((x) => x.fresh)
+  return hit ? hit.rail : ''
+})
 
 /** 到达时刻（时:分:秒）—— 「这一条是什么时候读到的」 */
 const clock = (d) => {
@@ -468,6 +460,37 @@ const dangerGroups = computed(() => props.groups.filter((g) => g.danger))
 .gr__note { color: var(--text-faint); }
 
 /* hover 才显操作，避免噪音 */
+/* 栏标题：小字 + 条数，比条目本身弱 —— 它是分组不是内容 */
+.pc__railtitle {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 10px 0 3px;
+  &:first-child { margin-top: 0; }
+}
+.pc__railname {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.pc__railn { font-size: 0.64rem; color: var(--text-faint); }
+
+/* 依据：每条都带，指回真实来源。弱于正文但**不隐藏** —— 它是可核对的落点 */
+.gr__because {
+  margin: 2px 0 0;
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+/* 档案还是空的 */
+.pc__empty {
+  margin: 6px 0 0;
+  font-size: 0.74rem;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
 .gr__acts {
   display: flex;
   gap: 9px;
@@ -500,49 +523,26 @@ const dangerGroups = computed(() => props.groups.filter((g) => g.danger))
   .gr--fresh { animation: none; }
 }
 
-/* 绘制进度：五格一条，逐格点亮。比抬头那个「档案完整 2/5」更醒目 ——
-   它是这一版「从 0 绘制」的主视觉。 */
+/* 档案条数：从 0 开始记。比抬头更醒目 —— 它是这次「持续生长」的主视觉。
+   旧的五格进度条已删：分母 5 是固定骨架决定的，骨架拆掉后它就是假数字。 */
 .pc__meter {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 10px;
-  margin: 0 20px 4px;
-  padding: 7px 10px;
-  border-radius: 8px;
-  background: var(--bg-sunken);
+  margin: 2px 0 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
 }
 .pc__meter-label {
-  flex: 0 0 auto;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   color: var(--text-muted);
-  b { margin-left: 3px; color: var(--text-strong); }
+  b { color: var(--text-strong); font-size: 0.86rem; }
 }
-.pc__meter-cells {
-  flex: 1 1 auto;
-  display: flex;
-  gap: 4px;
-}
-.pc__cell {
-  flex: 1 1 0;
-  height: 5px;
-  border-radius: 3px;
-  /* 空心 = 还没读到。它从一开始就在，让「总共要填几格」可见 */
-  background: transparent;
-  border: 1px dashed var(--border-strong);
-  box-sizing: border-box;
-  transition: background-color 0.35s ease-out, border-color 0.35s ease-out;
-  &.on {
-    background: var(--gift-accent);
-    border: 1px solid var(--gift-accent);
-  }
-}
-/* 全部点亮时整条变绿，给一个「填满了」的收束感 */
-.pc__meter.is-complete {
-  background: color-mix(in srgb, var(--gift-accent-soft) 55%, transparent);
-  .pc__meter-label { color: var(--gift-accent); b { color: var(--gift-accent); } }
-}
-@media (prefers-reduced-motion: reduce) {
-  .pc__cell { transition: none; }
+/* 正在写入哪一栏 —— 生长感来自这个会跳的名字 */
+.pc__meter-live {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--gift-accent);
 }
 
 /* 开场陈述：起点那句「我还不了解 TA」。比正文弱一档 —— 它是过渡语，

@@ -132,7 +132,13 @@ async def create_run(user_id: str, params: dict) -> dict:
         occasion=str(params.get("occasion") or ""),
         budget=budget,
         signals=list(params.get("signals") or []),
-        profile=[],
+        # 入口就确定的那一条（送给谁/场合/预算）—— 由代码 seed，
+        # 不麻烦模型。它也是「档案 1 条」的起点，让计数从一开始就非零。
+        profile=st.seed_profile({
+            "recipient": str(params.get("recipient") or ""),
+            "occasion": str(params.get("occasion") or ""),
+            "budget": budget,
+        }),
         understanding={},
         profile_head={},
     )
@@ -225,6 +231,14 @@ async def advance(run_id: str, user_id: str) -> None:
             "recipient": run.recipient, "occasion": run.occasion,
             "budget": run.budget, "signals": run.signals or [],
             "run_id": run.id, "user_id": run.user_id,
+            # 库里存的是**条目**，state 要的是 **op 日志** —— 转成 add op
+            # （见 _seed_acc 的说明）。不带的话模型第一笔 add 会从空档案
+            # 开始，把入口那条挤掉。
+            "profile": [
+                {"op": "add", "rail": x.get("rail"), "text": x.get("text"),
+                 "because": x.get("because"), "source": x.get("source")}
+                for x in (run.profile or []) if isinstance(x, dict)
+            ],
         }
         # 续跑：用户答过问，就把那条回答作为新消息接上 —— agent 是循环，
         # 多给一条输入它自己会接着判断，不需要我们算「从哪一步接」。
@@ -274,18 +288,50 @@ async def advance(run_id: str, user_id: str) -> None:
         await _patch_run(run_id, messages=history)
         await _persist_products(run_id, acc)
 
-        # 收尾：profile_head 是展示层字段，agent 不产出；这里补齐
+        # ── 收尾 ──
         fresh = await get_run(run_id, user_id)
         if fresh is not None:
             # 用 acc 里的 profile（本轮最新），不用 fresh.profile ——
             # 后者是上一次 _patch_run 的快照，若本轮档案有更新会读到旧的。
-            prof = acc.get("profile") or fresh.profile or []
-            head = st.build_profile_head(
-                {"recipient": fresh.recipient, "occasion": fresh.occasion,
-                 "budget": fresh.budget},
-                prof,
-            )
-            await _patch_run(run_id, profile_head=head, status="converged")
+            # acc 里是 op 日志，折成条目；折不出东西时退回库里已存的
+            prof = st.fold_profile(acc.get("profile") or []) or (fresh.profile or [])
+
+            # ① 抬头：`档案 N 条`。旧的 build_profile_head 给的是
+            #    `档案完整 N/5`，分母 5 是**架构决定的**；骨架拆掉后
+            #    分母不存在，留着就是假数字。
+            head = st.build_profile_summary(prof)
+
+            # ② 「当前理解」—— 这一步以前**从来没跑过**：
+            #    build_understanding 写好了却没有任何调用点（孤儿函数），
+            #    所以 run.understanding 恒为 {}，中栏那块永远不显示。
+            #    它要花一次模型调用，失败不该拖垮收尾，所以单独兜住。
+            understanding = {}
+            try:
+                understanding = await asyncio.wait_for(
+                    st.build_understanding(
+                        {"recipient": fresh.recipient, "occasion": fresh.occasion,
+                         "budget": fresh.budget, "signals": fresh.signals or []},
+                        prof, acc.get("context") or {},
+                    ),
+                    timeout=60,
+                )
+            except Exception as e:
+                logger.warning(f"[gift] 生成「当前理解」失败（忽略）: {e}")
+
+            # ③ ⚠️ profile 必须落进 **run.profile**（不只是 products）：
+            #    前端刷新时读的是 `GET /runs/{id}` 的 profile 字段
+            #    （见 useGiftWorkbench.loadSnapshot），而之前只写进
+            #    products.profile —— 实测 run.profile 恒为 0 条，
+            #    刷新页面中栏就空了。
+            patch = {"profile_head": head, "profile": prof,
+                     "status": "converged"}
+            if understanding:
+                patch["understanding"] = understanding
+            await _patch_run(run_id, **patch)
+
+            if understanding.get("text"):
+                await emit(run_id, "understanding", understanding)
+
         await emit(run_id, "done", {})
 
     except Exception as e:
@@ -378,7 +424,16 @@ def _seed_acc(run: GiftRun) -> dict:
     找名字，回一句「这些名字没在候选里找到」，模型据此以为自己搞错了。
     """
     return {
-        "profile": list(run.profile or []),
+        # ⚠️ 库里存的是**条目**，但 state 里要的是 **op 日志** ——
+        # 把已存在的每条转成一条 add op，这样 fold 之后能得到同样的档案，
+        # 且后续新 op 追加在后面不会覆盖它们（见 graph.py 的说明）。
+        # 从 **run.profile** 读（不是 products.profile）：之前只往 products
+        # 写，导致刷新即空。
+        "profile": [
+            {"op": "add", "rail": x.get("rail"), "text": x.get("text"),
+             "because": x.get("because"), "source": x.get("source")}
+            for x in (run.profile or []) if isinstance(x, dict)
+        ],
         "picked": list((run.data or {}).get("picked") or []) if hasattr(run, "data") else [],
         "excluded": list((run.products or {}).get("excluded") or []),
         "plan": (run.products or {}).get("plan") or {},
@@ -387,9 +442,20 @@ def _seed_acc(run: GiftRun) -> dict:
 
 
 async def _persist_products(run_id: str, acc: dict) -> None:
-    """把 agent 累积的产物落进 run.products —— 收尾生成交付物时要读它。"""
+    """把 agent 累积的产物落进 run.products —— 收尾生成交付物时要读它。
+
+    ⚠️ **同时把 profile 写进 run.profile**（它也在 acc 里，但前端刷新时
+    读的是 `GET /runs/{id}` 的 profile 字段，不是 products.profile）。
+    之前只写 products，实测 run.profile 恒为 0 条 —— 推演中途刷新，
+    中栏就空了。两处都写，代价只是一次 UPDATE。
+    """
     try:
-        await _patch_run(run_id, products=acc)
+        kwargs = {"products": acc}
+        if "profile" in acc:
+            # 库里存**折出来的条目**（前端 loadSnapshot 直接铺），
+            # 不是 op 日志 —— ops 是 agent 的内部表示，没有展示意义。
+            kwargs["profile"] = st.fold_profile(acc.get("profile") or [])
+        await _patch_run(run_id, **kwargs)
     except Exception as e:
         logger.warning(f"[gift] 落产物失败（忽略）: {e}")
 
@@ -453,11 +519,26 @@ async def _on_agent_step(run_id: str, chunk: dict, seen_tools: set[str],
     changed = False
     for _node, delta in (chunk or {}).items():
         d = delta or {}
-        # 累积工具写进 state 的产物（列表追加、标量后写覆盖，与 reducer 一致）
-        for k in ("profile", "picked", "excluded", "searched"):
+        # 累积工具写进 state 的产物
+        #
+        # ⚠️ `profile` 是**全量替换**，其余三个是真·累积型（追加）——
+        # 这与 graph.py 里的 reducer 一一对应，两处必须一致。
+        #
+        # 自测抓到的 bug：profile 的 reducer 换成「整表替换」之后，
+        # service 这里还在**追加**，于是每一轮都把整份档案复制一遍 ——
+        # 实测一次 run 后 run.profile 有 10 条，其中 5 条是同一条。
+        # （profile 的 delta 现在是完整新列表，直接覆盖即可。）
+        for k in ("picked", "excluded", "searched"):
             if d.get(k):
                 acc[k] = list(acc.get(k) or []) + list(d[k])
                 changed = True
+        if d.get("profile"):
+            # ⚠️ **追加**，不是替换：state 里的 profile 是 **op 日志**，
+            # 每步追加一条 op，最终由 fold_profile 折成条目。
+            # 这里若写成替换，op 日志里只会剩最后一条 —— 界面显示
+            # 「档案 1 条」而栏名在变，看着像生长实际是顶掉上一条。
+            acc["profile"] = list(acc.get("profile") or []) + list(d["profile"])
+            changed = True
         for k in ("context", "understanding", "plan", "message"):
             if d.get(k) is not None:
                 acc[k] = d[k]
@@ -511,6 +592,62 @@ async def _on_agent_step(run_id: str, chunk: dict, seen_tools: set[str],
     return None
 
 
+# 每个 run 上一次推送给前端的档案快照（按 id）。用来算差集。
+_pushed_profile: dict[str, dict[str, str]] = {}
+
+
+async def _push_profile_delta(run_id: str, acc: dict) -> None:
+    """把档案的**变化**推给前端：新增 → add，文本变了 → update，没了 → drop。
+
+    ⚠️ 推差集而不是全量：前端是按 id 增删改的（见 useGiftWorkbench 的
+    `case 'profile'`），全量重推会让每一条都重新触发一次「刚到」的脉冲动画，
+    界面上整块闪 —— 而真正该闪的只有新那一条。
+
+    比对用的 `_pushed_profile` 只是**进程内缓存**，不是真相来源：
+    run 收敛后前端走快照（run.profile）恢复，不依赖它。
+    """
+    # ⚠️ acc["profile"] 是 **op 日志**，先折成条目再比对 —— 见
+    # graph.py 里那段说明（并行调用会覆盖，所以 state 存的是 ops）。
+    ops = acc.get("profile") or []
+    cur = st.fold_profile(ops)
+    # 自检：op 日志与折出来的条目不该差得离谱。差太多说明「追加/折叠」
+    # 这条链上有地方在覆盖（见上面那段说明）—— 与其静默显示错数字，
+    # 不如留一条警告，日志里能直接看到。
+    adds = sum(1 for o in ops if isinstance(o, dict)
+               and str(o.get("op") or "add").lower() == "add")
+    if adds and len(cur) < adds:
+        logger.warning(
+            f"[gift] 档案 op 日志异常：{adds} 条 add 只折出 {len(cur)} 条 "
+            f"（可能有地方在覆盖 op 日志）"
+        )
+    now = {str(x.get("id") or ""): str(x.get("text") or "") for x in cur}
+    prev = _pushed_profile.get(run_id) or {}
+
+    for x in cur:
+        i = str(x.get("id") or "")
+        if not i:
+            continue
+        if i not in prev:
+            await emit(run_id, "profile", {
+                "op": "add", "id": i,
+                "rail": x.get("rail"), "text": x.get("text"),
+                "because": x.get("because"), "source": x.get("source"),
+                "state": x.get("state") or "confirmed",
+            })
+        elif prev[i] != now[i]:
+            await emit(run_id, "profile", {
+                "op": "update", "id": i,
+                "rail": x.get("rail"), "text": x.get("text"),
+                "because": x.get("because"), "source": x.get("source"),
+                "state": x.get("state") or "confirmed",
+            })
+    for i in prev:
+        if i not in now:
+            await emit(run_id, "profile", {"op": "drop", "id": i})
+
+    _pushed_profile[run_id] = now
+
+
 async def _emit_tool_call(run_id: str, name: str, args: dict,
                           call_id: str = "") -> None:
     """模型决定调某个工具 → 一条事件。**带真实入参**。
@@ -547,6 +684,42 @@ def _describe_call(name: str, args: dict) -> tuple[str, str, list]:
     if name == "ask_user":
         return ("向你确认一件事", str(args.get("question") or ""), [])
     return (name, "", [])
+
+
+async def answer_question(run_id: str, user_id: str, key: str) -> dict | None:
+    """用户回答待确认问题 → 收掉问题、把回答喂回 agent 续跑。
+
+    与 `planning_service.answer_question` 完全同构（那边先做、踩过坑）：
+    agent 是一圈 ReAct 循环，用户的回答就是**新的输入** —— 把它接在历史
+    消息后面重跑一轮，模型自己会接着往下走，不需要算「从哪一步接」。
+
+    ⚠️ 回答的三个副本都要存（pick / label / question 原文）：
+    提问字段在这里被清空，续跑时再读只能拿到 None，会拼出
+    「关于「」，我选：opt0」这种废话（规划那边实测过，模型据此跑偏）。
+    """
+    run = await get_run(run_id, user_id)
+    if run is None:
+        return None
+
+    q = run.question or {}
+    label = next(
+        (o.get("label") for o in (q.get("options") or []) if o.get("key") == key),
+        key,
+    )
+    await emit(run_id, "think", {
+        "title": "收到你的回答",
+        "detail": str(label)[:80],
+        "by": "user",
+    })
+    await _patch_run(
+        run_id, question=None, status="running",
+        answer_pick=key,
+        answer_label=str(label)[:200],
+        answer_question=str(q.get("text") or ""),
+    )
+    asyncio.create_task(advance(run_id, user_id))
+    fresh = await get_run(run_id, user_id)
+    return fresh.to_dict() if fresh else None
 
 
 async def _emit_tool_result(run_id: str, m: ToolMessage) -> None:
@@ -661,30 +834,26 @@ async def _after_tool(run_id: str, tool: str, acc: dict,
     if meta and left.get(meta[0], 0) > 0:
         return   # 同批还有未返回的，等最后一个回来时一起发
 
-    if tool in ("read_history", "read_preferences"):
-        # 各自推**自己那批**（`build_profile(only=...)` 已经筛过了）。
-        # 前端按 key 更新，所以后一批会补进已有档案，而不是替换。
-        profile = acc.get("profile") or []
-        if profile:
-            for g in profile:
-                await emit(run_id, "profile", {
-                    "key": g["key"], "state": g["state"],
-                    "text": g["text"], "note": g.get("note"),
-                    "source": g.get("source"),
-                })
-        # ⚠️ 档案必须在这里**发事件 + 落库** —— 旧流程里这是 `_on_node`
-        # 的 understand 分支干的事，改成 ReAct 后我漏掉了，后果是中栏五组
-        # 全是「尚未读到…」、完整度显示 0/0，而左栏却写着「读到母亲 · 52 岁」
-        #（左栏读的是工具返回文本，中栏读的是 profile 事件 —— 两条路）。
+    # ═══════════════════════════════════════════════════════════════════
+    # 档案：**任何工具跑完都比对一次**，把差异推给前端
+    # ═══════════════════════════════════════════════════════════════════
+    # 2026-09-28：从「只在 read_* 两个工具后发」改成「每个工具后都比对」。
+    #
+    # 旧写法的后果（实测）：五组档案全在 run 的第 8~12 条事件里发完
+    # （全程 7%），剩下 93% 一条都不发 —— 用户说的「一开始就写完了近半的
+    # 档案，后续很长一段时间不再输入」正是这个。
+    #
+    # 现在模型可以在**任何一步**用 write_profile 写，servie 只做一件事：
+    # 把 acc 里的全量快照与上次已推送的比对，推差集。
+    # 比对而不是「工具自己上报改了什么」—— 后者要求每个工具都记得上报，
+    # 漏一个就静默丢事件（本仓库踩过太多次）。
+    await _push_profile_delta(run_id, acc)
 
-    elif tool == "search_gifts":
-        await _emit_finding(run_id, "searched",
-                            keywords=acc.get("searched") or [])
-    elif tool == "screen_candidates":
-        await _emit_finding(run_id, "excluded",
-                            excluded=acc.get("excluded") or [])
-    elif tool == "compose_gift":
-        await _emit_finding(run_id, "pairing", plan=acc.get("plan") or {})
+    # 「推演所得」—— 旧实现把检索/比价的结论自动派生成 finding。
+    # 现在这些内容改由**模型**用 write_profile 写进对应栏（「行情锚点」
+    # 「这盒的取舍」），因为有 `because` 约束 —— 代码猜出来的东西
+    # 曾经把「我们搜过的品类词」误当成「她的喜好」，那个教训在这里。
+    # finding 事件本身保留（历史数据的兼容），但不再新发。
 
 
 async def _emit_deliverables_for(run_id: str, tool: str, acc: dict) -> None:

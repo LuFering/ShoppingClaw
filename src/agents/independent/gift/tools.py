@@ -56,6 +56,16 @@ from langgraph.types import Command
 logger = logging.getLogger(__name__)
 
 
+# ⚠️ 模块级短名：`_locate` / `_render_profile` 是模块级辅助函数，拿不到
+# 函数内的 `st`（tools.py 的惯例是函数内导入 stages 以避免循环导入）。
+from src.agents.independent.gift.stages import (  # noqa: E402
+    fold_profile as _fold,
+    group_by_rail as _group_by_rail,
+    locate_entry as _locate,       # noqa: F401  （分支里用）
+    rail_norm as _rail_norm,
+)
+
+
 def _note(text: str, tool_call_id: str) -> ToolMessage:
     """工具给模型的回话。必须带 tool_call_id，否则 LangGraph 配对失败。"""
     return ToolMessage(content=text, tool_call_id=tool_call_id)
@@ -103,22 +113,29 @@ async def read_history(
     from src.agents.independent.gift import stages as st
 
     history = await st.read_history(state)
-    ctx = {"history": history, "prefs": [], "raw_ok": bool(history)}
-    # 这两组依赖历史：禁忌来自「已排除」记录，生活状态靠历史是否有记录来推断
-    profile = st.build_profile(state, ctx, only=("relation", "life", "taboo",
-                                                "giftpref"))
+    prev = state.get("context") or {}
+    ctx = {"history": history, "prefs": prev.get("prefs") or [],
+           "raw_ok": bool(history or prev.get("raw_ok"))}
+    # 只写**这次真读到的**（0~2 条），不再把固定五组里属于历史那批全写进去
+    added = st.seed_history_entry(history)
 
     if history:
         lines = [f"· {h.get('target') or h.get('recommend') or '（无题）'}"
                  f"（{h.get('phase') or '—'}）" for h in history[:5]]
-        body = f"读到 {len(history)} 条历史决策：\n" + "\n".join(lines)
+        body = (f"读到 {len(history)} 条历史决策：\n" + "\n".join(lines)
+                + "\n\n（已把要点写进档案的「送礼往来」栏。）")
     else:
         body = ("没有关于这位收礼人的历史决策记录。\n"
                 "后续请按通用方向准备，并在结论里说明「无历史依据」。")
 
     return Command(update={
         "context": ctx,
-        "profile": profile,
+        # seed 出来的条目转成 add op 追加（state 里是 op 日志，见 graph.py）
+        "profile": [
+            {"op": "add", "rail": x.get("rail"), "text": x.get("text"),
+             "because": x.get("because"), "source": x.get("source")}
+            for x in (added or []) if isinstance(x, dict)
+        ],
         "messages": [_note(body, tool_call_id)],
     })
 
@@ -139,20 +156,34 @@ async def read_preferences(
     prev = state.get("context") or {}
     ctx = {"history": prev.get("history") or [], "prefs": prefs,
            "raw_ok": bool(prev.get("raw_ok") or prefs)}
-    # 已知喜好依赖偏好查询；这里同时补上完整五组，供下游（combine）使用
-    profile = st.build_profile(state, ctx, only=("likes",))
+    # 同上：只写这次真读到的（筛完可能为空 —— 读到但与收礼人无关时不占条数）
+    added = st.seed_prefs_entry(prefs)
 
     if prefs:
         # 只显示**值**：键名是机器名（gift_for_mom_budget_max），
         # 原样铺出来只是一串读不懂的字段
         vals = [str(p.get("value") or p) for p in prefs if isinstance(p, dict)]
         body = f"读到 {len(prefs)} 条长期偏好：\n" + "、".join(vals[:8])
+        # ⚠️ 如实告诉模型「筛掉了什么」：它的 12 条偏好**全部**是用户自己
+        # 要买笔记本的，与收礼人无关。不说清的话模型会以为档案读到了，
+        # 进而在结论里引用「妈妈喜欢华为」——那是错的。
+        if not added:
+            body += ("\n\n⚠️ 这些偏好都是**用户自己买东西**的（笔记本/耳机等），"
+                     "与这位收礼人无关，所以**没有**写进 TA 的档案。"
+                     "请不要据此推断 TA 的喜好。")
+        else:
+            body += "\n\n（已把与收礼人相关的写进档案的「在意什么」栏。）"
     else:
         body = "没有读到长期偏好记录。"
 
     return Command(update={
         "context": ctx,
-        "profile": profile,
+        # seed 出来的条目转成 add op 追加（state 里是 op 日志，见 graph.py）
+        "profile": [
+            {"op": "add", "rail": x.get("rail"), "text": x.get("text"),
+             "because": x.get("because"), "source": x.get("source")}
+            for x in (added or []) if isinstance(x, dict)
+        ],
         "messages": [_note(body, tool_call_id)],
     })
 
@@ -193,6 +224,141 @@ async def search_gifts(
         "picked": found,
         "searched": [keyword],
         "messages": [_note(body, tool_call_id)],
+    })
+
+
+def _render_profile(items: list[dict]) -> str:
+    """把档案渲染成给模型看的文本（按栏分组）。
+
+    与 `screen_candidates` 把「候选里的原名」回给模型是同一手法 ——
+    那里踩过的坑是：模型排除 8 件、实际生效 0 件，因为它在盲改。
+    让它**看得见当前档案**，它才知道下一笔该 add 还是 update。
+    """
+    groups = _group_by_rail(items)
+    if not groups:
+        return "（档案目前是空的）"
+    out = []
+    for g in groups:
+        out.append(f"【{g['rail']}】")
+        for it in g["items"]:
+            out.append(f"  · [{it.get('id')}] {it.get('text')}")
+    return "\n".join(out)
+
+
+@tool
+def write_profile(
+    rail: Annotated[str, "栏名。可用建议栏名，也可自建一个更贴切的新栏名"],
+    op: Annotated[str, "add 新增 / update 改写 / drop 删除"],
+    text: Annotated[str, "add/update 写新内容；drop 时填要删的那条（原样照抄）"],
+    because: Annotated[str, "这条信息来自哪次**真实**结果，必须能指回去"],
+    state: Annotated[dict, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    to: Annotated[str, "update 专用：要改成什么。add/drop 不用填"] = "",
+) -> Command:
+    """往人物档案里写一条，或改写 / 删除已有的一条。
+
+    **每做完一步就该想一次：这一步的结果里，有哪条是关于这个人 / 这次送礼
+    的、值得记进档案的？** 有就写，没有就别写 —— 不要为了凑数写。
+
+    ⚠️ **入口已经写过一条「人物信息」**（送给谁/场合/预算，来源「入口参数」）。
+    要补充它就用 `update`，不要 add 一条新的 —— 那会让同一件事出现两次。
+
+    建档建议（可以自建新栏，不限于这几个）：
+      「人物信息」TA 是谁、什么场合、什么预算          ← 入口**已有**，补充用 update
+      「送礼往来」以往送过什么、什么被排除过          ← 读完历史
+      「在意什么」TA 的偏好与在意的点                  ← 读完偏好
+      「行情锚点」真实搜到的价格带、有哪些品类        ← 检索之后
+      「这盒的取舍」排除了什么、为什么                ← 比价之后
+      「这盒怎么搭」这几件为什么构成一体              ← 组合之后
+    涉及禁忌 / 过敏 / 不能送的东西，栏名里带上「禁忌」二字 —— 界面会把它
+    单独放进危险区强调显示。
+
+    三条铁律：
+    1. `because` 必须指回**具体哪次工具返回**里的什么。
+       写不出 because 就说明这条是你编的，不要写。
+    2. `text` 只写具体信息，不要写「暂无记录」「无」「待确认」这类空话 ——
+       读不到就不写这一条，**空的档案比塞满空话的档案诚实**。
+    3. `drop` / `update` 时 `text` 要**原样照抄**档案里那条（我每次都会把
+       当前档案回给你，照着复制）。改写用 update 而不是 drop+add ——
+       后者会丢掉这条的历史。
+
+    Args:
+        rail: 栏名
+        op: add / update / drop
+        text: add/update 的新内容；drop 时填要删的那条原文
+        because: 依据 —— 这条来自哪次真实结果
+        to: update 时改成什么
+    """
+    # ⚠️ 只**追加一条 op**，不在这里算全量列表 —— 见 stages.fold_profile
+    # 的说明：并行调用时「各自算全量再覆盖」会整个丢掉另一次的结果
+    # （id 实证：p2 被顶掉，整条「送礼往来」消失且无 drop 事件）。
+    cur = _fold(state.get("profile"))
+    rail = str(rail or "").strip()
+    text = str(text or "").strip()
+    because = str(because or "").strip()
+
+    # ── 红线：没有 because 就是编的 ──
+    if not because:
+        return Command(update={"messages": [_note(
+            "⚠️ 没有填 `because`。请写清这条信息来自**哪次真实结果**"
+            "（例如「read_history 返回的第 2 条」「搜『护颈仪』返回的价格」）。"
+            "写不出来就说明这条是推断或编造的 —— 那就不要写进档案。\n\n"
+            "当前档案：\n" + _render_profile(cur), tool_call_id)]})
+
+    if op == "add":
+        if not rail or not text:
+            return Command(update={"messages": [_note(
+                "⚠️ add 需要同时给出 `rail` 和 `text`。\n\n当前档案：\n"
+                + _render_profile(cur), tool_call_id)]})
+        # 同栏同文不重复写（模型多轮里常重复同一条）
+        for it in cur:
+            if (str(it.get("rail") or "").strip() == rail
+                    and _rail_norm(it.get("text")) == _rail_norm(text)):
+                return Command(update={"messages": [_note(
+                    f"「{rail}」里已经有这一条了，没有重复添加。\n\n"
+                    "当前档案：\n" + _render_profile(cur), tool_call_id)]})
+        op_entry = {"op": "add", "rail": rail, "text": text,
+                    "because": because, "source": "本次推演"}
+        body = f"已写入「{rail}」：{text}\n（依据：{because}）"
+
+    elif op == "update":
+        i = _locate(cur, text)
+        if i < 0:
+            return Command(update={"messages": [_note(
+                f"⚠️ 档案里找不到「{text}」，没有改动。请**原样照抄**下面某条的"
+                "文字再来一次。\n\n当前档案：\n" + _render_profile(cur),
+                tool_call_id)]})
+        new_text = str(to or "").strip()
+        if not new_text:
+            return Command(update={"messages": [_note(
+                "⚠️ update 需要填 `to`（改成什么）。若想删掉这条请用 drop。",
+                tool_call_id)]})
+        op_entry = {"op": "update", "text": text, "to": new_text,
+                    "because": because}
+        body = f"已改写：{text} → {new_text}\n（依据：{because}）"
+
+    elif op == "drop":
+        i = _locate(cur, text)
+        if i < 0:
+            return Command(update={"messages": [_note(
+                f"⚠️ 档案里找不到「{text}」，没有删除。请**原样照抄**下面某条的"
+                "文字再来一次。\n\n当前档案：\n" + _render_profile(cur),
+                tool_call_id)]})
+        gone = cur[i].get("text")
+        op_entry = {"op": "drop", "text": text, "because": because}
+        body = f"已删除：{gone}\n（依据：{because}）"
+
+    else:
+        return Command(update={"messages": [_note(
+            f"⚠️ `op` 只能是 add / update / drop，收到的是「{op}」。",
+            tool_call_id)]})
+
+    # 追加一条 op —— reducer 是 _merge_lists，并行调用各追加各的，互不覆盖
+    preview = _fold(list(state.get("profile") or []) + [op_entry])
+    return Command(update={
+        "profile": [op_entry],
+        "messages": [_note(body + "\n\n当前档案：\n" + _render_profile(preview),
+                           tool_call_id)],
     })
 
 
@@ -403,6 +569,7 @@ def ask_user(
 GIFT_TOOLS = [
     read_history,
     read_preferences,
+    write_profile,
     search_gifts,
     screen_candidates,
     compose_gift,

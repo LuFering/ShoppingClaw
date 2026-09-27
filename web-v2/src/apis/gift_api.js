@@ -103,6 +103,19 @@ export const giftApi = {
   },
 
   /**
+   * 回答 agent 的提问 → 它从停下的地方接着跑。
+   *
+   * ⚠️ 这个端点此前不存在（后端能停但没人能答），与 planning_api 同名同形。
+   */
+  async answer(runId, key) {
+    const res = await apiPost(
+      `/api/gift/runs/${encodeURIComponent(runId)}/answer`,
+      { key }, {}, true
+    )
+    return res?.data || null
+  },
+
+  /**
    * 订阅推演事件流。
    *
    * 不用 EventSource：无法携带 Authorization 头，而端点要求登录。

@@ -32,20 +32,257 @@ RAG_TIMEOUT = 30
 SEARCH_PAGE_SIZE = 6
 
 
-# ── 中栏档案五组：key 固定（前端 ProfileCard 按 key 取图标与分区）──
-PROFILE_KEYS = ("relation", "life", "likes", "taboo", "giftpref")
+# ══════════════════════════════════════════════════════════════════════
+# 中栏档案：**开放式条目**，不再是固定五组
+# ══════════════════════════════════════════════════════════════════════
+# 2026-09-28 重构。用户的原话：
+#
+#   「执行流一开始就写完了近半的档案，然后后续思考时多以调用为主……
+#     需要重新设计档案，让 agent 每执行一步都有机会写档案，增删操作
+#     等都能对档案执行」
+#
+# 实测确认：run gr-d2eda02e1748 的 164 条事件里，五组档案全在第 8~12 条
+# （全程 **7%**），剩下 93% 一条都没写，最终停在「档案完整 3/5」。
+#
+# 根因是**结构**不是节奏：旧实现只有 read_history / read_preferences 两个
+# 工具写档案，而 build_profile 是「固定 5 个 key 的白名单筛选」——最多
+# 5 条，结构上不可能继续长。
+#
+# 现在档案是**扁平条目列表**，每条：
+#     {id, rail, text, because, source, at}
+# `rail`（栏名）是**开放集合**：下面这组只是**建议**，写进工具文档让模型
+# 有默认结构可循；模型可以自建新栏。
+#
+# ⚠️ 建议栏名**刻意换了一套**（用户明确否决了旧五组：
+#    「可以预设一些常驻栏名，但是不能是这几个，因为之前的测试就是这几个，
+#      结果效果不佳」）。
+#
+# 选这组的关键判据：**每一栏的数据来自不同的步骤** —— 这才是生长能分步
+# 发生的根本原因。旧五组全部依赖开头那两次查询，所以一次性写满；
+# 新栏名里有四栏的数据在**后面**几步才产生。
+#
+#     人物信息    读历史 / 读偏好之后，由模型归纳写入
+#     送礼往来    读历史（送过什么、什么被排除过）
+#     在意什么    读偏好
+#     行情锚点    检索之后 —— 真实搜到的价格带
+#     这盒的取舍  比价之后 —— 排除了什么、为什么
+#     这盒怎么搭  组合之后
+SUGGESTED_RAILS = (
+    ("person", "人物信息"),
+    ("history", "送礼往来"),
+    ("cares", "在意什么"),
+    ("market", "行情锚点"),
+    ("triage", "这盒的取舍"),
+    ("pairing", "这盒怎么搭"),
+)
 
-PROFILE_LABELS = {
-    "relation": "关系与称谓",
-    "life": "生活状态",
-    "likes": "已知喜好",
-    "taboo": "明确禁忌",
-    "giftpref": "送礼偏好",
+# 栏名（中文，模型写的就是它）→ 展示元数据。
+# ⚠️ 用**中文栏名**做键，因为模型写进 `rail` 的就是中文字符串；
+# 另存一份英文 key 只为了前后端约定的稳定 id（图标查表用）。
+RAIL_BY_KEY = {k: label for k, label in SUGGESTED_RAILS}
+KEY_BY_RAIL = {label: k for k, label in SUGGESTED_RAILS}
+
+RAIL_ICONS = {
+    "person": "people", "history": "gift", "cares": "heart",
+    "market": "search", "triage": "minus", "pairing": "link",
 }
-PROFILE_ICONS = {
-    "relation": "people", "life": "life", "likes": "heart",
-    "taboo": "ban", "giftpref": "gift",
-}
+# 自建栏拿不到专属图标时用这个 —— 不编一个不存在的
+RAIL_ICON_FALLBACK = "dot"
+# 「禁忌」语义仍要危险色：任何栏名里带这些字就按危险区渲染
+DANGER_HINTS = ("禁忌", "忌讳", "不能", "过敏", "avoid")
+
+
+def rail_key(rail: str) -> str:
+    """栏名 → 稳定 key。自建栏返回规范化后的自身（前端据此取兜底图标）。"""
+    r = str(rail or "").strip()
+    if not r:
+        return "misc"
+    return KEY_BY_RAIL.get(r) or f"x-{rail_norm(r)}"
+
+
+def is_danger_rail(rail: str) -> bool:
+    """这一栏是不是「禁忌」类 —— 前端据此走危险色分区。
+
+    从**栏名文字**判断，而不是查死表：模型自建「海鲜过敏」这类栏时
+    也该进危险区，否则最要命的信息会被当成普通条目渲染。
+    """
+    r = str(rail or "")
+    return any(h in r for h in DANGER_HINTS)
+
+
+def rail_norm(text: str) -> str:
+    """条目定位用的规范化。
+
+    ⚠️ 从 `screen_candidates` 的 `_norm` 提上来的 —— 那里踩过的坑同样
+    适用于这里：模型会**把价格/标点一起写进文本**（「颈椎按摩仪 ¥1350」），
+    直接按原文字符串相等去匹配会全部落空。实测那次「排除 8 件」实际
+    生效 0 件，模型的意图被静默丢弃。
+
+    所以做两级匹配：先试原文精确相等，再试规范化后的相等/包含。
+    """
+    t = str(text or "").strip()
+    t = re.sub(r"[\s¥￥\d.,，。;；:：]+$", "", t)      # 去价格尾巴与收尾标点
+    t = re.sub(r"\s+", "", t)                          # 去内部空白
+    return t
+
+
+def next_entry_id(items: list[dict]) -> str:
+    """给新条目分配稳定 id（前端 key / 去重用）。
+
+    ⚠️ 不能靠 `len(items)+1` —— 删过条目之后会撞号，前端 v-for 的 key
+    重复会让 Vue 复用到错误的 DOM 节点（表现为「删了一条，结果另一条变了」）。
+
+    ⚠️ 也**不能只认模型写的那几条**：入口 seed 的那条（人物信息）也要有 id。
+    自测抓到过 —— seed 那条 id 为 None，于是它与模型写的第一条抢同一个
+    号码，前端整列 key 是 null。所以 id 分配必须**统一走这里**。
+    """
+    mx = 0
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        m = re.fullmatch(r"p(\d+)", str(it.get("id") or ""))
+        if m:
+            mx = max(mx, int(m.group(1)))
+    return f"p{mx + 1}"
+
+
+def group_by_rail(items: list[dict]) -> list[dict]:
+    """扁平条目 → 按栏分组，**保持栏目首次出现的顺序**。
+
+    两处要用同一份分组逻辑（工具回显给模型 / 前端渲染），所以收在这里 ——
+    各写一遍必然漂（本仓库既有教训）。
+    """
+    order: list[str] = []
+    buckets: dict[str, list[dict]] = {}
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        rail = str(it.get("rail") or "其他").strip() or "其他"
+        if rail not in buckets:
+            buckets[rail] = []
+            order.append(rail)
+        buckets[rail].append(it)
+    return [
+        {
+            "rail": rail,
+            "key": rail_key(rail),
+            "icon": RAIL_ICONS.get(rail_key(rail), RAIL_ICON_FALLBACK),
+            "danger": is_danger_rail(rail),
+            "items": buckets[rail],
+        }
+        for rail in order
+    ]
+
+
+def fold_profile(ops: list[dict]) -> list[dict]:
+    """把 op 日志折成**当前档案条目列表**。纯函数、确定性。
+
+    ⚠️ 为什么不让工具直接算全量列表（原来的做法）：模型会**并行**调多个
+    write_profile（实测同一条消息里两个 call）。各自读同一份旧 state、
+    各自算「完整新列表」、再整体覆盖 —— **后者把前者的结果整个丢掉**。
+    id 实证：p2 先被写成「送礼往来」，随后被并行的那次顶成「行情锚点」，
+    整条送礼往来消失，而且没有任何 drop 事件。
+
+    现在工具只**追加一条 op**，当前值在这里折出来：
+      add    → 追加一条（id 按顺序分配，只增不改，所以稳定）
+      update → 按文本定位后改写
+      drop   → 按文本定位后删除
+    追加语义下并行调用各追加各的，不会互相覆盖；折叠是纯函数，
+    重放/乱序都得到同一结果。
+    """
+    items: list[dict] = []
+    for op in (ops or []):
+        if not isinstance(op, dict):
+            continue
+        kind = str(op.get("op") or "add").strip().lower()
+        text = str(op.get("text") or "").strip()
+        because = str(op.get("because") or "").strip()
+        rail = str(op.get("rail") or "").strip()
+
+        if kind == "add":
+            if not text:
+                continue
+            # 同栏同文不重复（模型多轮里常重复写同一条）
+            dup = any(
+                str(i.get("rail") or "").strip() == rail
+                and rail_norm(i.get("text")) == rail_norm(text)
+                for i in items
+            )
+            if dup:
+                continue
+            items.append({
+                "id": next_entry_id(items),
+                "rail": rail or "其他",
+                "text": text,
+                "because": because,
+                "source": op.get("source") or "本次推演",
+                "state": "confirmed",
+            })
+
+        elif kind == "update":
+            i = locate_entry(items, text)
+            if i < 0:
+                continue
+            new_text = str(op.get("to") or "").strip()
+            if not new_text:
+                continue
+            items[i]["text"] = new_text
+            if because:
+                items[i]["because"] = because
+            items[i]["state"] = "confirmed"
+
+        elif kind == "drop":
+            i = locate_entry(items, text)
+            if i >= 0:
+                items.pop(i)
+
+    return items
+
+
+def locate_entry(items: list[dict], text: str) -> int:
+    """按文本定位条目下标，找不到返回 -1。
+
+    两级匹配：原文精确 → 规范化后相等/包含。见 `rail_norm` 的说明 ——
+    模型会把价格和标点一起写进文本，只做精确匹配会全部落空
+    （screen_candidates 那次「排除 8 件、实际生效 0 件」就是这么来的）。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return -1
+    for i, it in enumerate(items):
+        if str(it.get("text") or "").strip() == raw:
+            return i
+    n = rail_norm(raw)
+    if not n:
+        return -1
+    for i, it in enumerate(items):
+        if rail_norm(it.get("text")) == n:
+            return i
+    for i, it in enumerate(items):
+        t = rail_norm(it.get("text"))
+        if t and (n in t or t in n):
+            return i
+    return -1
+
+
+def build_profile_summary(items: list[dict]) -> dict:
+    """档案抬头 —— 取代旧的 `completeness: "档案完整 3/5"`。
+
+    ⚠️ 旧的分母是固定的 5（PROFILE_KEYS 的长度），那是**架构决定的**；
+    骨架拆掉后分母不存在了，留着「N/5」就是**假数字**：
+    agent 写到第 6 条时它还是 5，自建新栏时它也不会变。
+    所以改成**真实条数** —— 就是 len(items)，不加任何修饰。
+    """
+    grouped = group_by_rail(items)
+    return {
+        "count": len([i for i in (items or []) if isinstance(i, dict)]),
+        "rails": len(grouped),
+    }
+
+
+def build_rail_hint() -> str:
+    """给模型的「可用栏名」提示串（写进工具文档）。"""
+    return "、".join(f"「{label}」" for _k, label in SUGGESTED_RAILS)
 
 # ══════════════════════════════════════════════════════════════════════
 # 「推演所得」—— 中栏的第二类内容，**随推演逐步长出来**
@@ -434,219 +671,138 @@ async def read_recipient_context(state: dict) -> dict:
     }
 
 
-def build_profile(state: dict, ctx: dict, only: tuple[str, ...] | None = None) -> list[dict]:
-    """按「读到的真实档案」组装中栏五组。
+def seed_profile(state: dict) -> list[dict]:
+    """入口就确定的那一条：**人物信息**（关系 + 场合 + 预算）。
 
-    `only`：只返回指定的这几组。图里分批推送时用它 —— 每批只推**这一批
-    真实拿到了数据的**组，而不是每次都把五组全推一遍。
-    `build_profile` 仍然是唯一的组装入口（五组的措辞、source、state 判定都在
-    这里），分批只是**筛选**，不另写一套组装逻辑 —— 两套必然漂。
+    这是全档案里唯一**不需要任何查询**就成立的信息 —— 用户自己填的。
+    旧实现把这类信息混在「固定五组」里一次性写满；现在只写这一条，
+    让后面的信息必须由模型在**真实拿到结果之后**才写。
 
-    分批的对应关系（见 read_history / read_preferences 的说明）：
-      giftpref  不依赖工具，进节点就能推
-      relation / life / taboo   依赖 history
-      likes                     依赖 prefs
-    
-
-    三态语义（前端硬要求）：
-      confirmed 已确认 —— 来自档案或用户明确表达
-      inferred  智能推测 —— 由上下文推出，但无直接依据
-      pending   待确认 —— 需要用户点头
-
-    **没读到就标 pending**，不假装 confirmed。
+    ⚠️ 只写用户明确给过的字段。`budget` 是这次送礼的约束，不是「她的特点」，
+    所以跟「这次要送生日礼」放同一条里，不另立一栏冒充人物特征。
     """
-    recipient = str(state.get("recipient") or "")
-    occasion = str(state.get("occasion") or "")
+    recipient = str(state.get("recipient") or "").strip()
+    occasion = str(state.get("occasion") or "").strip()
     budget = state.get("budget") or 0
-    history = ctx.get("history") or []
-    prefs = ctx.get("prefs") or []
+    if not recipient and not occasion:
+        return []
 
-    rel = RELATION_HINT.get(recipient, recipient or "收礼人")
-    has_history = bool(history)
+    bits = [b for b in (recipient, occasion) if b]
+    text = " · ".join(bits)
+    if budget:
+        text += f"（预算 ¥{budget}）"
+    item = {
+        "rail": "人物信息",
+        "text": text,
+        "because": "你在入口页填的：送给谁 / 什么场合 / 预算",
+        "source": "入口参数",
+        "state": "confirmed",
+    }
+    item["id"] = next_entry_id([])      # p1
+    return [item]
 
-    groups: list[dict] = []
 
-    # ① 关系与称谓
-    groups.append({
-        "key": "relation",
-        "label": PROFILE_LABELS["relation"],
-        "icon": PROFILE_ICONS["relation"],
-        "text": f"{rel} · {recipient or '收礼人'}" + (f" · {occasion}" if occasion else ""),
-        "state": "confirmed" if recipient else "pending",
-        "source": "本次描述" if recipient else "待你补充",
-    })
+def seed_history_entry(history: list[dict]) -> list[dict]:
+    """读完历史后，用它**真实**写一条「送礼往来」。
 
-    # ② 生活状态 —— 档案里没有这类字段，只能推测
-    groups.append({
-        "key": "life",
-        "label": PROFILE_LABELS["life"],
-        "icon": PROFILE_ICONS["life"],
-        "text": "暂无足够依据",
-        "note": "（档案里没有生活状态类记录）",
-        "state": "pending" if not has_history else "inferred",
-        "source": "历史记录" if has_history else "待你补充",
-    })
+    只在真读到记录时才产生 —— 读不到就不写（旧实现在这种情况下会写一条
+    「未记录」，那是**空槽冒充内容**，会让条数虚高）。
+    """
+    rows = [h for h in (history or []) if isinstance(h, dict)]
+    if not rows:
+        return []
+    names = []
+    for h in rows[:3]:
+        n = str(h.get("target") or h.get("recommend") or "").strip()
+        if not n:
+            continue
+        phase = str(h.get("phase") or "").strip()
+        names.append(f"{n}（{phase}）" if phase else n)
+    if not names:
+        return []
 
-    # ③ 已知喜好 —— 真取用户偏好
-    #
-    # ⚠️ 偏好里混着**与本次送礼无关**的键（实测用户 7 的档案里有
-    # `laptop_max_budget` / `headphone_anc_required` 等）。全铺出来会变成
-    # 一堆读不懂的字段名，用户看不到「这个人的喜好」。
-    # 所以先按两类挑：与送礼/收礼人直接相关的优先，其余作补充。
-    # 挑不到就如实说没有 —— 不硬凑。
-    # ═══════════════════════════════════════════════════════════════════
-    # ⚠️ 只收**关于收礼人**的偏好，不收「用户自己的采购偏好」
-    # ═══════════════════════════════════════════════════════════════════
-    # 档案里的键分两类，混在一起会得出荒谬结论：
-    #   gift_*            关于这次送礼 / 收礼人  → 可以当「她的喜好」
-    #   laptop_* / headphone_* / brand_preference  用户**自己要买**的东西
-    #
-    # 实测踩过：把 `laptop_size_preference: 16英寸`、`brand_preference: 华为`
-    # 铺进「已知喜好」，模型据此归纳出「妈妈喜好华为16英寸笔记本，本次生日
-    # 应送华为16英寸笔记本」—— 那是**用户自己要买笔记本**，与人无关。
-    # 送礼场景搞错对象比信息少更糟。
+    # 「已排除」是最该单独说清的 —— 它是禁忌的来源
+    dropped = [
+        str(h.get("target") or h.get("recommend") or "")[:14]
+        for h in rows if str(h.get("phase") or "") == "dropped"
+    ]
+    text = "、".join(names)
+    entry = {
+        "rail": "送礼往来",
+        "text": f"以往 {len(rows)} 条：{text}",
+        "because": f"读历史决策记录，返回 {len(rows)} 条",
+        "source": "购物档案 · 历史决策",
+    }
+    out = [entry]
+    if dropped:
+        out.append({
+            "rail": "明确禁忌",
+            "text": "、".join([d for d in dropped if d]),
+            "because": "历史决策里 phase=dropped 的记录 —— 曾明确排除",
+            "source": "购物档案 · 已排除记录",
+        })
+    return out
+
+
+def seed_prefs_entry(prefs: list[dict]) -> list[dict]:
+    """读完偏好后，用它真实写一条「在意什么」。
+
+    复用旧 `build_profile` 里那段筛选逻辑（SELF_USE / 数值剔除），
+    因为它的判据是被实测验证过的：用户 7 的 12 条偏好**全部**是
+    「他自己要买笔记本电脑」的（laptop_* / brand_preference / max_budget），
+    没有一条关于收礼人 —— 那些铺进档案会得出「妈妈喜欢华为 16 英寸笔记本」
+    这种荒谬结论。
+
+    ⚠️ 筛完为空时**返回空列表**（而不是写一条「暂无记录」）：
+    读到了但与本场景无关，和「什么都没读到」是两件事，前者不该占档案条数。
+    """
+    if not prefs:
+        return []
+
+    def _kv(p):
+        if isinstance(p, dict):
+            return str(p.get("key") or ""), str(p.get("value") or "")
+        return "", str(p)
+
     RELEVANT = ("gift", "recipient", "mom", "dad", "occasion")
-    # 明确属于「用户自用」的键前缀 —— 命中就排除，不进收礼人档案
-    # 实测用户 7 的 12 条偏好**全部**是这一类（华为/16英寸/MateBook D16/
-    # 预算 6000），没有一条关于收礼人 —— 所以他的「已知喜好」就该显示
-    # 「暂无记录」。让它显示「笔记本电脑」同样是错的：那依然是**用户自己**
-    # 要买的笔记本，不是妈妈喜欢笔记本。
     SELF_USE = ("laptop", "headphone", "phone", "computer", "car", "self",
                 "brand_preference", "max_budget", "use_scenario",
                 "category_interest", "chosen_model", "size_preference")
-    if prefs:
-        def _kv(p):
-            if isinstance(p, dict):
-                return str(p.get("key") or ""), str(p.get("value") or "")
-            return "", str(p)
 
-        pairs = [_kv(p) for p in prefs if _kv(p)[1]]
-        # ⚠️ 筛掉**纯数值**的项：`max_budget: 1500` 这类是预算约束，不是喜好。
-        # 实测第一版把它们排在最前，结果是「已知喜好：1500 · 6000」—— 两个
-        # 数字，读不出任何关于这个人的信息。预算该出现在别处（入口参数里
-        # 本来就有），不该冒充喜好。
-        def _numeric(v: str) -> bool:
-            return bool(re.fullmatch(r"[\d\s.,¥￥]+", v.strip()))
+    def _numeric(v: str) -> bool:
+        return bool(re.fullmatch(r"[\d\s.,¥￥]+", (v or "").strip()))
 
-        def _is_self_use(k: str) -> bool:
-            kl = k.lower()
-            return any(t in kl for t in SELF_USE)
+    def _is_self_use(k: str) -> bool:
+        kl = (k or "").lower()
+        return any(t in kl for t in SELF_USE)
 
-        def _score(kv):
-            k, v = kv
-            kl = k.lower()
-            s = 0
-            if any(t in kl for t in RELEVANT):
-                s -= 4          # 关于收礼人/送礼 → 最优先
-            if _is_self_use(k):
-                s += 6          # 用户自用 → 排除级（见上面说明）
-            if _numeric(v):
-                s += 3          # 纯数字多半是预算/规格
-            if len(v) <= 2:
-                s += 1
-            return s
+    pairs = [_kv(x) for x in prefs if _kv(x)[1]]
+    pairs = [(k, v) for k, v in pairs if not _is_self_use(k)]
+    if not pairs:
+        return []
 
-        # 自用类直接剔除，不与收礼人信息混排
-        pairs = [(k, v) for k, v in pairs if not _is_self_use(k)]
-        chosen = sorted(pairs, key=_score)[:4]
-        # 只显示**值**，不显示键名：键名是机器名（`gift_for_mom_budget_max`），
-        # 原样铺出来只是一串读不懂的字段，用户看不到「这个人的喜好」。
-        # dict.fromkeys 去重但保序 —— 档案里常有同义重复（实测有
-        # `use_scenario` 与 `laptop_use_scenario` 值相同）。
-        texts = [v for _k, v in chosen if v]
-        text = " · ".join(dict.fromkeys(texts))
-        # ⚠️ state 跟着**内容**走：筛完为空时不能还标 confirmed ——
-        # 「已确认」与「暂无记录」并列是自相矛盾，而且会让完整度虚高
-        #（build_profile_head 按 confirmed 计数）。
-        groups.append({
-            "key": "likes",
-            "label": PROFILE_LABELS["likes"],
-            "icon": PROFILE_ICONS["likes"],
-            "text": text or "暂无记录",
-            "state": "confirmed" if text else "pending",
-            "source": "购物档案 · 偏好记录" if text else "档案里没有关于这位收礼人的偏好",
-        })
-    else:
-        groups.append({
-            "key": "likes",
-            "label": PROFILE_LABELS["likes"],
-            "icon": PROFILE_ICONS["likes"],
-            "text": "暂无记录",
-            "state": "pending",
-            "source": "待你补充",
-        })
+    def _score(kv):
+        k, v = kv
+        kl = (k or "").lower()
+        s = 0
+        if any(t in kl for t in RELEVANT):
+            s -= 4
+        if _numeric(v):
+            s += 3
+        if len(v) <= 2:
+            s += 1
+        return s
 
-    # ④ 明确禁忌 —— 这个必须来自真实记录，不能猜（猜错的代价最高）
-    taboos = [
-        h for h in history
-        if isinstance(h, dict) and str(h.get("phase") or "") == "dropped"
-    ]
-    if taboos:
-        names = [str(t.get("target") or t.get("title") or "")[:12] for t in taboos[:2]]
-        groups.append({
-            "key": "taboo",
-            "label": PROFILE_LABELS["taboo"],
-            "icon": PROFILE_ICONS["taboo"],
-            "text": "、".join([n for n in names if n]),
-            "note": "—— 曾明确排除，本次不再考虑",
-            "state": "confirmed",
-            "danger": True,
-            "source": "购物档案 · 已排除记录",
-        })
-    else:
-        groups.append({
-            "key": "taboo",
-            "label": PROFILE_LABELS["taboo"],
-            "icon": PROFILE_ICONS["taboo"],
-            "text": "未记录",
-            "note": "—— 有忌讳请直接告诉我，这类信息不能靠推断",
-            "state": "pending",
-            "danger": True,
-            "source": "待你补充",
-        })
-
-    # ⑤ 送礼偏好 —— 来自本次勾选的 signals
-    signals = state.get("signals") or []
-    if signals:
-        groups.append({
-            "key": "giftpref",
-            "label": PROFILE_LABELS["giftpref"],
-            "icon": PROFILE_ICONS["giftpref"],
-            "text": "、".join(str(s) for s in signals),
-            "state": "confirmed",
-            "source": "本次描述 · 你的选择",
-        })
-    else:
-        groups.append({
-            "key": "giftpref",
-            "label": PROFILE_LABELS["giftpref"],
-            "icon": PROFILE_ICONS["giftpref"],
-            "text": "待确认",
-            "state": "pending",
-            "source": "待你确认",
-        })
-
-    if only is not None:
-        groups = [g for g in groups if g["key"] in only]
-    return groups
-
-
-def build_profile_head(state: dict, profile: list[dict]) -> dict:
-    """档案抬头。completeness 按**真实**已确认组数算，不写死。
-
-    ⚠️ 分母用 `len(PROFILE_KEYS)`（固定 5），**不用 `len(profile)`** ——
-    后者在 profile 还没落库时是 0，会显示「档案完整 0/0」，既无意义又让人
-    以为档案坏了。五组是前后端约定的 schema，分母本来就该是它。
-    """
-    recipient = str(state.get("recipient") or "收礼人")
-    confirmed = sum(1 for g in profile if g.get("state") == "confirmed")
-    return {
-        "name": recipient,
-        "initial": recipient[:1] if recipient else "礼",
-        "meta": RELATION_HINT.get(recipient, recipient),
-        "sub": f"{state.get('occasion') or '送礼'} · 预算 ¥{state.get('budget') or '—'}",
-        "completeness": f"档案完整 {confirmed}/{len(PROFILE_KEYS)}",
-    }
+    chosen = sorted(pairs, key=_score)[:4]
+    texts = list(dict.fromkeys(v for _k, v in chosen if v))
+    if not texts:
+        return []
+    return [{
+        "rail": "在意什么",
+        "text": " · ".join(texts),
+        "because": f"读长期偏好，筛出 {len(texts)} 条与收礼人相关的",
+        "source": "购物档案 · 偏好记录",
+    }]
 
 
 # ══════════════════════════════════════════════════════════
