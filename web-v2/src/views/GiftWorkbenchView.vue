@@ -47,11 +47,18 @@
 
       <template v-else>
         <div class="col col--l">
-          <ExploreStream
-            :steps="steps"
-            :excluded="excluded"
-            :stage-key="stageKey"
-            :done-count="doneCount"
+          <!--
+            与采购工作台**同一个组件**（components/common/StageExecStream.vue）。
+            送礼这边多传三样：标题、数量单位、开头那句「我还不了解 TA」，
+            以及模型此刻在想什么。采购不传 → 行为与改动前逐字相同。
+          -->
+          <StageExecStream
+            :items="stream"
+            :finish="finishInfo"
+            title="礼物探索流"
+            count-label="件"
+            :start="startLine"
+            :thinking="liveThought"
           />
         </div>
 
@@ -105,7 +112,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
-import ExploreStream from '@/components/gift/ExploreStream.vue'
+import StageExecStream from '@/components/common/StageExecStream.vue'
 import ProfileCard from '@/components/gift/ProfileCard.vue'
 import DeliverPanel from '@/components/gift/DeliverPanel.vue'
 import { useGiftWorkbench } from '@/composables/useGiftWorkbench'
@@ -119,18 +126,16 @@ const runId = computed(() => String(route.query.run || ''))
 const {
   task,
   profileHead,
-  steps,
-  excluded,
+  stream,
+  liveThought,
+  opening,
   profile,
   understanding,
-  opening,
   findings,
   deliverables,
   running,
   settled,
   loadError,
-  stageKey,
-  doneCount,
   readyCount,
   start,
   abort,
@@ -150,6 +155,40 @@ const head = computed(() => profileHead.value || {
   // 看着像两个互相矛盾的指标。留空即不渲染。
   completeness: ''
 })
+
+/**
+ * 左栏开头那一行 —— 「有始」的锚点。
+ *
+ * 直接用后端在 create_run 里发的 opening（「我还不了解 TA」）——
+ * 那是这次推演的**真实起点**，不是装饰。
+ * ⚠️ 与中栏开头共用同一条事件：中栏显示全文，左栏只取第一句。
+ */
+const startLine = computed(() => String(opening.value?.text || ''))
+
+/**
+ * 收尾总结的素材 —— 与采购 `finishInfo` 同一形状。
+ *
+ * 采购从交付物的 headline 里取「几个品类 / 总价」；送礼的对应物是
+ * 礼盒方案里的**件数与总价**。取不到就不给（`summary` 会自己省略），
+ * 不编一个数字。
+ */
+const finishInfo = computed(() => {
+  const plan = deliverables.value.find((d) => d.key === 'plan')?.data || {}
+  const items = plan.items || []
+  return {
+    status: running.value ? 'running' : settled.value ? 'converged' : 'running',
+    // 件数：礼盒里实际定下的商品数
+    categories: items.length || null,
+    total: items.length
+      ? items.reduce((s, i) => s + (Number(i.price) || 0), 0)
+      : (plan.total ?? null),
+    error: loadError.value || '',
+    startedAt: runStartedAt.value
+  }
+})
+
+/** 建 run 的时刻：一条事件都还没来时，「正在思考」的秒数从它算起 */
+const runStartedAt = ref(new Date().toISOString())
 
 const toast = ref('')
 let toastTimer = 0

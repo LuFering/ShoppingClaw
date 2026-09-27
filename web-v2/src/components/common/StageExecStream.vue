@@ -1,7 +1,7 @@
 <template>
   <div class="xs">
     <header class="xs-head">
-      <span class="xs-title">执行流</span>
+      <span class="xs-title">{{ title }}</span>
       <span class="xs-prog mono">{{ totalCalls }} 次调用</span>
       <span v-if="live" class="xs-live">
         <i class="xs-live-dot" />{{ live.text }}
@@ -95,6 +95,16 @@
         <span class="xs-wait-sec mono">{{ waitSeconds }}s</span>
       </div>
 
+      <!--
+        模型此刻在想的那句话 —— 只留**最新一段**，不堆历史。
+        ⚠️ 刻意不追加成多行：模型一次 run 吐 114 段、5700 字符，全堆在
+        268px 的栏里就是流水账（那正是前几版被否掉的原因）。替换式的
+        一行既「一直在动」又不膨胀。
+      -->
+      <p v-if="showThinking" class="xs-think">
+        <span class="xs-think-text">{{ thinking }}</span><i class="xs-caret" />
+      </p>
+
       <!-- 收尾总结：让它「有终」 -->
       <div v-if="summary" class="xs-sum" :class="`is-${summary.state}`">
         <span class="xs-sum-mark">{{ summary.mark }}</span>
@@ -141,7 +151,35 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 const props = defineProps({
   items: { type: Array, default: () => [] },
   /** 收尾总结的素材：由工作台按 run 状态传入 */
-  finish: { type: Object, default: null }
+  finish: { type: Object, default: null },
+  /**
+   * 收尾总结里「数量 + 单位」的单位。
+   *
+   * ⚠️ 采购是「N 个品类」（横跨多品类比价），送礼是「N 件」（一盒里几件）。
+   * 同一个组件、两种口径 —— 默认值与采购原本的文案**逐字相同**，
+   * 所以采购那边行为不变。
+   */
+  countLabel: { type: String, default: '个品类' },
+  /** 这一栏的名字。采购叫「执行流」，送礼叫「礼物探索流」 */
+  title: { type: String, default: '执行流' },
+  /**
+   * 开头那一行（「有始」的锚点）。不传就沿用原来的「开始执行」。
+   * 送礼用它写一句「我还不了解 TA」—— 那是这次推演的起点。
+   */
+  start: { type: String, default: '' },
+  /**
+   * 模型**此刻正在想的那句话**（送礼传，采购不传）。
+   *
+   * ⚠️ 为什么需要它：这一栏原本的实时性只有两条来源 ——
+   *   ① 阶段行 running 时的呼吸点与秒数
+   *   ② 静默超过 1.2s 时那条「正在思考」
+   * 实测一次送礼 run 里，模型**连续吐 token** 的时段（reasoning + content
+   * 共 114 段、5740 字符）两条都不覆盖：阶段没在跑、事件也没静默。
+   * 于是整段思考期间左栏一动不动 —— 这正是「实时效果不佳」。
+   *
+   * 采购没有这个问题（它的阶段覆盖得密），所以默认空串 = 不渲染。
+   */
+  thinking: { type: String, default: '' }
 })
 
 const BY_LABEL = { llm: '模型', kb: '知识库', rule: '规则' }
@@ -368,6 +406,19 @@ const waitText = computed(() => {
   return '正在思考…'
 })
 
+/**
+ * 「正在想」那一行什么时候显示。
+ *
+ * ⚠️ 与 `waiting`（静默时才出现的三点行）**互补**：那条管「静默」，
+ * 这条管「正在吐字」。两者覆盖的时间段不重叠，所以可以同时存在、不会打架。
+ * 跑完了就不再显示 —— 否则界面上会永远挂着一句没说完的话。
+ */
+const showThinking = computed(() => {
+  if (!props.thinking) return false
+  const st = props.finish?.status
+  return st === 'running' || st === 'awaiting'
+})
+
 /** 已等待秒数（从最后一条事件算起） */
 const waitSeconds = computed(() => {
   tick.value
@@ -405,6 +456,8 @@ const live = computed(() => {
 
 /** 开头锚点：把任务的规模先说清楚（有始） */
 const startLine = computed(() => {
+  // 传了 start 就用它（送礼：「我还不了解 TA」）；没传沿用采购的「开始执行」
+  if (props.start) return props.start
   const first = props.items[0]
   if (!first) return ''
   return '开始执行'
@@ -421,7 +474,7 @@ const summary = computed(() => {
   if (!f) return null
   const parts = []
   if (totalMs.value) parts.push(fmtMs(totalMs.value))
-  if (f.categories) parts.push(`${f.categories} 个品类`)
+  if (f.categories) parts.push(`${f.categories} ${props.countLabel}`)
   if (f.total != null) parts.push(`¥${Number(f.total).toLocaleString('en-US')}`)
 
   // ⚠️ 分隔符不能写死在模板里：没有数据时会出现「已完成 · 」这样的悬空尾巴。
@@ -814,6 +867,40 @@ onBeforeUnmount(() => { if (rafId) cancelAnimationFrame(rafId) })
   margin-left: auto;
   font-size: 0.66rem;
   color: var(--text-faint);
+}
+
+/* ── 「正在想」行 ──
+   比调用行弱、比「正在思考」那三点强：它是**内容**（说了什么），
+   不是状态（还在不在跑）。所以用斜体 + 弱色，不抢阶段行的视线。 */
+.xs-think {
+  margin: 9px 0 0;
+  padding-left: 2px;
+  font-size: 0.7rem;
+  line-height: 1.6;
+  font-style: italic;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.xs-think-text { min-width: 0; }
+/* 光标：与阶段行同一套语言，宽度只有 318px 所以更细 */
+.xs-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.8em;
+  margin-left: 2px;
+  vertical-align: -0.06em;
+  background: var(--info);
+  animation: xs-caret 1s steps(2, start) infinite;
+}
+@keyframes xs-caret {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .xs-caret { animation: none; }
 }
 
 /* ── 收尾总结 ── */

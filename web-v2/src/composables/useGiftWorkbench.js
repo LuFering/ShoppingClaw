@@ -28,7 +28,7 @@ const skeletonDeliverables = () =>
 
 export function useGiftWorkbench({ runId } = {}) {
   const running = ref(false)
-  const thinking = ref(false)
+  const thinking = ref(false)   // 旧标志位（组件用它显示三点），保留不动
   const settled = ref(false)
   const loading = ref(true)
   const loadError = ref('')
@@ -40,6 +40,27 @@ export function useGiftWorkbench({ runId } = {}) {
   // 后者是随推演逐步长出来的真实所得（搜过的方向 / 已排除 / 搭配逻辑）。
   const opening = ref(null)
   const findings = ref([])
+
+  /**
+   * 左栏的**事件行**。与采购 `PurchaseWorkbenchView.stream` 同构。
+   *
+   * ⚠️ 与 `steps`（骨架步骤）是两套东西，刻意分开：
+   *   steps   = 「这次推演分几步」的结构，来自前端骨架
+   *   stream  = 「模型实际做了什么」的流水，来自后端事件
+   * 上一版只有 steps，于是 call/call_result/think_delta 三个事件
+   * 到了前端无处可去，只能丢 —— 那正是左栏不像在跑的原因。
+   */
+  const stream = ref([])
+  let streamSeq = 0
+  const pushRow = (row) => {
+    stream.value.push({ ...row, at: new Date().toISOString(), uid: `r${++streamSeq}` })
+    if (stream.value.length > 400) stream.value.splice(0, stream.value.length - 400)
+  }
+
+  /** 模型此刻在想什么 —— 只留最新一段，供左栏那一行替换式显示 */
+  const liveThought = ref('')
+  /** 上一段推理的类型（reasoning / content）。换了类型要重开一段，见 think_delta */
+  let thinkingKind = ''
 
   const steps = ref(skeletonSteps())
   const excluded = ref([])
@@ -88,13 +109,101 @@ export function useGiftWorkbench({ runId } = {}) {
   /**
    * 后端事件 → 三栏。分支名与后端 `gift_service.emit()` 的 kind 对齐。
    */
-  const apply = (kind, p) => {
+  const apply = (kind, payload) => {
+    const p = payload
     switch (kind) {
       case 'stage':
         stageKey.value = p.key
         break
 
+      // ── 模型决定调某个工具 ──
+      // 与采购 `case 'call'` 同一套字段（title/detail/args/sample/
+      // tool_call_id），这样两边可以喂给同一个组件。
+      case 'call': {
+        // 上一条还在流式的思考行收尾（与采购一致：换行了就去掉光标）
+        const prev = stream.value[stream.value.length - 1]
+        if (prev && prev.streaming) { prev.streaming = false; prev.state = 'done' }
+        pushRow({
+          kind: 'call',
+          title: payload.title || '',
+          detail: payload.detail || '',
+          tool: payload.tool || '',
+          args: payload.args || null,
+          sample: payload.sample || null,
+          // ⚠️ 配对键：模型会并行调多个同类工具（实测一次并行搜 3 个词），
+          // 返回顺序不保证。不靠它配对就只能挂错行。
+          toolCallId: payload.tool_call_id || '',
+          state: 'done',
+          time: nowClock()
+        })
+        break
+      }
+
+      // ── 工具返回：补到刚才那条 call 上，**不新起一行** ──
+      case 'call_result': {
+        const cid = payload.tool_call_id || ''
+        let row = cid
+          ? stream.value.find((x) => x.kind === 'call' && x.toolCallId === cid)
+          : null
+        if (!row) {
+          // 没有 id 或找不到：退到「最后一条还没返回的」。
+          // 单次调用时这是对的；并行时可能配错，但总比丢掉强。
+          row = [...stream.value].reverse().find((x) => x.kind === 'call' && !x.result)
+        }
+        if (row) row.result = payload.text || ''
+        else pushRow({ kind: 'call', title: '工具返回', detail: '',
+                       result: payload.text || '', state: 'done', time: nowClock() })
+        break
+      }
+
+      // ── 逐 token 的推理增量 ──
+      // ⚠️ 只在 `liveThought` 里留**最新一段**，不往 stream 堆行：
+      // 实测一次 run 114 段、5740 字符。全堆进 268px 的栏里就是流水账，
+      // 前几版被否掉的原因正是这个。左栏要的是「它还在动」，不是逐字稿。
+      case 'think_delta': {
+        const t = String(payload.text || '')
+        if (t) {
+          // 连续同 kind 的增量拼接；换了 kind（reasoning → content）
+          // 就重开一段 —— 否则「它在想」与「它的结论」会粘成一句。
+          const k = payload.kind || 'content'
+          liveThought.value = (thinkingKind === k ? liveThought.value : '') + t
+          thinkingKind = k
+        }
+        break
+      }
+
       case 'step': {
+        // ── 同时落一条 `phase` 行喂给共享组件 ──
+        // 采购的 `phase` 与送礼的 `step` 是同一件事的两种叫法（都是
+        // 「一批同类调用」），差别只在字段名。在这里归一，共享组件就
+        // 只需要认一套 —— 否则它会退化成 if/else 双分支，两套逻辑必然漂。
+        const ph = stream.value.find((x) => x.kind === 'phase' && x.phase === payload.key)
+        if (payload.status === 'done') {
+          if (ph) {
+            ph.state = 'done'
+            // ⚠️ 同一阶段会被**反复进入**（实测「搜索」进 3 轮），
+            // 耗时必须**累加**：只留最后一轮的话，三轮共 126s 的阶段
+            // 会显示成 24.4s —— 而「哪一步最费时间」正是用户想知道的。
+            if (typeof payload.ms === 'number') ph.msTotal = (ph.msTotal || 0) + payload.ms
+            ph.passes = (ph.passes || 0) + 1
+            ph.startedAt = null
+          }
+        } else if (ph) {
+          ph.state = 'running'
+          if (payload.hint) ph.detail = payload.hint
+          if (!ph.startedAt) ph.startedAt = Date.now()
+        } else {
+          pushRow({
+            kind: 'phase',
+            phase: payload.key,
+            title: payload.label || payload.key,
+            detail: payload.hint || '',
+            state: 'running',
+            startedAt: Date.now(),
+            time: nowClock()
+          })
+        }
+
         const s = steps.value.find((x) => x.key === p.key)
         if (!s) break
         s.status = p.status
@@ -180,12 +289,17 @@ export function useGiftWorkbench({ runId } = {}) {
       case 'done':
         settled.value = true
         running.value = false
+        // 跑完了就别再显示「正在想」—— 否则界面上永远挂着一句没说完的话
+        liveThought.value = ''
         break
 
       default:
         break
     }
   }
+
+  /** 事件到达的墙上时钟，供左栏显示「什么时候到的」 */
+  const nowClock = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
 
   /** 首屏：一次拿全（刷新即恢复，不重放事件） */
   const loadSnapshot = async () => {
@@ -268,6 +382,9 @@ export function useGiftWorkbench({ runId } = {}) {
     settled.value = false
     // 重置三栏骨架（「重来」按钮会再走一次）
     steps.value = skeletonSteps()
+    stream.value = []
+    liveThought.value = ''
+    thinkingKind = ''
     opening.value = null
     findings.value = []
     excluded.value = []
@@ -291,6 +408,8 @@ export function useGiftWorkbench({ runId } = {}) {
     task,
     profileHead,
     steps,
+    stream,
+    liveThought,
     opening,
     findings,
     excluded,

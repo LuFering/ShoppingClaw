@@ -487,7 +487,8 @@ async def _on_agent_step(run_id: str, chunk: dict, seen_tools: set[str],
                         # 同批的第二个并行调用：只加计数，不重发 running
                         left = _pending.setdefault(run_id, {})
                         left[key] = (left.get(key) or 0) + 1
-                await _emit_tool_call(run_id, name, args)
+                await _emit_tool_call(run_id, name, args,
+                                      call.get("id") or "")
 
             # ── 工具返回 ──
             #
@@ -510,13 +511,21 @@ async def _on_agent_step(run_id: str, chunk: dict, seen_tools: set[str],
     return None
 
 
-async def _emit_tool_call(run_id: str, name: str, args: dict) -> None:
-    """模型决定调某个工具 → 一条事件。**带真实入参**。"""
+async def _emit_tool_call(run_id: str, name: str, args: dict,
+                          call_id: str = "") -> None:
+    """模型决定调某个工具 → 一条事件。**带真实入参**。
+
+    ⚠️ `call_id` 必须带上：模型会**并行**调多个同类工具（实测一次并行搜
+    3 个词），返回顺序不保证。前端不靠它配对就只能退化成「挂到最后一条
+    还没返回的 call 上」—— 实测会把「颈椎按摩仪」的结果挂到「保温杯」
+    名下，看着像模型在胡说。规划那边一直是按 `tool_call_id` 精确配对的。
+    """
     title, detail, sample = _describe_call(name, args)
     meta = _TOOL_META.get(name)
     await emit(run_id, "call", {
         "title": title, "detail": detail, "args": args, "sample": sample,
         "tool": name, "stage": meta[0] if meta else "执行",
+        "tool_call_id": call_id,
     })
 
 

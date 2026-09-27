@@ -1122,13 +1122,17 @@ def build_compare(picked: list[dict], excluded: list[dict]) -> list[dict]:
     """候选对比表：入选与排除**放在同一张表里**（否则看不出取舍）。"""
     rows = []
     for i, p in enumerate(picked[:5]):
+        # ⚠️ 用 `cand_name` / `cand_cents`，不要 `p["name"]` ——
+        # picked 里是 MCP 原始结果（字段叫 `title`，价格是**分**）。
+        # 实测写 p["name"] 直接 KeyError，被 _emit_deliverables_for 的
+        # except 吞成一条 warning，于是「候选对比」这份交付物**永远是空的**。
         rows.append({
-            "name": p["name"], "price": p.get("price") or 0,
+            "name": cand_name(p), "price": price_of_yuan(cand_cents(p)),
             "fit": 9 - i, "use": "入选", "tag": "入选",
         })
     for e in excluded[:5]:
         rows.append({
-            "name": e["name"], "price": e.get("price") or 0,
+            "name": cand_name(e), "price": price_of_yuan(cand_cents(e)),
             "fit": 2, "use": "—", "tag": "排除",
         })
     return rows
@@ -1180,7 +1184,8 @@ async def build_message(state: dict, plan: dict, understanding: dict) -> dict:
 
 def build_supply(picked: list[dict], plan: dict) -> list[dict]:
     """货源与配送：取自真实候选的 item_id（能指回具体商品）。"""
-    by_name = {p["name"]: p for p in picked}
+    # 同一套口径：picked 是 MCP 原始候选，名字在 `title` 上
+    by_name = {cand_name(p): p for p in picked}
     out = []
     for it in (plan.get("items") or []):
         src = by_name.get(it["name"]) or {}
