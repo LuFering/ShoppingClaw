@@ -112,11 +112,23 @@ export function useGiftWorkbench({ runId } = {}) {
       }
 
       case 'profile': {
-        const g = profile.value.find((x) => x.key === p.key)
-        if (!g) break
+        // ⚠️ 组是**逐步到达**的（后端按两次 RAG 往返分批推，见
+        // gift_service._PROFILE_BATCH）。原先这里找不到就 `break` 丢弃 ——
+        // 那是「骨架预置了全部五组、只等更新」的写法，现在骨架是空槽，
+        // 组必须能被**新增**，否则中栏永远长不出来。
+        let g = profile.value.find((x) => x.key === p.key)
+        if (!g) {
+          const base = PROFILE_GROUPS.find((x) => x.key === p.key) || { key: p.key }
+          g = { ...base }
+          profile.value.push(g)
+        }
         g.state = p.state
         if (p.text) g.text = p.text
         if (p.note !== undefined && p.note !== null) g.note = p.note
+        if (p.source) g.source = p.source
+        // 到达时刻：卡片上标出「这一条是什么时候读到的」，
+        // 让「刚长出来的」与「早就在的」可分辨（这是生长感的载体）
+        g.arrivedAt = new Date()
         markFresh(p.key)
         break
       }

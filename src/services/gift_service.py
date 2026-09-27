@@ -218,7 +218,13 @@ async def advance(run_id: str, user_id: str) -> None:
 
 # 节点名 → 左栏那一步的 key / 中文名（与 STEPS 对齐）
 _NODE_META = {
-    "understand": ("understand", "理解关系"),
+    # ⚠️ read_history / read_prefs 是**同一个左栏步骤**的两个内部节点
+    # （2026-09-27 拆开，为让档案分批到达是真的）。对用户而言仍是「理解关系」
+    # 一步，所以 key 都映射到 understand —— 左栏不会多出两步，
+    # 而中栏能收到两批档案。
+    "read_history": ("understand", "理解关系"),
+    "read_prefs": ("understand", "理解关系"),
+    "understand": ("understand", "理解关系"),   # 兼容旧图（测试用）
     "extract": ("extract", "提取需求"),
     "search": ("search", "检索商品"),
     "verify": ("verify", "比价验货"),
@@ -229,6 +235,8 @@ _NODE_META = {
 # 每一步「正在做什么」。刻意写具体 —— 用户要知道它此刻是在等 MCP（慢）
 # 还是在等模型（慢），而不是以为界面卡住了。
 _RUNNING_HINT = {
+    "read_history": "读收礼人的历史记录",
+    "read_prefs": "读长期偏好与画像",
     "understand": "读收礼人的历史与偏好",
     "extract": "把偏好归纳成一条判断",
     "search": "用品类词检索真实商品",
@@ -266,6 +274,49 @@ async def _on_debug(run_id: str, chunk: dict, started: dict[str, float]) -> None
                 hint=_RUNNING_HINT.get(node, ""))
 
 
+# 每个节点推送**哪些**档案组。
+#
+# ⚠️ 这份映射不是「把五组摊到五个节点上」—— 它是**真实的依赖关系**：
+#   · giftpref 只依赖 state.signals（入口页勾选），不需任何工具
+#   · relation/life/taboo 依赖 recall_past_decisions 的返回
+#   · likes 依赖 get_user_shopping_context 的返回
+# 所以「先后到达」是数据本身决定的，不是我排的节奏。后 5 个节点
+#（extract 之后）**不产生任何新的档案信息** —— verify 的排除理由是
+# 「超预算 60%」，那是预算信息，与收礼人无关，塞进档案就是编造。
+_PROFILE_BATCH = {
+    "read_history": ("relation", "life", "taboo", "giftpref"),
+    "read_prefs": ("likes",),
+    "understand": ("relation", "life", "likes", "taboo", "giftpref"),  # 兼容旧图
+}
+
+
+async def _emit_profile_batch(run_id: str, delta: dict, node: str) -> None:
+    """把这一批**真实拿到**的档案组推给中栏。
+
+    只有在 `delta` 里真的带了 `profile` 时才推（图返回完整五组时）。
+    拆开的两节点各自返回的是**部分** state，所以这里从完整 profile 里
+    按 `_PROFILE_BATCH[node]` 筛出本批该露的组。
+
+    `giftpref`（送礼偏好）不需要任何工具，理论上可以更早推送。但它是
+    图的第一个节点 read_history 就带着 state.signals 算出来的 —— 与
+    relation 同批到达（实测相隔几毫秒），单独为它再加一个节点不值当。
+    """
+    wanted = _PROFILE_BATCH.get(node)
+    if not wanted:
+        return
+    profile = delta.get("profile") or []
+    if not profile:
+        return
+    for g in profile:
+        if g.get("key") not in wanted:
+            continue
+        await emit(run_id, "profile", {
+            "key": g["key"], "state": g["state"],
+            "text": g["text"], "note": g.get("note"),
+            "source": g.get("source"),
+        })
+
+
 async def _on_node(run_id: str, node: str, delta: dict,
                    t_start: float | None = None) -> None:
     """一个节点跑完 → 落它对应的过程事件与产物事件。
@@ -286,18 +337,21 @@ async def _on_node(run_id: str, node: str, delta: dict,
     ms = int((time.monotonic() - t_start) * 1000) if t_start is not None else None
 
     try:
-        if node == "understand":
-            profile = delta.get("profile") or []
+        if node in ("read_history", "read_prefs", "understand"):
             ctx = delta.get("context") or {}
-            await _patch_run(run_id, profile=profile)
-            for g in profile:
-                await emit(run_id, "profile", {
-                    "key": g["key"], "state": g["state"],
-                    "text": g["text"], "note": g.get("note"),
-                })
-            await _step(run_id, "understand", "done", ms=ms,
-                        evidence=f"读了 {len(ctx.get('history') or [])} 条历史、"
-                                 f"{len(ctx.get('prefs') or [])} 条偏好")
+            await _emit_profile_batch(run_id, delta, node)
+
+            # 两个节点都映射到 understand 这一步。**只在最后一个**收尾这一步
+            # （否则 read_history 结束时就把整步标成 done，后面那批档案
+            # 会显示在一个「已完成」的步骤下面，时序错乱）。
+            if node in ("read_prefs", "understand"):
+                # 完整五组在这一步之后才齐（read_prefs 节点返回时）
+                profile = delta.get("profile") or []
+                if profile:
+                    await _patch_run(run_id, profile=profile)
+                await _step(run_id, "understand", "done", ms=ms,
+                            evidence=f"读了 {len(ctx.get('history') or [])} 条历史、"
+                                     f"{len(ctx.get('prefs') or [])} 条偏好")
             await _say(run_id, "understand",
                        "从档案取到与本次送礼相关的字段，其余过滤掉。")
 

@@ -44,12 +44,22 @@
           </span>
           <div class="gr__main">
             <span class="gr__label">{{ g.label }}</span>
-            <p class="gr__text">
+            <!--
+              空槽（还没读到）与「读到了但没有」是**两件事**，界面上要分得清：
+                todo     —— 淡虚线占位 + 「尚未读到」，表示还在等
+                pending  —— 显示后端给的具体文案（如「未记录」），表示已经问过了
+              混为一谈的话，用户分不清「它还没查」与「查了但没有」。
+            -->
+            <p v-if="g.state === 'todo'" class="gr__text gr__text--empty">
+              尚未读到…
+            </p>
+            <p v-else class="gr__text">
               {{ g.text }}
               <span v-if="g.note" class="gr__note">{{ g.note }}</span>
+              <span v-if="g.arrivedAt" class="gr__at mono">{{ clock(g.arrivedAt) }}</span>
             </p>
           </div>
-          <span class="gr__acts">
+          <span v-if="g.state !== 'todo'" class="gr__acts">
             <button type="button" @click.stop="$emit('act', g, 'source')">来源</button>
             <button type="button" @click.stop="$emit('act', g, 'edit')">改</button>
             <button type="button" @click.stop="$emit('act', g, 'remove')">删</button>
@@ -83,12 +93,22 @@
           </span>
           <div class="gr__main">
             <span class="gr__label">{{ g.label }}</span>
-            <p class="gr__text">
+            <!--
+              空槽（还没读到）与「读到了但没有」是**两件事**，界面上要分得清：
+                todo     —— 淡虚线占位 + 「尚未读到」，表示还在等
+                pending  —— 显示后端给的具体文案（如「未记录」），表示已经问过了
+              混为一谈的话，用户分不清「它还没查」与「查了但没有」。
+            -->
+            <p v-if="g.state === 'todo'" class="gr__text gr__text--empty">
+              尚未读到…
+            </p>
+            <p v-else class="gr__text">
               {{ g.text }}
               <span v-if="g.note" class="gr__note">{{ g.note }}</span>
+              <span v-if="g.arrivedAt" class="gr__at mono">{{ clock(g.arrivedAt) }}</span>
             </p>
           </div>
-          <span class="gr__acts">
+          <span v-if="g.state !== 'todo'" class="gr__acts">
             <button type="button" @click.stop="$emit('act', g, 'source')">来源</button>
             <button type="button" @click.stop="$emit('act', g, 'edit')">改</button>
             <button type="button" @click.stop="$emit('act', g, 'remove')">删</button>
@@ -139,6 +159,14 @@ defineEmits(['act'])
 
 const stateLabel = (s) => (s === 'inferred' ? '推测' : s === 'pending' ? '待确认' : '')
 
+/** 到达时刻（时:分:秒）—— 「这一条是什么时候读到的」 */
+const clock = (d) => {
+  const t = d instanceof Date ? d : new Date(d)
+  if (Number.isNaN(t.getTime())) return ''
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`
+}
+
 /* 关系绶带只取第一段，如「母亲 · 52 岁 · 同城」→「母亲」 */
 const relationShort = computed(() => (props.head.meta || '').split(/[ ·]/)[0] || '')
 
@@ -155,6 +183,19 @@ const dangerGroups = computed(() => props.groups.filter((g) => g.danger))
   border-radius: 18px;
   box-shadow: 0 1px 2px rgba(18, 18, 28, 0.04), 0 18px 40px -28px rgba(18, 18, 28, 0.22);
   overflow: hidden;
+}
+
+/* 空槽：还没读到的组。淡虚线 + 更浅的字，明确区别于「读到了但没有」 */
+.gr__text--empty {
+  color: var(--text-faint);
+  font-style: normal;
+  opacity: 0.75;
+}
+/* 到达时刻：比正文更弱，是元信息 */
+.gr__at {
+  margin-left: 6px;
+  font-size: 0.62rem;
+  color: var(--text-faint);
 }
 
 /* ---- 抬头 ---- */

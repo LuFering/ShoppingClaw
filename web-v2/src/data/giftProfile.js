@@ -19,65 +19,47 @@ export const TASK = {
   budget: 800
 }
 
-/** 中栏 · 档案卡的抬头 */
-export const PROFILE_HEAD = {
-  name: '妈妈',
-  initial: '妈',
-  meta: '母亲 · 52 岁',
-  sub: '与你同城，周末常见面 · 上次送礼在 3 个月前',
-  /** 顶部小徽标：档案完整度 */
-  completeness: '档案完整 4/5'
-}
+/**
+ * 中栏 · 档案卡的抬头 —— **空壳**。
+ *
+ * 原先写死「妈妈 / 母亲 · 52 岁 / 与你同城，周末常见面 / 档案完整 4/5」，
+ * 同样是编的：后端其实用 `build_profile_head` 按真实已确认组数算完整度
+ *（见 gift/stages.py）。这里只留一个兜底形状，真实值一到就覆盖。
+ */
+export const PROFILE_HEAD = null
 
 /**
- * 中栏 · 五组信息卡。
- * state 三态；danger=true 的组用危险色（禁忌类）；
- * note 是紧随正文的补充说明（淡色）。
+ * 中栏 · 五组的**空槽**（骨架）。
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * 2026-09-27：这里原本是**硬编码的演示内容**
+ * ═══════════════════════════════════════════════════════════════════
+ * 原先五组写死了「母亲 · 52 岁 · 与你同城，周末常见面」「香水（过敏）」
+ * 这类具体文案。后果是：推演刚开始、后端一个字节都还没返回时，中栏
+ * 就已经有字了 —— 看起来是「早就填好的档案」，而不是「正在长出来的
+ * 档案」。而且那些文案是**编的**，与项目一贯的零幻觉红线冲突
+ *（见 gift/stages.py 的 read_recipient_context）。
+ *
+ * 现在只保留**结构**（key / label / icon 是前后端约定的固定 schema），
+ * 正文留空、state 标 'todo'。前端据此渲染成「空槽」：
+ *   · 与后端的 pending（读到了但确实没有）**区分开**
+ *   · 数据到了才点亮，这才是真实的生长
+ *
+ * state 取值（前端 + 后端共用）：
+ *   todo      还没读到 —— 空槽，淡虚线
+ *   confirmed 已确认 —— 实心点
+ *   inferred  智能推测 —— 空心圈
+ *   pending   待确认 / 暂时没有 —— 灰虚线圈
  */
 export const PROFILE_GROUPS = [
+  { key: 'relation', label: '关系与称谓', icon: 'people', text: '', state: 'todo' },
+  { key: 'life', label: '生活状态', icon: 'life', text: '', state: 'todo' },
+  { key: 'likes', label: '已知喜好', icon: 'heart', text: '', state: 'todo' },
   {
-    key: 'relation',
-    label: '关系与称谓',
-    icon: 'people',
-    text: '母亲 · 52 岁 · 与你同城，周末常见面',
-    state: 'confirmed',
-    source: '购物档案 · 上次送礼记录'
+    key: 'taboo', label: '明确禁忌', icon: 'ban',
+    text: '', state: 'todo', danger: true
   },
-  {
-    key: 'life',
-    label: '生活状态',
-    icon: 'life',
-    text: '久坐多；最近提过睡不好',
-    note: '（无明显依据）',
-    state: 'inferred',
-    source: '近 3 次对话提及'
-  },
-  {
-    key: 'likes',
-    label: '已知喜好',
-    icon: 'heart',
-    text: '实用小家电 · 护手霜 · 木质香调',
-    state: 'confirmed',
-    source: '历史礼物回访 + 明确表达'
-  },
-  {
-    key: 'taboo',
-    label: '明确禁忌',
-    icon: 'ban',
-    text: '香水（过敏）',
-    note: '—— 香薰类一律走低烟或无火路线',
-    state: 'confirmed',
-    danger: true,
-    source: '明确表达 · 高置信'
-  },
-  {
-    key: 'giftpref',
-    label: '送礼偏好',
-    icon: 'gift',
-    text: '不喜欢太贵 · 偏好能天天用到的',
-    state: 'pending',
-    source: '待你确认'
-  }
+  { key: 'giftpref', label: '送礼偏好', icon: 'gift', text: '', state: 'todo' }
 ]
 
 /** 中栏 · 底部「当前理解」 */

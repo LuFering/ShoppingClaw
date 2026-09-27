@@ -159,59 +159,93 @@ def _parse_jsonish(raw: Any) -> Any:
 # ① 理解关系 —— 真读档案
 # ══════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════
+# 档案读取：**拆成两次独立调用**
+# ══════════════════════════════════════════════════════════════════════
+# 2026-09-27：原先是一个函数内部串行调两个工具、都返回后才组装五组档案，
+# 于是中栏在**第 25ms** 一次亮出全部五组，之后再无变化 —— 看起来是一张
+# 静态卡片，而不是「随推演逐步长出来的档案」（用户的反馈）。
+#
+# 拆开后有个真实的好处：这两次调用本来就是**两次独立的 RAG 往返**
+# （实测 understand 节点总耗时 5.4s），各自的返回支撑不同的档案组：
+#   · recall_past_decisions   → 历史 → 关系/生活状态/禁忌
+#   · get_user_shopping_context → 偏好 → 已知喜好
+# 所以「先后到达」是真实的，不是人为拉长的。逐批推送即可做出诚实的生长感。
+#
+# ⚠️ user_id 必须**显式传**，不能靠 with_user_id + bind_user_id 注入：
+# 这两个工具的 user_id **声明在 args_schema 里**（与 create_monitor_task
+# 那类「schema 里没有、靠 runtime 注入」的不同）。LangChain 的 StructuredTool
+# 会**先按 args_schema 校验、再调用**，所以无论怎么包装 coroutine，校验都在
+# 包装器之前 —— 实测报 `user_id Field required`，异常被 `_call` 吞掉返回 None，
+# 于是「读档案」永远读不到东西，界面照样显示「读了 0 条历史」，看着像档案本来
+# 就是空的。我们是调用方，本来就该给出「这是谁」。
+
+async def read_history(state: dict) -> list[dict]:
+    """读与「送某人」相关的历史决策记录。读不到返回空列表（不编造）。"""
+    recipient = str(state.get("recipient") or "").strip()
+    if not recipient:
+        return []
+    try:
+        recall = await _builtin_tool("recall_past_decisions")
+        if recall is None:
+            return []
+        raw = await _call(recall, {"user_id": str(state.get("user_id") or ""),
+                                   "topic": recipient}, RAG_TIMEOUT)
+        data = _parse_jsonish(raw)
+        return data[:5] if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning(f"[gift] 读历史失败（按无档案继续）: {e}")
+        return []
+
+
+async def read_preferences(state: dict) -> list[Any]:
+    """读该用户的长期偏好。读不到返回空列表（不编造）。"""
+    try:
+        ctx = await _builtin_tool("get_user_shopping_context")
+        if ctx is None:
+            return []
+        raw = await _call(ctx, {"user_id": str(state.get("user_id") or "")}, RAG_TIMEOUT)
+        data = _parse_jsonish(raw)
+        if isinstance(data, dict):
+            prefs = data.get("preferences") or data.get("long_term_preferences") or []
+            if isinstance(prefs, list):
+                return prefs[:8]
+        return []
+    except Exception as e:
+        logger.warning(f"[gift] 读偏好失败（按无档案继续）: {e}")
+        return []
+
+
 async def read_recipient_context(state: dict) -> dict:
     """读该用户的历史决策与画像，抽出与「送某人」相关的线索。
 
-    真调 `recall_past_decisions` + `get_user_shopping_context`。
-    读不到就返回空 —— **不编造档案**（零幻觉红线，送礼场景尤其致命：
-    编一个「她喜欢香水」而实际过敏，这份礼物就废了）。
+    保留这个组合入口给**不需要分批**的调用方（测试、以及将来可能的别处）。
+    图里改用 `read_history` / `read_preferences` 两次调用以便分批推送。
     """
-    recipient = str(state.get("recipient") or "").strip()
-    out: dict[str, Any] = {"history": [], "prefs": [], "raw_ok": False}
-
-    try:
-        uid = str(state.get("user_id") or "")
-
-        # ═══════════════════════════════════════════════════════════════
-        # user_id 必须**显式传**，不能靠 with_user_id + bind_user_id 注入
-        # ═══════════════════════════════════════════════════════════════
-        #
-        # 这两个工具的 `user_id` **声明在 args_schema 里**（与
-        # `create_monitor_task` 那类「schema 里没有、靠 runtime 注入」的工具不同）。
-        # LangChain 的 StructuredTool 会**先按 args_schema 校验参数、再调用**，
-        # 所以无论怎么包装 coroutine，校验都在包装器之前发生 ——
-        # 实测报 `user_id Field required`，异常被 `_call` 吞掉返回 None，
-        # 于是「读档案」永远读不到东西，而界面照样显示「读了 0 条历史」，
-        # 看起来像档案本来就是空的。
-        #
-        # 我们是调用方，本来就该给出「这是谁」——显式传既过校验，也不涉及
-        # 模型编造 id 的问题（那是模型自己填参数时的风险）。
-        recall = await _builtin_tool("recall_past_decisions")
-        ctx = await _builtin_tool("get_user_shopping_context")
-
-        if recall is not None and recipient:
-            raw = await _call(recall, {"user_id": uid, "topic": recipient}, RAG_TIMEOUT)
-            data = _parse_jsonish(raw)
-            if isinstance(data, list):
-                out["history"] = data[:5]
-            out["raw_ok"] = out["raw_ok"] or raw is not None
-
-        if ctx is not None:
-            raw2 = await _call(ctx, {"user_id": uid}, RAG_TIMEOUT)
-            data2 = _parse_jsonish(raw2)
-            if isinstance(data2, dict):
-                prefs = data2.get("preferences") or data2.get("long_term_preferences") or []
-                if isinstance(prefs, list):
-                    out["prefs"] = prefs[:8]
-            out["raw_ok"] = out["raw_ok"] or raw2 is not None
-    except Exception as e:
-        logger.warning(f"[gift] 读档案失败（按无档案继续）: {e}")
-
-    return out
+    history = await read_history(state)
+    prefs = await read_preferences(state)
+    return {
+        "history": history,
+        "prefs": prefs,
+        # raw_ok 的原意是「至少有一次工具调用真的返回了东西」。
+        # 拆开后按「任一非空」判定 —— 语义不变，且不必再多传一个标志。
+        "raw_ok": bool(history or prefs),
+    }
 
 
-def build_profile(state: dict, ctx: dict) -> list[dict]:
+def build_profile(state: dict, ctx: dict, only: tuple[str, ...] | None = None) -> list[dict]:
     """按「读到的真实档案」组装中栏五组。
+
+    `only`：只返回指定的这几组。图里分批推送时用它 —— 每批只推**这一批
+    真实拿到了数据的**组，而不是每次都把五组全推一遍。
+    `build_profile` 仍然是唯一的组装入口（五组的措辞、source、state 判定都在
+    这里），分批只是**筛选**，不另写一套组装逻辑 —— 两套必然漂。
+
+    分批的对应关系（见 read_history / read_preferences 的说明）：
+      giftpref  不依赖工具，进节点就能推
+      relation / life / taboo   依赖 history
+      likes                     依赖 prefs
+    
 
     三态语义（前端硬要求）：
       confirmed 已确认 —— 来自档案或用户明确表达
@@ -329,6 +363,8 @@ def build_profile(state: dict, ctx: dict) -> list[dict]:
             "source": "待你确认",
         })
 
+    if only is not None:
+        groups = [g for g in groups if g["key"] in only]
     return groups
 
 

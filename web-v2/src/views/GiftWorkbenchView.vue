@@ -32,9 +32,14 @@
           去描述这次送礼 →
         </button>
       </div>
-      <div v-else-if="loading" class="wb__blank">
-        <a-spin tip="正在加载推演…" />
-      </div>
+      <!--
+        ⚠️ 加载中**不再整块换成 spinner**。
+        用户要的是「从一个空白档案慢慢变化成完整档案」—— 而 spinner 把
+        档案卡整个挡住了，前 5 秒什么都看不到，然后五组一起蹦出来。
+        现在直接渲染三栏骨架：中栏是空槽卡、左栏是待办步骤、右栏是等待中的
+        交付物。数据一到就地填充，这才看得到「长出来」的过程。
+        错误态仍然接管（那时确实没东西可显示）。
+      -->
       <div v-else-if="loadError" class="wb__blank">
         <p class="wb__blank-title">{{ loadError }}</p>
         <button class="wb__blank-btn" type="button" @click="reload">重试</button>
@@ -119,7 +124,6 @@ const {
   deliverables,
   running,
   settled,
-  loading,
   loadError,
   stageKey,
   doneCount,
@@ -136,6 +140,8 @@ const head = computed(() => profileHead.value || {
   initial: (task.value?.recipient || '礼').slice(0, 1),
   meta: task.value?.occasion || '送礼',
   sub: `预算 ¥${task.value?.budget || '—'}`,
+  // 「读取中…」而不是编一个「档案完整 4/5」—— 完整度由后端按真实
+  // 已确认组数算（build_profile_head），前端不猜。
   completeness: '档案读取中…'
 })
 
@@ -321,7 +327,10 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(240px, 0.92fr) minmax(420px, 1.18fr) minmax(290px, 1fr);
+  /* 2026-09-27：对齐规划工作台（PurchaseWorkbenchView 同一组数字）。
+     原先 0.92 / 1.18 / 1fr，中栏约 490px —— 人物档案卡是这一页的主角，
+     却被挤在中间；用户要求「左右收窄、中间扩大」。 */
+  grid-template-columns: 268px minmax(0, 1fr) 288px;
 }
 .col {
   min-height: 0;
@@ -342,8 +351,9 @@ onBeforeUnmount(() => {
 }
 .col__wrap {
   width: 100%;
-  /* 560：在 1280–1600 区间，中栏宽度 487–597，卡片贴满、两侧只留 14–20px 框距，不再死白 */
-  max-width: 560px;
+  /* 放开到 760：中栏现在约 860px（268|1fr|288），限 560 会在两侧留出
+     大片死白。卡片本身该是这一页的主角。 */
+  max-width: 760px;
 }
 .col--r {
   background: var(--bg-surface);
@@ -411,11 +421,12 @@ onBeforeUnmount(() => {
 .wb-toast-leave-to { opacity: 0; }
 
 /* ---- 中间档：三栏还开着，等比收一点，保持 0.85 / 1.12 / 0.95 的协调比例 ---- */
+/* 中间档：三栏还开着，左右收到最小可用宽度，把余量给中栏 */
 @media (max-width: 1320px) {
   .wb__body {
-    grid-template-columns: minmax(220px, 0.85fr) minmax(400px, 1.12fr) minmax(270px, 0.95fr);
+    grid-template-columns: 248px minmax(0, 1fr) 268px;
   }
-  .col__wrap { max-width: 500px; }
+  .col__wrap { max-width: 100%; }
   .col--m { padding-left: 14px; padding-right: 14px; }
 }
 
