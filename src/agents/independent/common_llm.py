@@ -46,10 +46,15 @@ LLM_TIMEOUT = 120
 # 也就是说前者是「想 49 秒 → 0.1 秒内全部显示」，后者是「一边想一边显示」。
 # 任何前端技巧都补不上这个差别 —— 流里根本没有中间数据。
 #
-# 用环境变量覆盖，不动全局默认：主智能体那边自有它的取模逻辑，
-# 改 `config.default_model` 会连带影响购前/购后助手，超出这次的范围。
+# 2026-09-27：provider 从 SenseNova 换成 TingFeng-Model（同样是
+# deepseek-v4-flash）。两者都吐推理流；换的理由是 TingFeng 这个 key
+# 更稳定，且与 `config.default_model` 保持一致 —— 同一个模型两处写不同的
+# provider，排查问题时容易看错。
+#
+# 仍保留环境变量覆盖的能力（`INDEPENDENT_AGENT_MODEL`）：独立 agent 对
+# 推理流的要求比主智能体更硬，将来想试别的模型不该动全局默认。
 INDEPENDENT_MODEL_ENV = "INDEPENDENT_AGENT_MODEL"
-INDEPENDENT_MODEL_FALLBACK = "SenseNova/deepseek-v4-flash"
+INDEPENDENT_MODEL_FALLBACK = "TingFeng-Model/deepseek-v4-flash"
 
 _model = None
 
@@ -57,8 +62,9 @@ _model = None
 def get_model():
     """取独立 agent 用的聊天模型。进程内缓存。
 
-    优先 `INDEPENDENT_AGENT_MODEL` 环境变量，其次内置默认（deepseek-v4-flash，
-    因为它吐推理过程），最后才回退到全局 default_model。
+    优先 `INDEPENDENT_AGENT_MODEL` 环境变量，其次内置默认
+    （TingFeng-Model/deepseek-v4-flash，因为它吐推理过程），
+    最后才回退到全局 default_model。
     """
     global _model
     if _model is None:
@@ -70,14 +76,14 @@ def get_model():
         spec = (
             os.getenv(INDEPENDENT_MODEL_ENV)
             or INDEPENDENT_MODEL_FALLBACK
-            or getattr(config, "default_model", "SenseNova/sensenova-6.8-flash-lite")
+            or getattr(config, "default_model", "TingFeng-Model/deepseek-v4-flash")
         )
         try:
             _model = load_chat_model(spec)
         except Exception as e:
             # 指定的模型不可用时退回全局默认 —— 宁可少一点实时感，
             # 也不能整个推演跑不起来。
-            fallback = getattr(config, "default_model", "SenseNova/sensenova-6.8-flash-lite")
+            fallback = getattr(config, "default_model", "TingFeng-Model/deepseek-v4-flash")
             logger.warning(
                 "[llm] 独立 agent 模型 %s 不可用（%s），回退到 %s", spec, e, fallback
             )

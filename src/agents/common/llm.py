@@ -14,7 +14,16 @@ load_dotenv()
 
 # 模型实例缓存，避免同一模型被重复加载
 # 会返回 reasoning_content 的 OpenAI 兼容 provider（均启用 reasoning 感知封装）
-REASONING_AWARE_PROVIDERS = ("deepseek", "aliyun", "SenseNova", "openai")
+# 这些 provider 会返回 `reasoning_content`（模型的草稿纸），需要专门的
+# 包装类把它接住 —— 见下面的 ReasoningAwareChatOpenAI。
+#
+# ⚠️ 2026-09-27 加 TingFeng-Model：它走的是同一套 OpenAI 兼容协议，
+# 实测**吐 reasoning_content**（curl 直接调能看到）。原先它不在这个名单里，
+# 也没有出现在下面的 provider 分支里 —— 于是落到最后的 `else`，用裸的
+# ChatOpenAI。后果是流式返回的 chunk **全部是空的**（实测 39 个 chunk、
+# content 与 additional_kwargs 都为空），推理流一个字节都拿不到，
+# 界面从头到尾静止、最后一次性蹦出结果。比换模型之前还差。
+REASONING_AWARE_PROVIDERS = ("deepseek", "aliyun", "SenseNova", "openai", "TingFeng-Model")
 _model_cache: dict[str, BaseChatModel] = {}
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -118,7 +127,7 @@ def load_chat_model(fully_specified_name:str,**kwargs)->BaseChatModel:
     base_url=get_docker_safe_url(model_info.base_url)
     logging.debug(f"api_key:{api_key[:10]}... (hidden)")
 
-    if provider in ["openai","deepseek","aliyun","SenseNova"]:
+    if provider in ["openai","deepseek","aliyun","SenseNova","TingFeng-Model"]:
         model_spec=f"{provider}:{model}"
         logging.debug(f"[offical]Loading model {model_spec} with kwargs {kwargs}")
         

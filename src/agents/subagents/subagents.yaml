@@ -53,7 +53,7 @@ pre_purchase:
     做专业取舍并提示风险，最终交付一组可直接展示的推荐候选。
     当用户要挑选、对比、比价或询问"值不值得买"时调用。
 
-  model: "SenseNova/sensenova-6.8-flash-lite"
+  model: "TingFeng-Model/deepseek-v4-flash"
 
   tools:
     # ── 纯本地工具（不依赖外部数据源）──
@@ -244,7 +244,7 @@ post_purchase:
     设置提醒并做使用复盘，为当前决策提炼真正有指导价值的个性化参数。
     当需要了解用户偏好、个性化推荐、或记录本次对话产生的新偏好时调用。
 
-  model: "SenseNova/sensenova-6.8-flash-lite"
+  model: "TingFeng-Model/deepseek-v4-flash"
 
   tools:
     - get_user_shopping_context
