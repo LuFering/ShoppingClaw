@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import logging
 from typing import Any
 
@@ -180,37 +181,138 @@ def _parse_jsonish(raw: Any) -> Any:
 # 于是「读档案」永远读不到东西，界面照样显示「读了 0 条历史」，看着像档案本来
 # 就是空的。我们是调用方，本来就该给出「这是谁」。
 
-async def read_history(state: dict) -> list[dict]:
-    """读与「送某人」相关的历史决策记录。读不到返回空列表（不编造）。"""
-    recipient = str(state.get("recipient") or "").strip()
-    if not recipient:
-        return []
+# ══════════════════════════════════════════════════════════════════════
+# 工具返回的是 **markdown 文本**，不是 JSON —— 必须按文本解析
+# ══════════════════════════════════════════════════════════════════════
+# 2026-09-27：这是「档案永远读不到东西」的真正根因。
+#
+# `get_user_shopping_context` 返回的是：
+#
+#     ### 用户综合购物上下文
+#     **1. 长期偏好**: {'brand_preference': '华为', 'gift_recipient': '妈妈', ...}
+#     **2. 最近5条历史决策**: 暂无数据
+#     ...
+#
+# 而这里原先用 `_parse_jsonish` 直接 `json.loads` —— 那段文本不是合法 JSON，
+# 于是返回 None，`data.get("preferences")` 拿不到东西，**偏好永远是空列表**。
+# 实测一次 run：understand 节点 63ms 就跑完，证据写着「读了 0 条历史、
+# 0 条偏好」，而用户的 preferences 里白纸黑字写着「妈妈 / 生日礼物 / 预算 1500」。
+#
+# 所以这里按 markdown 的实际形状解析：找 `**N. 长期偏好**: ` 之后的那个
+# Python 字面量（注意工具用的是 `str(dict)`，是**单引号**的 Python repr，
+# 不是 JSON），用 ast.literal_eval 读它。
+def _extract_prefs_dict(text: Any) -> dict:
+    """从工具返回的 markdown 里抠出「长期偏好」那个字典。
+
+    返回 {} 表示没抠到 —— 调用方据此如实显示「暂无记录」，不编造。
+    """
+    if not isinstance(text, str) or not text:
+        return {}
+    # 定位「长期偏好」那一行
+    m = re.search(r"长期偏好\*\*[:：]\s*(\{.*?\})\s*(?:\n|$)", text, re.S)
+    if not m:
+        return {}
+    raw = m.group(1).strip()
+    # 工具用的是 str(dict)（Python repr，单引号），优先 literal_eval；
+    # 万一将来改成 JSON 也能接住。
     try:
-        recall = await _builtin_tool("recall_past_decisions")
-        if recall is None:
-            return []
-        raw = await _call(recall, {"user_id": str(state.get("user_id") or ""),
-                                   "topic": recipient}, RAG_TIMEOUT)
-        data = _parse_jsonish(raw)
-        return data[:5] if isinstance(data, list) else []
+        import ast
+        val = ast.literal_eval(raw)
+        return val if isinstance(val, dict) else {}
+    except (ValueError, SyntaxError):
+        try:
+            val = json.loads(raw)
+            return val if isinstance(val, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+
+async def read_history(state: dict) -> list[dict]:
+    """读与「送某人」相关的历史决策记录。
+
+    ═══════════════════════════════════════════════════════════════════
+    2026-09-27：改读 `shopping_decisions` 表 —— 原先那个工具查错了地方
+    ═══════════════════════════════════════════════════════════════════
+    原先走 `recall_past_decisions`，而那个工具查的是
+    `users.config_json.history` —— **那是个从没被写入过的字段**
+    （实测用户 7 的 config_json 里只有 `preferences` 一个键）。
+    真正的历史决策在 `shopping_decisions` 表里（同一用户有 10 条）。
+    于是这个函数永远返回空，界面显示「读了 0 条历史」，看着像档案本来就是空的。
+
+    这里直接查表 —— 与 `archive_tools._load_record` 同一张表、同一个
+    归属口径（`user_id` 是 String(64)，与其它表一致）。
+
+    匹配策略：先按收礼人/场合做**宽松**过滤（记录名里含「妈妈」等），
+    取不到就返回**最近的几条**而不是空 —— 「送过什么」本身就是有用的
+    上下文，不该因为名字对不上就当作没有。仍取不到才是真的空。
+    """
+    uid = str(state.get("user_id") or "")
+    if not uid:
+        return []
+    recipient = str(state.get("recipient") or "").strip()
+    occasion = str(state.get("occasion") or "").strip()
+    try:
+        from sqlalchemy import desc, select
+
+        from src.storage.postgres.manager import pg_manager
+        from src.storage.postgres.models_business import ShoppingDecision
+
+        async with pg_manager.get_async_session_context() as session:
+            r = await session.execute(
+                select(ShoppingDecision)
+                .where(ShoppingDecision.user_id == uid)
+                .order_by(desc(ShoppingDecision.created_at))
+                .limit(20)
+            )
+            rows = list(r.scalars().all())
     except Exception as e:
         logger.warning(f"[gift] 读历史失败（按无档案继续）: {e}")
         return []
 
+    def _blob(row) -> str:
+        d = row.data or {}
+        # 记录里可能叫 target / title / aiRecommend，全拼起来做匹配
+        return " ".join(str(d.get(k) or "") for k in
+                        ("target", "title", "aiRecommend", "forWhom", "scenario"))
+
+    # 先挑与收礼人/场合沾边的
+    hits = [row for row in rows
+            if recipient and recipient in _blob(row)]
+    if not hits and occasion:
+        hits = [row for row in rows if occasion in _blob(row)]
+    # 都没沾上就用最近的几条兜底 —— 「送过什么」比「什么都没读过」有用
+    picked = hits[:5] if hits else rows[:3]
+
+    out = []
+    for row in picked:
+        d = row.data or {}
+        out.append({
+            "target": d.get("target") or d.get("title") or "",
+            "phase": row.phase,
+            "for_whom": d.get("forWhom") or "",
+            "summary": d.get("aiSummary") or "",
+            "recommend": d.get("aiRecommend") or "",
+        })
+    return [x for x in out if x["target"] or x["recommend"]]
+
 
 async def read_preferences(state: dict) -> list[Any]:
-    """读该用户的长期偏好。读不到返回空列表（不编造）。"""
+    """读该用户的长期偏好。
+
+    ⚠️ 工具返回的是 **markdown 文本**而不是 JSON —— 原先用 `_parse_jsonish`
+    解析必然得到 None（见 `_extract_prefs_dict` 的说明）。这里按文本形状抠。
+    抠不到返回空列表 —— 调用方如实显示「暂无记录」，不编造。
+    """
     try:
         ctx = await _builtin_tool("get_user_shopping_context")
         if ctx is None:
             return []
         raw = await _call(ctx, {"user_id": str(state.get("user_id") or "")}, RAG_TIMEOUT)
-        data = _parse_jsonish(raw)
-        if isinstance(data, dict):
-            prefs = data.get("preferences") or data.get("long_term_preferences") or []
-            if isinstance(prefs, list):
-                return prefs[:8]
-        return []
+        prefs = _extract_prefs_dict(raw)
+        if not prefs:
+            return []
+        # 归一成 [{key, value}]，与 build_profile 里读 prefs 的形状一致
+        return [{"key": str(k), "value": str(v)} for k, v in prefs.items()][:12]
     except Exception as e:
         logger.warning(f"[gift] 读偏好失败（按无档案继续）: {e}")
         return []
@@ -287,21 +389,83 @@ def build_profile(state: dict, ctx: dict, only: tuple[str, ...] | None = None) -
     })
 
     # ③ 已知喜好 —— 真取用户偏好
+    #
+    # ⚠️ 偏好里混着**与本次送礼无关**的键（实测用户 7 的档案里有
+    # `laptop_max_budget` / `headphone_anc_required` 等）。全铺出来会变成
+    # 一堆读不懂的字段名，用户看不到「这个人的喜好」。
+    # 所以先按两类挑：与送礼/收礼人直接相关的优先，其余作补充。
+    # 挑不到就如实说没有 —— 不硬凑。
+    # ═══════════════════════════════════════════════════════════════════
+    # ⚠️ 只收**关于收礼人**的偏好，不收「用户自己的采购偏好」
+    # ═══════════════════════════════════════════════════════════════════
+    # 档案里的键分两类，混在一起会得出荒谬结论：
+    #   gift_*            关于这次送礼 / 收礼人  → 可以当「她的喜好」
+    #   laptop_* / headphone_* / brand_preference  用户**自己要买**的东西
+    #
+    # 实测踩过：把 `laptop_size_preference: 16英寸`、`brand_preference: 华为`
+    # 铺进「已知喜好」，模型据此归纳出「妈妈喜好华为16英寸笔记本，本次生日
+    # 应送华为16英寸笔记本」—— 那是**用户自己要买笔记本**，与人无关。
+    # 送礼场景搞错对象比信息少更糟。
+    RELEVANT = ("gift", "recipient", "mom", "dad", "occasion")
+    # 明确属于「用户自用」的键前缀 —— 命中就排除，不进收礼人档案
+    # 实测用户 7 的 12 条偏好**全部**是这一类（华为/16英寸/MateBook D16/
+    # 预算 6000），没有一条关于收礼人 —— 所以他的「已知喜好」就该显示
+    # 「暂无记录」。让它显示「笔记本电脑」同样是错的：那依然是**用户自己**
+    # 要买的笔记本，不是妈妈喜欢笔记本。
+    SELF_USE = ("laptop", "headphone", "phone", "computer", "car", "self",
+                "brand_preference", "max_budget", "use_scenario",
+                "category_interest", "chosen_model", "size_preference")
     if prefs:
-        texts = []
-        for p in prefs[:3]:
+        def _kv(p):
             if isinstance(p, dict):
-                texts.append(str(p.get("value") or p.get("key") or ""))
-            else:
-                texts.append(str(p))
-        text = " · ".join([t for t in texts if t])
+                return str(p.get("key") or ""), str(p.get("value") or "")
+            return "", str(p)
+
+        pairs = [_kv(p) for p in prefs if _kv(p)[1]]
+        # ⚠️ 筛掉**纯数值**的项：`max_budget: 1500` 这类是预算约束，不是喜好。
+        # 实测第一版把它们排在最前，结果是「已知喜好：1500 · 6000」—— 两个
+        # 数字，读不出任何关于这个人的信息。预算该出现在别处（入口参数里
+        # 本来就有），不该冒充喜好。
+        def _numeric(v: str) -> bool:
+            return bool(re.fullmatch(r"[\d\s.,¥￥]+", v.strip()))
+
+        def _is_self_use(k: str) -> bool:
+            kl = k.lower()
+            return any(t in kl for t in SELF_USE)
+
+        def _score(kv):
+            k, v = kv
+            kl = k.lower()
+            s = 0
+            if any(t in kl for t in RELEVANT):
+                s -= 4          # 关于收礼人/送礼 → 最优先
+            if _is_self_use(k):
+                s += 6          # 用户自用 → 排除级（见上面说明）
+            if _numeric(v):
+                s += 3          # 纯数字多半是预算/规格
+            if len(v) <= 2:
+                s += 1
+            return s
+
+        # 自用类直接剔除，不与收礼人信息混排
+        pairs = [(k, v) for k, v in pairs if not _is_self_use(k)]
+        chosen = sorted(pairs, key=_score)[:4]
+        # 只显示**值**，不显示键名：键名是机器名（`gift_for_mom_budget_max`），
+        # 原样铺出来只是一串读不懂的字段，用户看不到「这个人的喜好」。
+        # dict.fromkeys 去重但保序 —— 档案里常有同义重复（实测有
+        # `use_scenario` 与 `laptop_use_scenario` 值相同）。
+        texts = [v for _k, v in chosen if v]
+        text = " · ".join(dict.fromkeys(texts))
+        # ⚠️ state 跟着**内容**走：筛完为空时不能还标 confirmed ——
+        # 「已确认」与「暂无记录」并列是自相矛盾，而且会让完整度虚高
+        #（build_profile_head 按 confirmed 计数）。
         groups.append({
             "key": "likes",
             "label": PROFILE_LABELS["likes"],
             "icon": PROFILE_ICONS["likes"],
             "text": text or "暂无记录",
-            "state": "confirmed",
-            "source": "购物档案 · 偏好记录",
+            "state": "confirmed" if text else "pending",
+            "source": "购物档案 · 偏好记录" if text else "档案里没有关于这位收礼人的偏好",
         })
     else:
         groups.append({
