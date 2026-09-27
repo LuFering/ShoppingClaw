@@ -556,6 +556,42 @@ async def advance(run_id: str, user_id: str) -> None:
         finally:
             await pump.close()
 
+        # ═══════════════════════════════════════════════════════════════
+        # 收尾前校验：模型**真的做出决定了吗**
+        # ═══════════════════════════════════════════════════════════════
+        # 2026-09-27：实测一次「装修 / 6万」的 run，模型搜了 42 件候选、
+        # 排掉 4 件，然后 `astream` 就**正常结束了** —— 它从没调用
+        # `make_decision`。而 `create_agent` 的循环「没有 tool_calls 就走向
+        # END」是**正常路径**，不是异常，所以 advance 一路走到收尾，
+        # 把空结果标成了 `converged`，报告上写着「本次未选出合适的商品」。
+        #
+        # 那是**静默失败**：用户看到的是一份"成功"的报告，只是里面没有结论。
+        #
+        # 判据用 `acc.plan.items` 而不是「有没有 tool_calls」：模型可能调了
+        # make_decision 但名字对不上候选（工具会如实回报未生效），那种情况
+        # 同样没有可交付的结论，也该续推。
+        #
+        # 复现验证：把那条 run 的历史原样喂回 agent，它会继续排除、搜索、
+        # 最后调 ask_user —— 说明模型与历史都没坏，是那一轮模型调用被吞了
+        # （上游限流/超时）。
+        for attempt in range(MAX_DECISION_RETRIES):
+            if _has_decision(acc):
+                break
+            logger.warning(
+                "[planning] run %s 第 %d 次收尾校验：模型未做出决定（候选 %d 件），"
+                "喂回历史让它继续", run_id, attempt + 1, len(acc.get("candidates") or [])
+            )
+            await emit(run_id, "think", {
+                "title": "模型未给出结论，正在继续",
+                "detail": "上游可能限流或超时，正在把上下文接回去让它接着推演",
+                "by": "rule",
+            })
+            cont = await _continue_for_decision(run_id, user_id, history, acc, state, phases)
+            if cont == "awaiting":
+                # 它选择先问用户 —— 这是有效推进，直接停下等拍板
+                await _persist_history(run_id, history)
+                return
+
         # 收尾前把产物落库 + 最后一次重建图 —— `_finish` 生成交付物时要读它，
         # 界面也要看到「最终选中的那件」被标成 selected（而不是停在候选态）
         # 关掉最后一个阶段 —— 它后面没有「下一个阶段」来触发收尾
@@ -563,6 +599,19 @@ async def advance(run_id: str, user_id: str) -> None:
         await _persist_history(run_id, history)
         await _persist_products(run_id, acc)
         await _sync_graph(run_id, acc, state)
+
+        if not _has_decision(acc):
+            # 续推也没结果 —— **如实失败**，不产出「成功但没结论」的报告
+            reason = (
+                "模型在完成检索后没有给出采购结论（可能上游限流或超时）。"
+                "候选已搜到 %d 件，可在入口页重新发起或稍后重试。" % len(acc.get("candidates") or [])
+            )
+            logger.error("[planning] run %s 续推 %d 次仍无决定，标为失败",
+                         run_id, MAX_DECISION_RETRIES)
+            await _patch_run(run_id, status="failed", error=reason)
+            await emit(run_id, "done", {"status": "failed", "error": reason[:120]})
+            return
+
         await _finish(run_id, user_id)
 
     except Exception as e:
@@ -574,6 +623,91 @@ async def advance(run_id: str, user_id: str) -> None:
             pass
         await _patch_run(run_id, status="failed", error=str(e)[:500])
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
+
+
+# 收尾校验最多续推几次。
+# 2 次是权衡：一次多半能救回来（上游限流是瞬时的），再多就是反复撞同一堵墙
+# —— 而且每次都要跑完整轮模型调用，用户等不起。
+MAX_DECISION_RETRIES = 2
+
+
+def _has_decision(acc: dict) -> bool:
+    """这次推演**真的做出了决定**吗。
+
+    判据是 `plan.items` 非空，而不是「有没有调过 make_decision」：
+
+    ⚠️ 两者会不一致，而且以后者为准是错的。模型可能调了 make_decision，
+    但给的商品名与候选对不上 —— 工具那时会如实回「没找到，请用原名」
+    且**不写 plan**。这种情况下同样没有可交付的结论，也该续推。
+    所以看结果（有没有定下东西），不看过程（有没有调那个工具）。
+    """
+    plan = acc.get("plan") or {}
+    return bool([i for i in (plan.get("items") or []) if isinstance(i, dict)])
+
+
+async def _continue_for_decision(run_id: str, user_id: str, history: list[dict],
+                                 acc: dict, state: dict, phases: dict) -> str:
+    """把历史接回去，让模型继续走完（直到它做出决定或提问）。
+
+    返回 `"awaiting"` 表示它选择先问用户（这时该停下等拍板，不该算失败）。
+
+    ═══════════════════════════════════════════════════════════════════
+    为什么是「接回历史再跑一轮」而不是「单独问它选哪个」
+    ═══════════════════════════════════════════════════════════════════
+    最省事的做法是构造一句话「请从这些候选里选一件并调 make_decision」。
+    但那等于把编排权拿回代码手里 —— 而这整个 agent 的设计前提是**走法由
+    模型定**（它可能想再补搜一个品类、或者想先问用户）。给它完整上下文，
+    它自己会接着判断，正如实测复现里它接着排除了 3 件、又补搜了一轮。
+
+    `acc` 传进去而不是从 run 读：此刻还没落库（落库在收尾那一步），
+    读库会拿到上一轮的旧产物。
+    """
+    run = await get_run(run_id, user_id)
+    if run is None:
+        return "gone"
+
+    from src.agents.independent.planning.graph import get_planning_agent
+
+    agent = get_planning_agent()
+    # 把「轮到你了」明说一句：上一轮是以 tool 消息结尾的，
+    # 模型收到的上下文里没有新的用户输入。补一句能让它明确知道要继续
+    # （也是给上游一个非空的收尾回合）。
+    resume = list(history) + [{
+        "role": "user",
+        "content": "请继续。如果信息已经足够，就定下最终要买的商品；"
+                   "如果还需要我拍板，就向我提问。",
+    }]
+    init = {"messages": resume, **state, **_seed_acc(run)}
+    # 用 acc 里更新的产物覆盖 _seed_acc（它读的是库里的旧值）
+    init["candidates"] = acc.get("candidates") or init.get("candidates") or []
+    init["excluded"] = acc.get("excluded") or init.get("excluded") or []
+    init["plan"] = acc.get("plan") or {}
+
+    stop = None
+    try:
+        async for mode, chunk in agent.astream(init, stream_mode=["updates"]):
+            if mode != "updates":
+                continue
+            _collect_messages(chunk, history)
+            # pump 传 None：`_on_agent_step` 的签名里虽然有它，但函数体
+            # 从不使用（那是早期版本的残留）。续推这一轮也不播流式文字 ——
+            # 它发生在收尾校验里，用户此刻看到的是「正在继续」那条事件。
+            got = await _on_agent_step(run_id, chunk, set(), None,
+                                       acc, state, phases)
+            if got:
+                stop = got
+                break
+    except Exception as e:
+        # 续推失败不该让整条 run 崩 —— 调用方会按「仍无决定」如实收尾
+        logger.warning("[planning] run %s 续推失败（忽略）: %s", run_id, e)
+        return "failed"
+
+    if stop:
+        await _close_all_phases(run_id, phases)
+        await _patch_run(run_id, status="awaiting", question=stop)
+        await emit(run_id, "question", stop)
+        return "awaiting"
+    return "ok"
 
 
 def _merge_plan(old: dict | None, new: dict | None) -> dict:
