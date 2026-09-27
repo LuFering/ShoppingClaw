@@ -1,9 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader
-      title="智能体管理"
-      desc="配置购物决策智能体的名称、模型、提示与可用数据源；启用的智能体可被对话页选择"
-    >
+    <PageHeader title="智能体管理">
       <template #stats>
         <span class="stat-pill">共 <b>{{ agents.length }}</b> 个</span>
         <span class="stat-pill">启用 <b>{{ enabledCount }}</b></span>

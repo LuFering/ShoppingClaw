@@ -1,10 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader
-      title="代购送礼"
-      desc="读收礼人的真实偏好，组合成一份每处取舍都说得清的礼物"
-    >
-      <template #mark>礼</template>
+    <PageHeader title="代购送礼">
       <template #stats>
         <span class="stat-pill">进行中 <b>{{ runningCount }}</b> 个</span>
       </template>
@@ -185,12 +181,8 @@ const begin = async () => {
 
 <style lang="less" scoped>
 /* 布局交给全局 .page。这里只保留送礼页特有的样式。
-   印章走 PageHeader 的 #mark 插槽；这里只覆盖它的配色 ——
-   送礼用暖金主色，与采购的 emerald 区分身份。 */
-.page {
-  --mark-bg: var(--gift-accent-soft);
-  --mark-fg: var(--gift-accent);
-}
+   ⚠️ 印章（--mark-bg/--mark-fg）已随 2026-09-28 的页头极简化一并去掉：
+   全站页头现在只有「标题 + 统计胶囊」，没有印章元素了。 */
 
 /* 两栏：左表单 / 右说明。窄屏堆叠 */
 .gf-grid {

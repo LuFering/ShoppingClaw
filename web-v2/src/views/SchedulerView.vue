@@ -1,9 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader
-      title="定时任务"
-      desc="按计划执行监控与 AI 汇总，命中结果写入运行日志（数据对接 /api/tasks）"
-    >
+    <PageHeader title="定时任务">
       <template #stats>
         <span class="stat-pill">启用 <b>{{ enabledCount }}</b></span>
         <span class="stat-pill">共 <b>{{ moduleTasks.length }}</b> 个</span>

@@ -1,10 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader
-      title="采购规划"
-      desc="把组合采购拆成清单、排出顺序，取舍过程留在决策图上可回看"
-    >
-      <template #mark>采</template>
+    <PageHeader title="采购规划">
       <template #stats>
         <span class="stat-pill">进行中 <b>{{ runningCount }}</b> 个</span>
         <span v-if="awaitingCount" class="stat-pill">待你确认 <b>{{ awaitingCount }}</b> 个</span>
@@ -302,7 +298,7 @@ const startFromPreset = (preset) => {
 /* 布局交给全局 .page（page.less）。本文件只保留采购页特有的样式。
    刻意不再自绘 max-width / margin:auto —— 那会让内容左边界与全站其它页
    差出三百多像素（实测 405 vs 82）。
-   印章已移入 PageHeader 的 #mark 插槽，本文件不再需要身份带样式。 */
+   印章与描述行已随 2026-09-28 的页头极简化去掉（全站只有标题 + 统计胶囊）。 */
 
 /* 表单 */
 .pe-form {

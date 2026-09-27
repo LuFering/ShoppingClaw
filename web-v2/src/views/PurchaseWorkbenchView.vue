@@ -8,8 +8,7 @@
       设计齐平」）。现在直接复用 PageHeader —— 它是全站统一的那一层，
       印章配色走 --mark-bg/--mark-fg，采购沿用站点主色。
     -->
-    <PageHeader title="采办 · 采购规划" :desc="taskLabel || '采购规划任务'">
-      <template #mark>采</template>
+    <PageHeader title="采购规划">
       <template #stats>
         <span class="stat-pill" :class="`is-${runStatus}`">{{ STATUS_LABEL[runStatus] || runStatus }}</span>
         <span v-if="deliveredAt" class="stat-pill is-done">已交付</span>

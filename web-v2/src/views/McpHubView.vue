@@ -1,9 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader
-      title="MCP 连接"
-      desc="注册数据源 MCP 交由后端加载，agent 据此获得搜索、比价、券、库存等工具"
-    >
+    <PageHeader title="MCP 连接">
       <template #stats>
         <span v-if="demoStatus.mcp" class="stat-pill">演示数据 · 等待 /api/mcp/servers</span>
       </template>

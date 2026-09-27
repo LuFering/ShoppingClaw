@@ -1,27 +1,26 @@
 <template>
   <div class="wb" :data-settled="settled ? '1' : '0'">
-    <header class="wb__bar">
-      <span class="wb__sig">礼</span>
-      <div class="wb__task">
-        <p class="wb__who">
-          送给 {{ task.recipient || '—' }} · {{ task.occasion || '—' }} · 预算
-          <span class="mono">¥{{ task.budget || '—' }}</span>
-        </p>
-        <p class="wb__sub">推演过程与每处取舍</p>
-      </div>
-
-      <span class="wb__state" :class="{ 'is-live': running }">
-        <i class="wb__dot" />{{ running ? '推演中' : settled ? '已收敛' : '待开始' }}
-      </span>
-
-      <button
-        class="wb__again"
-        type="button"
-        :disabled="!settled || saving || saved"
-        @click="saveToArchive"
-      >{{ saved ? '已存入档案' : '存入档案' }}</button>
-      <button class="wb__again" type="button" @click="router.push('/proxy/new')">重来</button>
-    </header>
+    <!--
+      页头：与全站 PageHeader 对齐（极简式 —— 标题 + 统计胶囊）。
+      ⚠️ 原先这里是自绘的 `.wb__sig` + `.wb__who` + `.wb__sub` 三件套，
+      与采购工作台当年一样对不齐：印章尺寸、标题字号、副标题行距各写一套。
+      现在直接复用 PageHeader。
+      任务信息（送给谁/场合/预算）不再重复 —— 中栏卡片顶部已有。
+    -->
+    <PageHeader title="代购送礼">
+      <template #stats>
+        <span class="stat-pill" :class="`is-${runState}`">{{ stateLabel }}</span>
+      </template>
+      <template #actions>
+        <button
+          class="wb__again"
+          type="button"
+          :disabled="!settled || saving || saved"
+          @click="saveToArchive"
+        >{{ saved ? '已存入档案' : '存入档案' }}</button>
+        <button class="wb__again" type="button" @click="router.push('/proxy/new')">重来</button>
+      </template>
+    </PageHeader>
 
     <div class="wb__body">
       <!-- 没有 run id：直接访问 /proxy，如实提示回入口，不编一个假任务 -->
@@ -113,6 +112,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
+import PageHeader from '@/components/PageHeader.vue'
 import StageExecStream from '@/components/common/StageExecStream.vue'
 import ProfileCard from '@/components/gift/ProfileCard.vue'
 import DeliverPanel from '@/components/gift/DeliverPanel.vue'
@@ -191,6 +191,20 @@ const finishInfo = computed(() => {
 
 /** 建 run 的时刻：一条事件都还没来时，「正在思考」的秒数从它算起 */
 const runStartedAt = ref(new Date().toISOString())
+
+/**
+ * 顶栏那个状态胶囊。
+ *
+ * ⚠️ class 用 `is-running` / `is-done` / `is-todo`，与采购工作台的
+ * `` :class="`is-${runStatus}`" `` 同一套命名 —— 两个工作台的页头观感
+ * 必须一致（用户就是拿它们互相对比的）。文案另算，所以不直接复用 runStatus。
+ */
+const runState = computed(() =>
+  running.value ? 'running' : settled.value ? 'done' : 'todo'
+)
+const stateLabel = computed(() =>
+  running.value ? '推演中' : settled.value ? '已收敛' : '待开始'
+)
 
 const toast = ref('')
 let toastTimer = 0
@@ -297,69 +311,9 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* ---- 顶栏：任务抬头 ---- */
-.wb__bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 11px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-surface);
-}
-.wb__sig {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--gift-accent-soft);
-  color: var(--gift-accent);
-  font-size: 0.78rem;
-  font-weight: 600;
-  flex: 0 0 auto;
-}
-.wb__task { min-width: 0; }
-.wb__who {
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--text-strong);
-  margin: 0;
-}
-.wb__sub {
-  font-size: 0.7rem;
-  color: var(--text-faint);
-  margin: 1px 0 0;
-}
-
-.wb__state {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  flex: 0 0 auto;
-}
-.wb__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--border-strong);
-}
-.wb__state.is-live { color: var(--gift-accent); }
-.wb__state.is-live .wb__dot {
-  background: var(--gift-accent);
-  animation: wb-pulse 1.2s ease-in-out infinite;
-}
-@keyframes wb-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.25; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .wb__state.is-live .wb__dot { animation: none; }
-}
+/* 页头已改用全站 PageHeader（见模板说明）—— 原先自绘的
+   .wb__bar/.wb__sig/.wb__task/.wb__who/.wb__sub/.wb__state/.wb__dot
+   及其动画已删。那些样式与标准页各写一套，正是「界面不齐平」的来源。 */
 
 .wb__again {
   flex: 0 0 auto;
@@ -382,6 +336,13 @@ onBeforeUnmount(() => {
      中 = 人物档案卡，情感锚点，1.18fr（最宽但只比右栏多 ~18%）
      右 = 交付区，有价格与成段文案，1.0fr
    卡片贴满中栏（max-width 提升到 560），不再留大片死白。 */
+/* PageHeader 默认 margin-bottom 18px（入口页那种纵向排布合适），
+   工作台是满屏三栏、页面本身不滚，收成 12px 免得挤压三栏高度。 */
+.wb :deep(.page-head) {
+  margin-bottom: 12px;
+  padding: 14px 20px 0;
+}
+
 .wb__body {
   flex: 1 1 auto;
   min-height: 0;

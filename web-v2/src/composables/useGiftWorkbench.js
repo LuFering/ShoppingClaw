@@ -339,6 +339,12 @@ export function useGiftWorkbench({ runId } = {}) {
   const loadSnapshot = async () => {
     if (!runId?.value) {
       loading.value = false
+      // ⚠️ 必须把 running 落回 false：`start()` 第一行就置了 true，
+      // 而这里提前 return —— 不复位的话页头会写着「推演中」，
+      // 页面正中却是「还没有开始一次送礼推演」，两处自相矛盾。
+      // （自测截图抓到过。界面不能声称在做一件没发生的事。）
+      running.value = false
+      settled.value = false
       loadError.value = '缺少任务 ID —— 请从入口页开始一次送礼推演。'
       return
     }

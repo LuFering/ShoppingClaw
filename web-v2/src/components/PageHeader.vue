@@ -16,16 +16,22 @@
  */
 defineProps({
   title: { type: String, required: true },
+  /**
+   * @deprecated 不再渲染。
+   *
+   * 2026-09-28 全站页头改极简（对齐「主动助理 / 购物档案」那两页）：
+   * 只留「标题 + 统计胶囊」，印章与描述行都去掉了。
+   * 保留这个 prop 是为了让调用方传参不报错 —— 各页会在同一次改动里
+   * 陆续清掉它，清完即可删掉这里。
+   */
   desc: { type: String, default: '' }
 })
 </script>
 
 <template>
   <header class="page-head">
-    <span v-if="$slots.mark" class="page-mark"><slot name="mark" /></span>
     <div class="page-head-text">
       <h1 class="page-title">{{ title }}</h1>
-      <p v-if="desc" class="page-desc">{{ desc }}</p>
       <div v-if="$slots.stats" class="stat-strip">
         <slot name="stats" />
       </div>
@@ -43,23 +49,9 @@ defineProps({
   gap: 12px;
   margin-bottom: 18px;
 }
-/* 印章：与标题同排，替代原先「抬头 + 身份带」两份标题。
-   配色可由页面通过 --mark-bg / --mark-fg 覆盖 —— 送礼用暖金，
-   采购沿用站点主色，两者身份区分不靠"再画一个章"实现。 */
-.page-mark {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  margin-top: 2px;
-  border-radius: 9px;
-  background: var(--mark-bg, var(--accent-50));
-  color: var(--mark-fg, var(--accent-700));
-  font-size: 0.88rem;
-  font-weight: 600;
-}
+/* ⚠️ 印章（.page-mark）与描述行（.page-desc）的样式已删 ——
+   2026-09-28 全站页头改极简后没有元素再用它们。
+   极简式的参照是「主动助理 / 购物档案」：只有标题 + 统计胶囊。 */
 .page-head-text {
   flex: 1 1 auto;
   min-width: 0;
@@ -71,13 +63,6 @@ defineProps({
   letter-spacing: -0.01em;
   color: var(--text-strong);
   margin: 0;
-}
-.page-desc {
-  font-size: 0.84rem;
-  color: var(--text-muted);
-  margin: 4px 0 0;
-  line-height: 1.6;
-  max-width: 640px;
 }
 .page-head-actions {
   display: flex;
