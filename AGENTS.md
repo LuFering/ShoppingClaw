@@ -34,6 +34,8 @@
 ## 常用命令
 
 ```bash
+python3 scripts/check_eol.py          # 提交前：查有没有文件被误改行尾
+python3 scripts/patchlib.py selftest  # 补丁工具自测
 sudo docker compose -f /home/ubuntu/ShoppingClaw/docker-compose.yml up -d
 sudo docker compose logs -f api
 curl http://127.0.0.1:5050/api/system/health
@@ -56,6 +58,13 @@ sudo docker exec shoppingclaw-api python -c "..."   # 容器内验证（注意 s
 - 涉及对话存储、认证、SSE 协议的改动必须做端到端验证（curl API + 查 PG/Redis），
   不能只看"能 import"。
 - 测试数据用完即清（容器数据库与 Redis 键），不留垃圾。
+- **批量改文件用 `scripts/patchlib.py`，提交前跑 `scripts/check_eol.py`。**
+  本仓库行尾不统一（`src/` 有 356/443 个文件是 CRLF，且无 `.gitattributes`），
+  而 Python 的 `open(p, 'w')` 会把 CRLF 写成 LF —— `git diff` 随即变成
+  **整个文件重写**（实测：3 行改动显示成 1242 行），review 与 blame 全废。
+  这个坑踩过两次。`patchlib.patch()` 按原行尾写回，并强制断言锚点匹配数
+  （防「只想改一处结果改了两处」—— `delivered_at` 误加进 GiftRun 那次
+  就是 `str.replace` 默认全替换造成的）。
 - 每次线上故障修复后：沉淀根因 → 修复 → 验证 → 更新
   `docs/operations/troubleshooting.md`。
 
