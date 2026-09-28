@@ -226,17 +226,24 @@ def _deal_event(task: Any, r: dict, event_type: str) -> dict | None:
 
 
 def _coupon_event(task: Any, r: dict, event_type: str) -> dict | None:
-    """优惠券：只报异常大额券，且取面额最高的那张。"""
-    alerts = r.get("alerts") or []
-    if not alerts:
+    """优惠券：报面额最大的那张。
+
+    ⚠️ 2026-09-29 跟着执行器改：不再读 `alerts` / `after_coupon` ——
+    前者是「差价 > 半价」的假告警（10/10 恒命中），后者是双重扣减
+    （final_promotion_price 已是到手价，再减一次归零）。
+    现在读执行器新给的 `top_coupons`（真券，面额从「满X减Y」解析）。
+    """
+    tops = r.get("top_coupons") or []
+    if not tops:
         return None
-    best = max(alerts, key=lambda x: x.get("coupon_amount") or 0)
-    amount = _money(best.get("coupon_amount"))
-    after = _money(best.get("after_coupon"))
+    best = max(tops, key=lambda x: x.get("coupon_face") or 0)
+    amount = _money(best.get("coupon_face"))
+    kind = str(best.get("coupon_kind") or "券")
     return _mk(
         event_type=event_type,
-        main=f"发现 {amount} 券：{str(best.get('title') or '')[:32]}",
-        sub=f"券后 {after}" if after else str(r.get("keyword") or ""),
+        main=f"发现 {amount} {kind}：{str(best.get('title') or '')[:30]}",
+        # 到手价已含该券 —— 不报「券后价」，那会误导（实测归零）
+        sub=str(best.get("coupon_desc") or r.get("keyword") or ""),
         task=task,
     )
 
