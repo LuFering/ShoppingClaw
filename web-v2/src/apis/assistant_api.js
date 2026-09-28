@@ -1,7 +1,7 @@
 /** 主动助理 API —— 已接真实后端（2026-09-23 P1/P2；2026-09-24 补 watching）
 
 契约（后端已实现，见 server/routers/assistant_router.py）：
-  GET  /api/assistant/overview → {success, data:{messages, brief, feed, todos, watching}}
+  GET  /api/assistant/overview → {success, data:{messages, brief, feed, todos, watching, inflight}}
   POST /api/assistant/messages → {success, data:{reply, created}}
 
 历史：本文件原先是「契约先行 + 内置演示数据」形态 —— 两个端点都是 404，
@@ -20,7 +20,8 @@ const EMPTY = {
   brief: { stats: { hits: 0, drafts: 0, watching: 0 }, points: [] },
   feed: [],
   todos: [],
-  watching: []
+  watching: [],
+  inflight: []
 }
 
 // 结构守卫：后端任何一个子块聚合失败都会返回空的那块，
@@ -42,7 +43,10 @@ const normalize = (d) => {
     feed: Array.isArray(src.feed) ? src.feed : [],
     todos: Array.isArray(src.todos) ? src.todos : [],
     // 在盯的监控任务（右栏「监控任务」tab，U2）
-    watching: Array.isArray(src.watching) ? src.watching : []
+    watching: Array.isArray(src.watching) ? src.watching : [],
+    // 「进行中」tab：跨域汇总正在跑/刚跑完的事
+    // （采购/送礼 run + 最近有命中的监控 + 近 7 天更新过的档案）
+    inflight: Array.isArray(src.inflight) ? src.inflight : []
   }
 }
 

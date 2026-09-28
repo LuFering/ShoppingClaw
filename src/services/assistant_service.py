@@ -74,7 +74,27 @@ def _is_today(dt: datetime | None, day_start_utc: datetime) -> bool:
     return dt >= day_start_utc
 
 
+def _as_dt(dt) -> datetime | None:
+    """ISO 字符串 / datetime / None → datetime（带 UTC tz）。
+
+    ⚠️ `list_runs` 返回的是 `to_dict()`，时间字段是 **ISO 字符串**；
+    而本文件里几个时间函数原先只认 datetime，直接 `.tzinfo` 会崩
+    （实测 `'str' object has no attribute 'tzinfo'`，导致两个 run 域全空）。
+    """
+    if not dt:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    if isinstance(dt, datetime):
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
 def _rel_time(dt: datetime | None) -> str:
+    dt = _as_dt(dt)
     if not dt:
         return ""
     if dt.tzinfo is None:
@@ -300,6 +320,236 @@ async def build_watching(user_id: str) -> list[dict]:
         return out
 
 
+# ══════════════════════════════════════════════════════════
+# 进行中：跨域汇总「正在跑 / 刚跑完」的事
+# ══════════════════════════════════════════════════════════
+# 每个域一组「状态 → 中文」，收成一处 —— 散着写必然漂（这个项目里踩过）。
+_RUN_STATUS_LABEL = {
+    "running": "进行中",
+    "awaiting": "待你拍板",
+    "converged": "已收敛",
+    "failed": "失败",
+}
+# 只有这几种算「还在跑」，用于排序与计数（failed 也要露出来，别让用户
+# 以为它还在跑）
+_INFLIGHT_ACTIVE = ("running", "awaiting")
+
+# 档案「近 7 天更新过」的判据 —— 与「待办」tab 的全量视角区分开
+_ARCHIVE_RECENT_DAYS = 7
+
+
+async def build_inflight(user_id: str) -> list[dict]:
+    """跨域汇总「正在跑 / 刚跑完」的事。永不抛异常（失败返回空列表）。
+
+    四个域各自 try/except —— 一个挂了不影响其它（与 build_feed 同原则）。
+    """
+    out: list[dict] = []
+    out += await _inflight_runs(user_id)
+    out += await _inflight_watch_hits(user_id)
+    out += await _inflight_archive(user_id)
+
+    # 排序：还在跑的排前面（用户最可能回去看），同组按时间倒序。
+    # `_at` 是内部排序键，出参前删掉。
+    out.sort(key=lambda x: (0 if x.get("status") in _INFLIGHT_ACTIVE else 1,
+                            -(x.get("_ts") or 0)))
+    for x in out:
+        x.pop("_ts", None)
+    return out
+
+
+async def _inflight_runs(user_id: str) -> list[dict]:
+    """采购规划 + 代购送礼的 run。
+
+    ⚠️ 复用两个服务**已有的** `list_runs`（采购那个还会算好 `summary`），
+    不在这里重查一遍 —— 两处各查各算必然漂。
+    """
+    out: list[dict] = []
+
+    # ── 采购规划 ──
+    try:
+        from src.services import planning_service as ps
+        for r in await ps.list_runs(user_id, limit=10):
+            st = str(r.get("status") or "")
+            # ⚠️ `created_at` 是 `to_dict()` 给的字符串，**比真实时间早 8 小时**
+            # （format_utc_datetime 把 naive UTC 当上海时间转了，见函数注释）。
+            # 这里改用相对时间由 ORM 值算 —— 但 list_runs 只给 dict，
+            # 所以退一步：用它给的时间戳 + 8 小时修正回来。
+            # 详见 _fix_legacy_ts 的说明。
+            summ = r.get("summary") or {}
+            bits = []
+            if r.get("scene"):
+                bits.append(str(r["scene"])[:12])
+            if summ.get("categories"):
+                bits.append(f"{summ['categories']} 个品类")
+            if summ.get("total"):
+                bits.append(f"¥{float(summ['total']):,.0f}")
+            out.append({
+                "id": f"plan-{r.get('id')}",
+                "domain": "planning",
+                "domainLabel": "采购规划",
+                "status": st,
+                "statusLabel": _RUN_STATUS_LABEL.get(st, st or "—"),
+                # fallback 用中性的占位 —— 不能用「采购规划」，那是领域名，
+                # 会渲染成「采购规划 采购规划」（实测）
+                "title": str(r.get("subject") or r.get("scene") or "未命名任务")[:24],
+                "note": " · ".join(bits) or "点击查看",
+                "at": _rel_time_fixed(r.get("created_at")),
+                "route": f"/planning/run?run={r.get('id')}",
+                "_ts": _ts_of(r.get("created_at")) + _LEGACY_TS_SKEW,
+            })
+    except Exception as e:
+        logger.warning(f"[assistant] inflight(planning) 失败: {e}")
+
+    # ── 代购送礼 ──
+    try:
+        from src.services import gift_service as gs
+        for r in await gs.list_runs(user_id, limit=10):
+            st = str(r.get("status") or "")
+            plan = (r.get("products") or {}).get("plan") or {}
+            items = [i for i in (plan.get("items") or []) if isinstance(i, dict)]
+            bits = []
+            if r.get("occasion"):
+                bits.append(str(r["occasion"])[:10])
+            if items:
+                bits.append(f"{len(items)} 件")
+                total = sum(int(i.get("price") or 0) for i in items)
+                if total:
+                    bits.append(f"¥{total:,}")
+            elif r.get("budget"):
+                bits.append(f"预算 ¥{int(r['budget']):,}")
+            out.append({
+                "id": f"gift-{r.get('id')}",
+                "domain": "gift",
+                "domainLabel": "代购送礼",
+                "status": st,
+                "statusLabel": _RUN_STATUS_LABEL.get(st, st or "—"),
+                "title": str(r.get("recipient") or "未命名任务")[:24],
+                "note": " · ".join(bits) or "点击查看",
+                "at": _rel_time_fixed(r.get("created_at")),
+                "route": f"/proxy?run={r.get('id')}",
+                "_ts": _ts_of(r.get("created_at")) + _LEGACY_TS_SKEW,
+            })
+    except Exception as e:
+        logger.warning(f"[assistant] inflight(gift) 失败: {e}")
+
+    return out
+
+
+async def _inflight_watch_hits(user_id: str) -> list[dict]:
+    """监控任务里**最近有命中的**。
+
+    ⚠️ 只取有命中的，不是全部任务 —— 全部清单已经在「监控任务」tab 里了。
+    这里的视角是「最近发生了什么」。
+    """
+    out: list[dict] = []
+    try:
+        async with pg_manager.get_async_session_context() as session:
+            rows = await session.execute(
+                select(TaskExecutionLog, TaskRecord)
+                .join(TaskRecord, TaskRecord.id == TaskExecutionLog.task_id)
+                .where(TaskRecord.user_id == user_id)
+                .order_by(TaskExecutionLog.started_at.desc())
+                .limit(30)
+            )
+            seen: set[str] = set()
+            for log, task in rows.all():
+                if task.id in seen:
+                    continue
+                res = log.result_data if isinstance(log.result_data, dict) else {}
+                if not res.get("triggered"):
+                    continue                    # 没命中就不算「有动静」
+                seen.add(task.id)
+                out.append({
+                    "id": f"watch-{log.id}",
+                    "domain": "watch",
+                    "domainLabel": "监控命中",
+                    "status": "hit",
+                    "statusLabel": "有动静",
+                    "title": str(task.name or "—")[:24],
+                    "note": str(res.get("alert") or _summarize_log(res, None))[:60],
+                    "at": _rel_time(log.started_at),
+                    "route": "/tasks",
+                    "_ts": _ts_of(log.started_at),
+                })
+                if len(out) >= 5:
+                    break
+    except Exception as e:
+        logger.warning(f"[assistant] inflight(watch) 失败: {e}")
+    return out
+
+
+async def _inflight_archive(user_id: str) -> list[dict]:
+    """购物档案里**近 7 天更新过**的。
+
+    ⚠️ 不是全部待办 —— 那个已经在「待办」tab 里。这里只挑最近动过的，
+    讲「AI 刚推进过什么」。
+    """
+    out: list[dict] = []
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_ARCHIVE_RECENT_DAYS)
+        async with pg_manager.get_async_session_context() as session:
+            rows = await session.execute(
+                select(ShoppingDecision)
+                .where(ShoppingDecision.user_id == user_id,
+                       ShoppingDecision.updated_at >= cutoff.replace(tzinfo=None))
+                .order_by(ShoppingDecision.updated_at.desc())
+                .limit(5)
+            )
+            for row in rows.scalars().all():
+                data = row.data or {}
+                out.append({
+                    "id": f"dec-{row.id}",
+                    "domain": "archive",
+                    "domainLabel": "档案进展",
+                    "status": "moved",
+                    "statusLabel": str(row.phase or "已更新"),
+                    "title": str(data.get("target") or "未命名")[:24],
+                    "note": str(data.get("aiSummary") or data.get("note") or "")[:60] or "点击查看",
+                    "at": _rel_time(getattr(row, "updated_at", None)),
+                    "route": "/decisions",
+                    "_ts": _ts_of(getattr(row, "updated_at", None)),
+                })
+    except Exception as e:
+        logger.warning(f"[assistant] inflight(archive) 失败: {e}")
+    return out
+
+
+# `to_dict()` 的时间字符串比真实时间早这么多秒。
+#
+# ⚠️ 根因见 `format_utc_datetime` → `ensure_utc`：它把 **naive UTC 值
+# 当成上海时间**再转 UTC，于是每个时间戳都早了 8 小时。
+#
+# 前端按本地时区解析这个串，恰好抵消回去（项目里记过这条
+# 「两个错误互相抵消」）。但后端新增的消费者（本文件）按 UTC 解析，
+# 就会把刚建的 run 显示成「8 小时前」。
+#
+# 不能靠另一个 bug 来抵消。这里显式修正回来 —— 只影响本文件新增的
+# 「进行中」聚合，不动 `format_utc_datetime`（它被全站依赖，
+# 改它会同时影响前端已经抵消过的那些地方，要单独一轮评估）。
+_LEGACY_TS_SKEW = 8 * 3600
+
+
+def _ts_of(dt) -> float:
+    """时间戳（秒），用于排序。取不到返回 0（排最后）。"""
+    d = _as_dt(dt)
+    return d.timestamp() if d else 0.0
+
+
+def _rel_time_fixed(dt) -> str:
+    """相对时间 —— 对 `to_dict()` 的字符串做时区修正后再算。
+
+    ⚠️ 只用于本文件新增的「进行中」聚合（它读的是 `list_runs` 的 dict）。
+    传 datetime（如 ORM 的 naive 值）时不做修正 —— 那本来就是对的时间。
+    """
+    if isinstance(dt, str):
+        d = _as_dt(dt)
+        if d is None:
+            return ""
+        d = d + timedelta(seconds=_LEGACY_TS_SKEW)
+        return _rel_time(d)
+    return _rel_time(dt)
+
+
 def _describe_target(task_type: Any, params: dict) -> str:
     """监控对象 → 一行文案（与 task_api.js 的 describeTarget 同口径）。"""
     tt = str(task_type or "")
@@ -488,12 +738,16 @@ async def get_overview(user_id: str) -> dict:
     watching = await build_watching(user_id)
     brief = await build_brief(user_id, feed, todos)
     messages = build_messages(brief, feed, todos)
+    inflight = await build_inflight(user_id)
     return {
         "messages": messages,
         "brief": brief,
         "feed": feed,
         "todos": todos,
         "watching": watching,
+        # 「进行中」tab：跨域汇总正在跑/刚跑完的事（采购/送礼 run +
+        # 最近有命中的监控 + 近 7 天更新过的档案）
+        "inflight": inflight,
     }
 
 

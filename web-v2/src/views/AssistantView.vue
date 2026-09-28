@@ -154,6 +154,35 @@
         </div>
       </div>
 
+      <!-- 进行中：跨域汇总 -->
+      <div v-else-if="infoTab === 'inflight'" class="info-body">
+        <div v-if="!inflight.length" class="info-empty">
+          <p class="hint-title">现在没有在跑的事</p>
+          <p class="hint-sub">发起一次采购规划或代购送礼，进度会出现在这里。</p>
+        </div>
+        <div
+          v-for="it in inflight"
+          :key="it.id"
+          class="todo-row inflight-row"
+          role="button"
+          tabindex="0"
+          :aria-label="`${it.domainLabel}：${it.title}，${it.statusLabel}，点击打开`"
+          @click="openInflight(it)"
+          @keydown.enter.prevent="openInflight(it)"
+        >
+          <span class="state" :class="'rs-' + it.status">
+            <span class="dot" />{{ it.statusLabel }}
+          </span>
+          <div class="todo-main">
+            <p class="todo-title">
+              <span class="inflight-domain">{{ it.domainLabel }}</span>{{ it.title }}
+            </p>
+            <p class="todo-note">{{ it.note }}</p>
+            <p class="inflight-at mono">{{ it.at }}</p>
+          </div>
+        </div>
+      </div>
+
       <!-- 待办 -->
       <div v-else class="info-body">
         <div v-if="!todos.length" class="info-empty">
@@ -218,6 +247,8 @@ const messages = computed(() => [...serverMessages.value, ...localMessages.value
 const briefStats = ref({ hits: 0, drafts: 0, watching: 0 })
 const watching = ref([])
 const todos = ref([])
+// 「进行中」tab：跨域汇总（采购/送礼 run + 最近有命中的监控 + 近 7 天档案）
+const inflight = ref([])
 
 const initState = async ({ silent = false } = {}) => {
   // silent：建完任务后的后台刷新，不该让整页回到骨架屏
@@ -229,6 +260,7 @@ const initState = async ({ silent = false } = {}) => {
     briefStats.value = s.brief.stats
     watching.value = s.watching
     todos.value = s.todos
+    inflight.value = s.inflight || []
   } catch (e) {
     if (!silent) loadError.value = '助理数据加载失败'
   } finally {
@@ -391,8 +423,19 @@ const send = async () => {
 const tabs = computed(() => [
   { key: 'watching', label: '监控任务', count: watching.value.length },
   { key: 'todo', label: '待办', count: todos.value.length },
+  // 「进行中」：跨域视角。与前两个 tab 刻意互补 ——
+  //   前两个是**清单**（我在盯什么 / 我该做什么）
+  //   这个是**最近动态**（正在跑什么 / 刚跑完什么）
+  // 所以监控只取「最近有命中的」、档案只取「近 7 天更新过的」，
+  // 不是把前两个 tab 的内容再列一遍。
+  { key: 'inflight', label: '进行中', count: inflight.value.length },
 ])
 const infoTab = ref('watching')
+
+/** 点「进行中」的条目 → 直达对应工作台（route 由后端给，前端不拼） */
+const openInflight = (it) => {
+  if (it?.route) router.push(it.route)
+}
 </script>
 
 <style lang="less" scoped>
@@ -681,6 +724,36 @@ const infoTab = ref('watching')
 .rs-empty { color: var(--text-faint); font-weight: 400; }
 .rs-fail { color: var(--neg); }
 .rs-run { color: var(--info); }
+/* 「进行中」tab 的状态色 —— 沿用本文件的 `rs-` 前缀（run state）。
+   原先我写的是 `is-*`，与这个文件的约定不符（这里用 rs-* / st-*），
+   会导致状态点全是默认色、看不出区别。 */
+.rs-running { color: var(--info); }
+.rs-awaiting { color: var(--warn); }
+.rs-converged { color: var(--pos); }
+.rs-failed { color: var(--neg); }
+.rs-hit { color: var(--accent-700); }
+.rs-moved { color: var(--text-muted); }
+
+/* 可点的行：给一点悬停反馈，让「能点进去」这件事看得出来 */
+.inflight-row {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease-out;
+  &:hover { background: var(--bg-sunken); }
+}
+/* 领域标签：小字弱色，用来区分「这是采购还是送礼」 */
+.inflight-domain {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg-sunken);
+}
+.inflight-at { margin: 3px 0 0; font-size: 0.68rem; color: var(--text-faint); }
+
 .st-draft { color: var(--info); }
 .st-buy { color: var(--pos); }
 .st-wait { color: var(--text-muted); }
