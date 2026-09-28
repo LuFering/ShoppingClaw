@@ -332,6 +332,17 @@ async def advance(run_id: str, user_id: str) -> None:
             if understanding.get("text"):
                 await emit(run_id, "understanding", understanding)
 
+            # 通知：让「推演跑完了」这件事出现在主页状态卡与助理页。
+            # ⚠️ 通知失败绝不能影响推演 —— 内部已全包，这里再兜一层。
+            try:
+                from src.services import notify_service
+                await notify_service.notify_run_once(
+                    user_id, run_id,
+                    notify_service.from_gift_run(await get_run(run_id, user_id)),
+                )
+            except Exception as e:
+                logger.warning(f"[gift] 发通知失败（忽略）: {e}")
+
         await emit(run_id, "done", {})
 
     except Exception as e:
@@ -341,6 +352,15 @@ async def advance(run_id: str, user_id: str) -> None:
         except Exception:
             pass
         await _patch_run(run_id, status="failed", error=str(e)[:500])
+        # 失败也要告知 —— 用户配了推演却悄悄失败了，比推一条更糟
+        try:
+            from src.services import notify_service
+            await notify_service.notify_run_once(
+                user_id, run_id,
+                notify_service.from_gift_run(await get_run(run_id, user_id)),
+            )
+        except Exception as notify_err:
+            logger.warning(f"[gift] 发失败通知出错（忽略）: {notify_err}")
         await emit(run_id, "done", {})
 
 

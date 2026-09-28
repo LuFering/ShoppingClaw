@@ -1142,6 +1142,9 @@ async def _finish(run_id: str, user_id: str) -> None:
             return
 
         state = _state_from_run(run)
+        # 记下报告那份 doc —— 通知要用它的 headline（件数/总价）。
+        # 复用它而不是另算一遍：两次 build_deliverable 结果可能不一致。
+        report_doc = None
         for a in ARTIFACT_SPEC:
             did, name, meta = a["id"], a["name"], a["meta"]
             await emit(run_id, "deliverable",
@@ -1151,6 +1154,8 @@ async def _finish(run_id: str, user_id: str) -> None:
             except Exception as e:
                 logger.warning(f"[planning] 交付物 {did} 生成失败: {e}")
                 doc = None
+            if did == "d-report":
+                report_doc = doc
             await emit(run_id, "deliverable",
                        {"id": did, "name": name, "meta": meta,
                         "state": "ready" if doc else "empty", "data": doc,
@@ -1163,10 +1168,31 @@ async def _finish(run_id: str, user_id: str) -> None:
 
         await _patch_run(run_id, status="converged")
         await emit(run_id, "done", {"status": "converged"})
+
+        # 通知：让「规划收敛了」出现在主页状态卡与助理页。
+        # ⚠️ 通知失败绝不能影响推演 —— 内部已全包，这里再兜一层。
+        try:
+            from src.services import notify_service
+            await notify_service.notify_run_once(
+                user_id, run_id,
+                notify_service.from_planning_run(
+                    await get_run(run_id, user_id), report_doc),
+            )
+        except Exception as notify_err:
+            logger.warning(f"[planning] 发通知失败（忽略）: {notify_err}")
     except Exception as e:
         logger.error(f"[planning] run {run_id} 收尾失败: {e}", exc_info=True)
         await _patch_run(run_id, status="failed", error=str(e)[:500])
         await emit(run_id, "done", {"status": "failed", "error": str(e)[:200]})
+        # 失败也要告知 —— 悄悄失败比推一条更糟
+        try:
+            from src.services import notify_service
+            await notify_service.notify_run_once(
+                user_id, run_id,
+                notify_service.from_planning_run(await get_run(run_id, user_id)),
+            )
+        except Exception as notify_err:
+            logger.warning(f"[planning] 发失败通知出错（忽略）: {notify_err}")
 
 
 def _state_of(run: PlanningRun) -> dict:

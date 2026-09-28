@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 # ── Redis key 约定 ──
 EVENTS_KEY = "user:{}:events"
 DISMISSED_KEY = "user:{}:events:dismissed"
+# 已通知过的 run id —— 同一个 run 只发一次（见 notify_run_once）
+NOTIFIED_KEY = "user:{}:events:notified"
 
 MAX_EVENTS = 200          # 每个用户最多保留的事件数
 EVENTS_TTL = 7 * 86400    # 7 天，过期自然清理，避免 Redis 无限增长
@@ -165,6 +167,165 @@ def from_task_result(task: Any, result: Any) -> dict | None:
     if alert:
         return _mk(event_type=event_type, main=str(alert)[:60], sub=task_name, task=task)
     return None
+
+
+# ══════════════════════════════════════════════════════════════════
+# 送礼 / 采购 run 的通知
+# ══════════════════════════════════════════════════════════════════
+# 2026-09-29：这两个 agent 跑完原本**不发任何通知** —— `emit()` 的调用方
+# 只有 scheduler_service 一处。用户在主页状态卡与助理页都看不到提示，
+# 而它们恰恰是用户会离开页面等一两分钟的长任务。
+#
+# 事件类型复用已有的（`decide` / `review`），前端不用改 —— 见文件顶部
+# 「不发明新类型」的约定。
+
+async def notify_run_once(user_id: str, run_id: str, event: dict | None) -> bool:
+    """把 run 的结果作为事件发出去，**同一个 run 只发一次**。
+
+    返回是否真的发了（去重命中或 event 为空都返回 False）。
+
+    ⚠️ 为什么需要去重：`advance()` 的正常收尾与 except 分支都可能走到
+    「收敛/失败」，用户重试、`mark_delivered` 也可能再触发同一路径。
+    不去重就是同一件事刷好几条通知。
+
+    用 Redis Set 记录已通知的 run_id，**不新建 PG 表** —— 通知是派生视图
+    不是事实（见文件顶部约束 #1）。TTL 与事件流一致（7 天）。
+    """
+    if not user_id or not run_id or not isinstance(event, dict):
+        return False
+    try:
+        cache = get_redis_cache()
+        if not cache._connected or cache._redis is None:
+            await cache.connect()
+        key = NOTIFIED_KEY.format(user_id)
+        # SADD 返回 1 = 新加入（首次），0 = 已存在（重复）
+        added = await cache._redis.sadd(key, str(run_id))
+        if not added:
+            return False
+        await cache._redis.expire(key, EVENTS_TTL)
+    except Exception as e:
+        # ⚠️ 去重表读不到时**宁可发**（用户看到重复好过什么都没看到），
+        # 但要留痕 —— 静默吞掉会让「为什么发了三条」无从查起。
+        logger.warning(f"[notify] 去重检查失败，仍发送: {e}")
+
+    await emit(user_id, event)
+    return True
+
+
+def _g(run: Any, key: str, default=None):
+    """从 run（ORM 对象或 dict）取字段 —— 两种形状都要支持。"""
+    if run is None:
+        return default
+    if isinstance(run, dict):
+        return run.get(key, default)
+    return getattr(run, key, default)
+
+
+def from_gift_run(run: Any) -> dict | None:
+    """送礼推演收敛/失败 → 事件。没有可用内容时返回 None。
+
+    字段依据实测的 GiftRun 列（不是猜的）：
+      recipient / occasion / budget / profile / products
+    """
+    if run is None:
+        return None
+
+    status = str(_g(run, "status") or "")
+    recipient = str(_g(run, "recipient") or "对方")
+    occasion = str(_g(run, "occasion") or "")
+
+    if status == "failed":
+        return _mk(
+            event_type="review",
+            main=f"「给{recipient}的{occasion or '送礼'}推演」执行失败",
+            sub=str(_g(run, "error") or "未给出原因")[:80],
+            task=None,
+        )
+    if status != "converged":
+        return None
+
+    # 内容取自档案与礼盒 —— 与中栏/右栏同源，不另算一套。
+    # ⚠️ `products.plan` 里的 price 单位是**元**（送礼侧的口径），
+    # 与执行器的「分」不同，所以这里不再乘 100。
+    prof = _g(run, "profile") or []
+    plan = (_g(run, "products") or {}).get("plan") or {}
+    items = plan.get("items") or []
+
+    # 没方案也没档案 = 跑完了但没产出，不值得打扰
+    if not items and not prof:
+        return None
+
+    parts = []
+    if occasion:
+        parts.append(occasion)
+    if items:
+        parts.append(f"{len(items)} 件")
+        total = sum(int(i.get("price") or 0) for i in items)
+        if total:
+            parts.append(f"¥{total:,}")
+    elif prof:
+        parts.append(f"档案 {len(prof)} 条")
+
+    title = str(plan.get("title") or "").strip()
+    return _mk(
+        event_type="decide",
+        main=(f"{recipient}的礼物方案已生成" + (f"：{title}" if title else "")),
+        sub=" · ".join(parts) or "点击查看",
+        task=None,
+    )
+
+
+def from_planning_run(run: Any, report: dict | None = None) -> dict | None:
+    """采购规划收敛/失败 → 事件。没有可用内容时返回 None。
+
+    字段依据实测的 PlanningRun 列：
+      scene / subject / budget / products
+
+    ⚠️ 报告摘要**不在 run 上** —— 它由 `st.build_deliverable` 按 state 现算。
+    调用方已经为发 `deliverable` 事件算过一次，把结果传进来即可
+    （`report`），避免这里再算一遍（两次结果可能不一致）。
+    """
+    if run is None:
+        return None
+
+    status = str(_g(run, "status") or "")
+    if status == "failed":
+        return _mk(
+            event_type="review",
+            main="「采购规划」执行失败",
+            sub=str(_g(run, "error") or "未给出原因")[:80],
+            task=None,
+        )
+    if status != "converged":
+        return None
+
+    subject = str(_g(run, "subject") or "")
+    scene = str(_g(run, "scene") or "")
+
+    # headline 的位置（实测）：get_deliverable() → {id, name, data:{headline:{...}}}
+    # 也容忍调用方直接传 data，或直接传 headline。
+    head: dict = {}
+    if isinstance(report, dict):
+        for cand in (report.get("data"), report):
+            if isinstance(cand, dict) and isinstance(cand.get("headline"), dict):
+                head = cand["headline"]
+                break
+
+    parts = []
+    if head.get("categories"):
+        parts.append(f"{head['categories']} 个品类")
+    if head.get("total") is not None:
+        parts.append(f"¥{int(head['total']):,}")
+    if not parts:
+        parts.append("点击查看")
+
+    label = subject or scene or "采购规划"
+    return _mk(
+        event_type="decide",
+        main="采购规划已收敛，等你确认",
+        sub=f"{label[:24]} · " + " · ".join(parts),
+        task=None,
+    )
 
 
 def _mk(*, event_type: str, main: str, sub: str, task: Any) -> dict:
