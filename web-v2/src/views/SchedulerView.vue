@@ -21,7 +21,7 @@
       <button class="module-tab" :class="{ on: view === 'ai' }" @click="switchModule('ai')">
         AI 自动化 <span v-if="allTasks.length" class="tab-num num">{{ allTasks.filter(t => t.isAi).length }}</span>
       </button>
-      <span class="ai-note">后端执行器：价格 / 库存 / 优惠券 / 榜单 / 店铺 / Agent</span>
+      <span class="ai-note">后端执行器：价格 / 优惠到期 / 优惠券 / 榜单 / 店铺 / Agent</span>
     </nav>
 
     <!-- 工具栏 -->
@@ -230,7 +230,7 @@ import { taskApi, PLATFORMS } from '@/apis/task_api'
 const resultLabel = (r) => ({ ok: '成功', fail: '失败', hit: '命中', empty: '无变化', run: '执行中' }[r] || r)
 
 const typeMeta = {
-  price: { label: '降价' }, coupon: { label: '优惠券' }, stock: { label: '库存' },
+  price: { label: '降价' }, coupon: { label: '优惠券' }, deal: { label: '优惠到期' },
   rank: { label: '榜单' }, shop: { label: '店铺' }, agent: { label: 'AI' }
 }
 const typeLabel = (t) => (typeMeta[t]?.label || t) + '监控'
@@ -242,9 +242,13 @@ const templateDefs = [
       { key: 'product_name', label: '商品名称', placeholder: '如：添可芙万 3.0' },
       { key: 'target_price', label: '目标价（元）', type: 'money', placeholder: '如 1999', optional: true }
     ] },
-  { type: 'stock', label: '补货提醒', desc: '目标商品缺货恢复时提醒', presetNote: '默认每 6 小时',
+  // 2026-09-29：补货提醒已下线 —— 导购 MCP 不提供库存数据（查实），
+  // 改代码修不了。替代品是「优惠到期」：活动结束时间是真实且全覆盖的，
+  // 而且用户担心的本来就是错过优惠。
+  { type: 'deal', label: '优惠到期', desc: '券/补贴/秒杀快结束时提醒', presetNote: '默认每天 09:00',
     params: [
-      { key: 'product_name', label: '商品名称', placeholder: '如：Incase Icon 灰色 M' }
+      { key: 'product_name', label: '商品名称', placeholder: '如：戴森 V12' },
+      { key: 'soon_hours', label: '提前多少小时提醒', type: 'number', placeholder: '如 24', optional: true }
     ] },
   { type: 'coupon', label: '优惠券监控', desc: '出现可用券（可选最低面额）时提醒', presetNote: '默认每天 09:00',
     params: [

@@ -37,12 +37,25 @@ from src.agents.common.toolkits.registry import tool
 logger = logging.getLogger(__name__)
 
 # ── 与 task_executors/__init__.py 的 EXECUTORS 保持一致 ──
-VALID_TASK_TYPES = ("price", "stock", "coupon", "rank", "shop", "agent")
+# 2026-09-29：`stock` → `deal`（优惠到期）。补货监控已下线 ——
+# 导购 MCP 不提供库存数据，见 task_executors/deal_executor.py 顶部。
+VALID_TASK_TYPES = ("price", "deal", "coupon", "rank", "shop", "agent")
+
+# 店铺名的形貌特征。用于挡住「把商品名当店铺名」这种错配 ——
+# 实测过：模型会给 `shop_name` 填「iPhone 15 Pro」。
+_SHOP_HINTS = ("店", "旗舰", "官方", "专营", "专卖", "商城", "自营", "超市")
+
+
+def _looks_like_shop(name: str) -> bool:
+    """粗判是不是店铺名。宁可宽松（放过可疑的），也不要卡死正常输入 ——
+    但商品名（「iPhone 15 Pro」这种）必须被挡住。"""
+    n = str(name or "")
+    return any(h in n for h in _SHOP_HINTS)
 
 # 每类任务需要的参数（缺了执行器会直接返回错误）
 REQUIRED_PARAMS = {
     "price": ("product_name",),
-    "stock": ("product_name",),
+    "deal": ("product_name",),
     "coupon": ("keyword",),
     "rank": ("keyword", "product_name"),
     "shop": ("shop_name",),
@@ -57,7 +70,7 @@ MAX_INTERVAL_HOURS = 720       # 30 天
 class CreateMonitorTaskInput(BaseModel):
     task_type: str = Field(
         ...,
-        description="监控类型：price(降价) / stock(补货) / coupon(优惠券) / rank(榜单排名) / shop(店铺活动)",
+        description="监控类型：price(降价) / deal(优惠到期) / coupon(优惠券) / rank(榜单排名) / shop(店铺活动)",
     )
     target: str = Field(..., description="监控对象：商品名、关键词、或店铺名")
     target_price: str = Field("", description="目标价（元，仅 price 类型用），如 '2899'")
@@ -69,7 +82,7 @@ class CreateMonitorTaskInput(BaseModel):
 
 def _clean_task_name(target: str, task_type: str, given: str) -> str:
     label = {
-        "price": "盯价", "stock": "盯补货", "coupon": "盯券",
+        "price": "盯价", "deal": "盯优惠", "coupon": "盯券",
         "rank": "盯排名", "shop": "盯店铺", "agent": "定时执行",
     }.get(task_type, "监控")
     if given and given.strip():
@@ -113,13 +126,21 @@ async def create_monitor_task(
 ) -> str:
     """创建一个定时监控任务，让系统持续盯着某个目标并在有动静时提醒用户。
 
-    用户说出「盯一下价格」「降价告诉我」「有货了提醒我」这类意图时使用。
+    用户说出「盯一下价格」「降价告诉我」「优惠快到期提醒我」这类意图时使用。
     创建后任务会按间隔自动执行，命中时出现在主动助理页面。
+
+    ⚠️ **补货 / 库存类监控不可用**：数据源（导购 MCP）不提供库存信息，
+    系统无法判断商品是否缺货或有货。用户提这类诉求时**如实告知做不到**，
+    不要用 shop / price 等其它类型顶替 —— 那会让用户以为在盯补货，
+    实际盯的是别的东西。
 
     参数:
         user_id: 用户ID
-        task_type: 监控类型 price(降价)/stock(补货)/coupon(优惠券)/rank(排名)/shop(店铺活动)
-        target: 监控对象，商品名 / 关键词 / 店铺名
+        task_type: 监控类型 price(降价)/deal(优惠到期)/coupon(优惠券)/rank(排名)/shop(店铺活动)。
+                   **没有 stock** —— 补货监控不可用（无数据源）。
+        target: 监控对象，商品名 / 关键词 / 店铺名。
+                注意 shop 类型必须传**店铺名**（如「小米官方旗舰店」），
+                传商品名会被拒绝。
         target_price: 目标价（元），仅 price 类型需要，如 '2899'
         interval_hours: 执行间隔小时数，默认 6
         task_name: 任务名（可选）
@@ -130,11 +151,31 @@ async def create_monitor_task(
         # ── 1) 校验类型 ──
         task_type = str(task_type or "").strip().lower()
         if task_type not in VALID_TASK_TYPES:
-            return f"错误: 未知监控类型 '{task_type}'，可选 {', '.join(VALID_TASK_TYPES)}"
+            return (
+                f"错误: 未知监控类型 '{task_type}'，可选 {', '.join(VALID_TASK_TYPES)}。"
+                f"注意：**补货/库存类监控不可用**（数据源不提供库存信息），"
+                f"请如实告知用户，不要用其它类型代替。"
+            )
 
         target = str(target or "").strip()
         if not target:
             return "错误: 缺少监控对象（target）"
+
+        # ⚠️ 语义护栏（2026-09-29 加）：类型与目标必须对得上。
+        #
+        # 实测 bug：用户说「盯 iPhone 15 Pro 的**补货**」，模型自选了
+        # `shop` 类型、把**商品名**填进 `shop_name`，然后回复
+        # 「补货监控已经挂上了……一旦到货就通知你」—— 三处都错，
+        # 而且承诺了系统做不到的事。
+        #
+        # 类型校验原本只查「是不是合法值」，`shop` 合法所以放行了。
+        # 这里补一层「形貌判据」：店铺名得有店铺的样子。
+        if task_type == "shop" and not _looks_like_shop(target):
+            return (
+                f"错误: 「{target}」看起来是**商品名**，不是店铺名。"
+                f"shop 类型要盯的是店铺（如「小米官方旗舰店」）。"
+                f"如果你想盯这个商品，请用 price（盯价）或 deal（优惠到期）。"
+            )
 
         # ── 2) 校验间隔 ──
         # 注意用 `is None` 而不是 `or`：传 0 是想"尽快跑"，应夹到最小值 1；
@@ -153,7 +194,7 @@ async def create_monitor_task(
             cents = _parse_target_price(target_price)
             if cents:
                 params["target_price"] = cents
-        elif task_type == "stock":
+        elif task_type == "deal":
             params["product_name"] = target
         elif task_type == "coupon":
             params["keyword"] = target

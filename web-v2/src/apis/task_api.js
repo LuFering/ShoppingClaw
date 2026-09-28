@@ -89,7 +89,7 @@ const describeTarget = (t) => {
   }
   if (t.task_type === 'rank') return [p.keyword, p.product_name && `盯 ${p.product_name}`].filter(Boolean).join(' · ') || '—'
   if (t.task_type === 'shop') return p.shop_name || '—'
-  if (t.task_type === 'stock') return p.product_name || '—'
+  if (t.task_type === 'deal') return p.product_name || '—'
   if (t.task_type === 'agent') return (p.prompt || '').slice(0, 40) || '—'
   return '—'
 }
@@ -127,7 +127,7 @@ export const taskApi = {
     return toFrontTask(res.data)
   },
 
-  // 创建（结构化参数见 executors：price/stock/coupon/rank/shop/agent）
+  // 创建（结构化参数见 executors：price/deal/coupon/rank/shop/agent）
   async createTask({ name, type, taskParams, freqMode, intervalHours, dailyTime, weekDays, notifyEnabled = true }) {
     const body = {
       name,

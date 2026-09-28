@@ -315,7 +315,7 @@ def _describe_target(task_type: Any, params: dict) -> str:
         return str(params.get("keyword") or params.get("product_name") or "—")
     if tt == "shop":
         return str(params.get("shop_name") or "—")
-    if tt == "stock":
+    if tt == "deal":
         return str(params.get("product_name") or "—")
     if tt == "agent":
         return str(params.get("prompt") or "—")[:40]
@@ -514,23 +514,48 @@ async def get_overview(user_id: str) -> dict:
 
 # 监控意图的关键词。宁可漏判（交给 Agent 兜底）也不要误判
 # —— 用户说「帮我看看这个」不该被建成监控任务。
-_MONITOR_HINTS = ("盯", "监控", "降价", "降到", "提醒我", "到货", "补货", "有货", "降价告诉", "蹲")
+# ⚠️ 去掉「到货/补货/有货」—— 那类诉求现在没有数据源能支撑，
+# 命中后会退化成盯价任务，但回复里说的是「已帮你挂上盯价任务」，
+# 与用户说的不是一回事。宁可**不命中**（交给 MasterAgent 如实回答），
+# 也不要建一个名不副实的任务。
+_MONITOR_HINTS = ("盯", "监控", "降价", "降到", "提醒我", "降价告诉", "蹲", "优惠", "折扣", "券")
+
+# 这些诉求**没有数据源**，不要建任务（见 _try_monitor 的说明）。
+# 「补货监控」2026-09-29 已下线：导购 MCP 的 26 个工具都没有库存字段。
+_NO_SOURCE_HINTS = ("补货", "到货", "有货", "上架", "库存")
 
 # 任务类型关键词 → task_type（顺序即优先级：越具体的越靠前）
+# ⚠️ 2026-09-29：`stock` 已移除 —— 导购 MCP 不提供库存数据（逐个工具查过，
+# 见 task_executors/deal_executor.py 顶部）。「补货/到货/有货」这类词
+# 不再映射到任何类型，落到默认的 price（盯价）—— 那至少是能做且用户
+# 大概率也想要的（等它降价）。**不能假装能盯补货。**
 _TYPE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("stock", ("补货", "到货", "有货", "上架")),
-    ("coupon", ("券", "优惠", "满减")),
+    ("deal", ("优惠", "折扣", "补贴", "活动", "到期", "过期")),
+    ("coupon", ("券", "满减")),
     ("rank", ("排名", "榜单", "排行")),
     ("shop", ("店铺", "旗舰店", "官方店")),
 )
 
+# 类型 → 回复里用的中文标签。
+# ⚠️ 收成一处：原先这个字典**内联在 `_try_monitor` 里**，改 _TYPE_HINTS 时
+# 漏了它 —— 对话说「盯优惠」直接 KeyError 500（实测）。凡是「类型 → 某物」
+# 的映射散在多处，改一处必然漏别处。
+_TYPE_LABELS = {
+    "price": "盯价", "deal": "盯优惠", "coupon": "盯券",
+    "rank": "盯排名", "shop": "盯店铺", "agent": "AI 汇总",
+}
+
 # 「降到 1800」「¥2999」「3000 元」→ 1800。**必须带显式价格标记**：
 # 裸匹配数字会把商品名里的型号数字当成目标价 —— 「索尼XM5」→5、
 # 「iPhone 16」→16、「戴森 V12」→12，建出来的任务全是错的。
+# ⚠️ 2026-09-29 补：原先只认「降到/低于/不超过」，**不认裸的「到」**。
+# 实测「帮我盯一下索尼XM5的价格，**到 2000 以下**提醒我」抽不出价格 ——
+# 于是静默建了个没有阈值的监控，永远不会报警，回复里也没有价格提示。
+# 现在把「到 X 以下 / X 以内 / 不超过 X」这几种自然说法都收进来。
 _PRICE_RES = (
-    re.compile(r"(?:降[到至]|目标价|低于|少于|不超过|≤|<=)\s*[¥￥]?\s*(\d+(?:\.\d+)?)", re.I),
+    re.compile(r"(?:降[到至]|目标价|低于|少于|不超过|到|≤|<=)\s*[¥￥]?\s*(\d+(?:\.\d+)?)\s*(?:元|块|块钱)?\s*(?:以下|以内|之内|左右)?", re.I),
     re.compile(r"[¥￥]\s*(\d+(?:\.\d+)?)"),
-    re.compile(r"(\d+(?:\.\d+)?)\s*(?:元|块钱|块)"),
+    re.compile(r"(\d+(?:\.\d+)?)\s*(?:元|块钱|块)\s*(?:以下|以内|之内)?"),
 )
 
 
@@ -590,6 +615,11 @@ def _clean_target(text: str) -> str:
 
 async def _try_monitor(text: str, user_id: str) -> dict | None:
     """命中监控意图就建任务，返回确认文案；不命中返回 None。"""
+    # ⚠️ 补货类诉求**显式排除**：没有数据源能支撑（导购 MCP 无库存字段），
+    # 命中「盯」建出来的是盯价任务 —— 用户要补货，给他盯价，是名不副实。
+    # 落到 MasterAgent 去如实回答，比建一个假任务好。
+    if any(w in text for w in _NO_SOURCE_HINTS):
+        return None
     if not any(h in text for h in _MONITOR_HINTS):
         return None
 
@@ -638,7 +668,7 @@ async def _try_monitor(text: str, user_id: str) -> dict | None:
     if not payload.get("task_id"):
         return {"reply": str(payload.get("message") or raw)[:200], "created": False}
 
-    label = {"price": "盯价", "stock": "盯补货", "coupon": "盯券", "rank": "盯排名", "shop": "盯店铺"}[task_type]
+    label = _TYPE_LABELS[task_type]
     price_note = ""
     if task_type == "price" and payload.get("target_price"):
         price_note = f"，到 ¥{int(payload['target_price']) / 100:.0f} 或以下就提醒你"

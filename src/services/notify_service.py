@@ -21,7 +21,7 @@
 
 事件契约（前端 home_api.js / assistant_api.js 已声明，此处一字不差对齐）：
   {id, type, main, sub, time}
-  type ∈ price | coupon | stock | decide | fav | prefer | care | review
+  type ∈ price | coupon | deal | decide | fav | prefer | care | review
         （语义表见 AgentChatComponent.vue 的 statusTypeMeta，不发明新类型）
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ EVENTS_TTL = 7 * 86400    # 7 天，过期自然清理，避免 Redis 无限增�
 # ── 事件类型（与前端 statusTypeMeta 对齐，不新增）──
 TASK_TYPE_TO_EVENT = {
     "price": "price",
-    "stock": "stock",
+    "deal": "deal",
     "coupon": "coupon",
     "rank": "price",    # 排名异动本质是价格竞争信号，复用「盯价」语义
     "shop": "coupon",   # 店铺活动展示的也是券/满减，复用「券」语义
@@ -151,8 +151,8 @@ def from_task_result(task: Any, result: Any) -> dict | None:
 
     if task_type == "price":
         return _price_event(task, result, event_type)
-    if task_type == "stock":
-        return _stock_event(task, result, event_type)
+    if task_type == "deal":
+        return _deal_event(task, result, event_type)
     if task_type == "coupon":
         return _coupon_event(task, result, event_type)
     if task_type == "rank":
@@ -203,14 +203,24 @@ def _price_event(task: Any, r: dict, event_type: str) -> dict | None:
     return None
 
 
-def _stock_event(task: Any, r: dict, event_type: str) -> dict | None:
-    """库存监控：只有状态翻转（到货/缺货）才打扰。"""
+def _deal_event(task: Any, r: dict, event_type: str) -> dict | None:
+    """优惠到期：只在**真的有活动快结束**时打扰。
+
+    ⚠️ 取代了原来的 `_stock_event`（2026-09-29）。补货监控已下线 ——
+    导购 MCP 不提供库存数据，那个执行器恒返回 triggered:false，
+    永远不会走到这里。
+    """
     if not r.get("triggered"):
         return None
+    d = r.get("soonest") or {}
+    hours = d.get("ends_in_hours")
+    main = str(r.get("alert") or "优惠即将结束")[:60]
+    if hours is not None and not r.get("alert"):
+        main = f"{str(d.get('kind') or '优惠')} {hours:.0f} 小时后结束"
     return _mk(
         event_type=event_type,
-        main=str(r.get("alert") or "库存状态变化")[:60],
-        sub=str(r.get("product_name") or "")[:120],
+        main=main,
+        sub=str(d.get("desc") or d.get("product") or r.get("product_name") or "")[:120],
         task=task,
     )
 

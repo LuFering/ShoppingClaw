@@ -66,6 +66,7 @@ async def execute(task: TaskRecord) -> dict:
     result = {
         "status": "ok",
         "product_name": matched.get("title", product_name),
+        # 用快照的 product_id（= stable_id）—— 它就是查历史用的键
         "product_id": snapshot.product_id,
         "current_price": current_price,
         "original_price": matched.get("original_price"),
@@ -104,8 +105,19 @@ def _find_best_match(products: list[dict], query: str) -> dict | None:
 
 
 async def _save_snapshot(product: dict, platform: str) -> PriceSnapshot:
-    """保存价格快照到数据库"""
-    product_id = str(product.get("item_id", product.get("product_id", product.get("id", ""))))
+    """保存价格快照到数据库。
+
+    ⚠️ product_id 用 **stable_id**（item_id 的稳定段），不是完整 item_id ——
+    后者带一个每次搜索都重新生成的会话前缀，同一商品每次存成新记录，
+    历史/趋势全部失效（见 common.stable_item_id 的实测数据）。
+    """
+    product_id = str(
+        product.get("stable_id")
+        or product.get("item_id")
+        or product.get("product_id")
+        or product.get("id")
+        or ""
+    )
     snapshot = PriceSnapshot(
         product_id=product_id,
         product_name=str(product.get("title", product.get("name", "")))[:500],

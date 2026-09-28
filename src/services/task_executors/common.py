@@ -30,6 +30,29 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def stable_item_id(item_id) -> str:
+    """商品主键 —— 淘宝 item_id 的**稳定段**。
+
+    ⚠️ 淘宝的 item_id 形如 `<随机会话前缀>-<稳定商品标识>`，
+    **前缀每次搜索都重新生成**（实测 4 次调用 12 个 id 零重复）。
+
+    直接拿完整 item_id 当主键的后果：同一个商品每次存成一条新的
+    price_snapshot，`_get_price_history(product_id)` 永远查不到历史，
+    trend 永远算不出 —— 盯价实际上从没盯过任何东西。
+    （这个 bug 长期没暴露，因为 task_records 一直是空表，执行器没被真跑过。）
+
+    实测聚合对照：
+        完整 item_id：3 次调用 → 18 个「商品」，出现≥2次的 0 个
+        稳定段：      4 次调用 →  6 个商品，   每个都出现 4 次
+
+    ⚠️ 没有 '-' 时原样返回 —— PDD 的 goods_id 是纯数字且本身稳定，
+    走不到这里；但万一上游换了形状，返回原文比返回空串安全。
+    """
+    s = str(item_id or "")
+    tail = s.partition("-")[2]
+    return tail or s
+
+
 def _to_cents(value) -> int:
     """价格 → 分。淘宝返回的是元（可能是 '28' / 28 / 28.5）。"""
     try:
@@ -72,8 +95,34 @@ def _normalize_item(raw: dict) -> dict | None:
         original = _to_cents(original_yuan)
         coupon = max(0, original - price) if (original and price and original > price) else 0
 
+        iid = str(_first(raw.get("item_id"), basic.get("item_id"), "") or "")
+        # 活动窗口（券/补贴/秒杀的**结束时间**）—— 实测 23/23 件商品都有。
+        # deal 执行器靠它做「优惠即将到期」提醒；补货做不了之后，
+        # 这是数据覆盖最完整的替代信号。
+        promos = []
+        for pth in ((promo.get("final_promotion_path_list") or {})
+                    .get("final_promotion_path_map_data") or []):
+            if not isinstance(pth, dict):
+                continue
+            end_ms = pth.get("promotion_end_time")
+            try:
+                end_ms = int(end_ms) if end_ms else 0
+            except (TypeError, ValueError):
+                end_ms = 0
+            if not end_ms:
+                continue
+            promos.append({
+                "title": str(pth.get("promotion_title") or ""),
+                "desc": str(pth.get("promotion_desc") or ""),
+                "end_ms": end_ms,
+            })
         return {
-            "item_id": str(_first(raw.get("item_id"), basic.get("item_id"), "") or ""),
+            "item_id": iid,
+            "promotions": promos,
+            # 跨会话稳定的主键 —— 见 stable_item_id 的说明。
+            # item_id 的会话前缀每次搜索都变，凡是**跨调用**要用它当主键的
+            # 地方（价格快照、任务去重）都必须用这个。
+            "stable_id": stable_item_id(iid),
             "title": str(_first(basic.get("title"), basic.get("short_title"), "")),
             "price": price,
             "original_price": original or None,
@@ -90,8 +139,10 @@ def _normalize_item(raw: dict) -> dict | None:
     else:
         price, original = _to_cents(price), _to_cents(raw.get("original_price"))
 
+    iid = str(_first(raw.get("item_id"), raw.get("product_id"), raw.get("id"), "") or "")
     return {
-        "item_id": str(_first(raw.get("item_id"), raw.get("product_id"), raw.get("id"), "") or ""),
+        "item_id": iid,
+        "stable_id": stable_item_id(iid),      # 见上
         "title": str(_first(raw.get("title"), raw.get("name"), "")),
         "price": price,
         "original_price": original or None,
