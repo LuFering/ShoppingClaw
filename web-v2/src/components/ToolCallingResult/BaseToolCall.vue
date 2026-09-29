@@ -262,7 +262,7 @@ const previewText = computed(() => {
   return ''
 })
 
-// 运行中 / 失败态：从参数推断「在做什么」，给头部一行描述（对标 Yuxi 的可读头部）。
+// 运行中 / 失败态：从参数推断「在做什么」，给头部一行可读描述。
 const argHint = computed(() => {
   const a = parseToolCallArgs(props.toolCall) || {}
   if (a.keyword || a.q) {

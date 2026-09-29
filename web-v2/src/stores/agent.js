@@ -104,7 +104,7 @@ export const useAgentStore = defineStore('agent', () => {
     isInitializing.value = false
   }
 
-  // Yuxi 工具渲染组件依赖：工具元数据 / 可用工具表。
+  // 工具渲染组件依赖：工具元数据 / 可用工具表。
   // SC 后端未下发工具清单时保持空数组，渲染层回退到前端 TOOL_NAME_MAP 兜底。
   const toolMetadata = ref([])
   const availableTools = ref({})

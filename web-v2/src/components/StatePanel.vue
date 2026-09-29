@@ -350,7 +350,7 @@ const fmtSeconds = (v) => {
 </script>
 
 <style lang="less" scoped>
-/* ═══ 面板外框（对标 Yuxi .side-panel / .side-panel--state）═══ */
+/* ═══ 面板外框 ═══ */
 .side-panel {
   flex: 0 0 auto;
   overflow: hidden;

@@ -9,7 +9,7 @@ from src.utils.datetime_utils import shanghai_now
 
 SAVE_DIR = os.getenv("SAVE_DIR") or "saves"
 DATETIME = shanghai_now().strftime("%Y-%m-%d")
-LOG_FILE = f"{SAVE_DIR}/logs/yuxi-{DATETIME}.log"
+LOG_FILE = f"{SAVE_DIR}/logs/shoppingclaw-{DATETIME}.log"
 
 # 请求 ID 贯通：中间件 set，LoguruHandler/patch 读取，前后端凭同一 ID 对账
 request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
@@ -107,7 +107,7 @@ def setup_logger(name, level="DEBUG", console=True):
 
 
 # 设置根日志记录器
-logger = setup_logger("Yuxi")
+logger = setup_logger("ShoppingClaw")
 
 # 初始化 logging 桥接
 _setup_logging_bridge()

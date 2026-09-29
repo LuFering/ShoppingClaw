@@ -83,7 +83,7 @@ _MASTER_TOOL_ALLOWLIST = {
 > 顺带发现：前端 `TaskTool.vue` 的取值链是
 > `subagent_run.subagent_name → display_label → parsedArgs.subagent_type → '子智能体'`，
 > 而 `src/`、`server/` 里**一个都没有**（`sse_adapter.py` 里连 subagent 字样都没有）。
-> 所以前端那套是照搬 Yuxi 的死代码，**现在用户看到的就是英文 slug** —— 这正是规划里说的红线问题。
+> 所以前端那套是照搬 死代码，**现在用户看到的就是英文 slug** —— 这正是规划里说的红线问题。
 > 本次补了 `subagent_name`，但**「SSE 事件 → 前端 toolCall → subagent_run」这段中间链路是否有环节丢弃该字段，我还没验证**，需要跑一次真实对话确认。
 
 ### 5. 领域方法论 Skill 落地（§3.2）
@@ -259,9 +259,9 @@ skills/<group>/<slug>/
 2. 子智能体的 `default_middleware` 里没有 `FilesystemMiddleware`，**连文件工具都没有**，更谈不上执行。
 3. 唯一现成的执行后端 `LocalShellBackend` 是**无沙箱的主机 shell**：`subprocess.run(shell=True)`，不隔离、不限资源、可读任意密钥、`virtual_mode` 对 shell 无效。**它自己的 docstring 就写明"生产环境不适用"。**
 
-**另一处死代码**：`repositories/skill_repository.py` + `Skill` 模型已经带了 `tool_dependencies` / `mcp_dependencies` / `skill_dependencies` 三个字段 —— 这正是参考架构 Yuxi 的技能模型（Yuxi 的 `resolve_skill_gated_tools()` 会把技能声明的工具注册进 ToolNode）。**但本仓库没有任何地方引用它。**
+**另一处死代码**：`repositories/skill_repository.py` + `Skill` 模型已经带了 `tool_dependencies` / `mcp_dependencies` / `skill_dependencies` 三个字段 —— 这正是参考架构 技能模型（`resolve_skill_gated_tools` 会把技能声明的工具注册进 ToolNode）。**但本仓库没有任何地方引用它。**
 
-**与 Yuxi 的差距（已逐行核实）**：Yuxi 的 skill = `SKILL.md` + `scripts/` + DB 声明的依赖。它的**读取**走 deepagents 的通用 `read_file`（读虚拟路径 `/home/gem/skills/<slug>/SKILL.md`），`SkillsMiddleware.wrap_tool_call` 拦截这次读 → 解析出 slug → 写入 `activated_skills`（**读即激活**）。它的**执行**靠**工具门控**：技能声明的 `tool_dependencies`（如 `terminal`）在未激活时**对模型隐藏**，激活后才加回 `model_tools`；`terminal` 落在远程沙箱后端（`deepagents` 的 `BaseSandbox` 子类 + HTTP provisioner，每线程一个沙箱），于是能 `cd /home/gem/skills/<slug> && uv run scripts/query.py`。
+**与 差距（已逐行核实）**：skill = `SKILL.md` + `scripts/` + DB 声明的依赖。它的**读取**走 deepagents 的通用 `read_file`（读虚拟路径 `/home/gem/skills/<slug>/SKILL.md`），`SkillsMiddleware.wrap_tool_call` 拦截这次读 → 解析出 slug → 写入 `activated_skills`（**读即激活**）。它的**执行**靠**工具门控**：技能声明的 `tool_dependencies`（如 `terminal`）在未激活时**对模型隐藏**，激活后才加回 `model_tools`；`terminal` 落在远程沙箱后端（`deepagents` 的 `BaseSandbox` 子类 + HTTP provisioner，每线程一个沙箱），于是能 `cd /home/gem/skills/<slug> && uv run scripts/query.py`。
 
 本仓库把 `BaseSandbox` 搬了过来，但**没搬 sandbox provider、没搬技能工具门控、也没接 `Skill` 表**。**其中最值得借鉴的是「工具门控」** —— 它才让"技能＝能力包"成立：技能不仅告诉模型怎么做，还能决定模型能用哪些工具。**该机制本轮已实现，见 §5.11。**
 
@@ -288,7 +288,7 @@ skills/<group>/<slug>/
 
 #### 5.11 工具门控：技能现在能决定「模型能用哪些工具」
 
-这是对齐 Yuxi 的核心机制，也是让「技能＝能力包」真正成立的一环。此前工具是子智能体级静态配置，技能对工具可见性零影响。
+这是对齐 核心机制，也是让「技能＝能力包」真正成立的一环。此前工具是子智能体级静态配置，技能对工具可见性零影响。
 
 **机制**
 

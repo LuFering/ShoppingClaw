@@ -13,7 +13,7 @@
  * 本组件只负责 G6 实例生命周期、尺寸、布局、事件与数据映射。
  * 业务语义（类型取色、状态降透明、关系线型）放在 PurchaseDecisionGraph 一类的领域组件里。
  *
- * 实现参照 Yuxi web/src/components/GraphCanvas.vue（同为 G6 v5），
+ * 基于 G6 v5 实现，
  * 保留其已验证的布局参数与事件写法，去掉本项目不需要的 Chunk 过滤与统计面板。
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
@@ -77,7 +77,7 @@ const hasData = computed(() => {
   return (d.nodes?.length || 0) > 0 || (d.edges?.length || 0) > 0
 })
 
-/** 与 Yuxi 一致的 d3-force 参数：charge 拉开、link 收拢、collide 防重叠 */
+/** d3-force 参数：charge 拉开、link 收拢、collide 防重叠 */
 const BASE_LAYOUT = {
   type: 'd3-force',
   preventOverlap: true,

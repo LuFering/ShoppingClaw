@@ -67,7 +67,7 @@ export const MAIN_AGENT_TOOLS = {
       start: "tool_start  { tool_call_id, tool_name:'orchestrate', arguments:{decision}, orchestration:<trace status='running'>, meta:{icon:'Network',category:'主智能体'}, message_id }",
       done: "tool_complete { tool_call_id, duration_ms, result_content: JSON.stringify({type:'orchestration',orchestration:<trace>}), orchestration:<trace status='completed'>, message_id }"
     },
-    note: 'orchestration 字段必须在 upsertToolCall 与 toYuxiToolCall 两处都透传（全局状态 + 消息级状态各存一份）'
+    note: 'orchestration 字段必须在 upsertToolCall 与 toToolCallContract 两处都透传（全局状态 + 消息级状态各存一份）'
   },
 
   /**
@@ -127,7 +127,7 @@ export const MAIN_AGENT_TOOLS = {
    */
   ask_user: {
     id: 'ask_user',
-    alias: ['ask_user_question'], // 兼容 Yuxi 同名工具，渲染端两个 id 都注册了
+    alias: ['ask_user_question'], // 兼容同名工具，渲染端两个 id 都注册了
     category: '主智能体',
     icon: 'HelpCircle',
     renderer: 'AskUserQuestionTool',
@@ -465,7 +465,7 @@ export function buildOrchestrationTrace (fixture, status = 'running', upTo = und
  *   - collapse：子智能体干完后下发，收起详情，避免历史越长界面越乱
  *   前端：AgentChatComponent 的 setToolCallDrill() 找到该 slug 的 task 卡片打上
  *   `drill` 标记 → BaseToolCall watch 后改展开态。
- *   ⚠️ drill 必须同时透传进 upsertToolCall 与 toYuxiToolCall（双存储），否则左侧不响应。
+ *   ⚠️ drill 必须同时透传进 upsertToolCall 与 toToolCallContract（双存储），否则左侧不响应。
  *
  * ── 渐进显形（progressive reveal）：状态块内部也要「边执行边长」 ──
  * 上面的节奏解决的是「状态块之间」的交替；状态块**自己**也不能一口气长全 ——

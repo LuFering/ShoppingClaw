@@ -1,8 +1,8 @@
-// 工具调用结果组件导出（对标 Yuxi，合并 SC 电商业务工具）
+// 工具调用结果组件导出（含电商业务工具）
 export { default as BaseToolCall } from './BaseToolCall.vue'
 export { default as ToolCallRenderer } from './ToolCallRenderer.vue'
 
-// Yuxi 通用工具组件
+// 通用工具组件
 export { default as WebSearchTool } from './tools/WebSearchTool.vue'
 export { default as ListKbsTool } from './tools/ListKbsTool.vue'
 export { default as GetMindmapTool } from './tools/GetMindmapTool.vue'

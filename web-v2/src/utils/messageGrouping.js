@@ -1,16 +1,16 @@
-// 消息流展示项分组（对标 Yuxi utils/messageGrouping.js）
+// 消息流展示项分组
 //
 // 展示项协议：
 //   { type: 'message',     key, message, sourceIndex }
 //   { type: 'tool-group',  key, toolCalls, entries, live? }   // live 为 SC 扩展：流式进行中
 //   { type: 'process-group', key, items, messageCount, toolCallCount, durationMs }
 //
-// 与 Yuxi 的差异（SC 适配）：
+// 本项目适配说明：
 //   1. SC 的思考过程不是 ai 消息的 reasoning_content 字段，而是独立的
 //      { type:'thinking', thinkingProcess:{ steps, toolCalls, planSteps } } 段，
-//      这里统一转换成 Yuxi 的 tool-group。
+//      这里统一转换成 tool-group。
 //   2. SC 的工具对象字段为 { toolCallId, name, args, output, status, duration }，
-//      经 toYuxiToolCall 转成 Yuxi 契约 { id, name, args, status, tool_call_result }。
+//      经 toToolCallContract 转成渲染契约 { id, name, args, status, tool_call_result }。
 import MessageProcessor from '@/utils/messageProcessor'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 import { collapseConversationProcess } from '@/utils/conversationProcessGrouping'
@@ -58,8 +58,8 @@ const friendlyError = (raw) => {
   return text.length > 60 ? text.slice(0, 60) + '…' : text
 }
 
-/** SC 流式工具对象 → Yuxi 工具调用契约。 */
-export const toYuxiToolCall = (toolCall) => {
+/** SC 流式工具对象 → 工具调用渲染契约。 */
+export const toToolCallContract = (toolCall) => {
   if (!toolCall) return null
   const status = toolCall.status === 'failed' ? 'error' : toolCall.status || 'running'
   const rawOutput = toolCall.output ?? toolCall.result
@@ -93,11 +93,11 @@ export const toYuxiToolCall = (toolCall) => {
   }
 }
 
-/** SC 过程段（thinking）→ Yuxi tool-group。 */
+/** SC 过程段（thinking）→ tool-group。 */
 const buildProcessToolGroup = (thinkingProcess, seed, live) => {
   const tp = thinkingProcess || {}
   const steps = tp.steps || []
-  const toolCalls = (tp.toolCalls || []).map(toYuxiToolCall).filter(Boolean)
+  const toolCalls = (tp.toolCalls || []).map(toToolCallContract).filter(Boolean)
 
   const entries = []
   // 推理文本：合并连续的 thinking 步骤，避免逐条刷屏
@@ -137,12 +137,12 @@ const hasVisibleAssistantBody = (message, content) =>
 /**
  * 将一轮会话切成「正文 / 工具组 / 正文 …」交替的展示序列。
  *
- * 对标 Yuxi：AI 消息自带 tool_calls（后端按 message_id 归并下发），
+ * AI 消息自带 tool_calls（后端按 message_id 归并下发），
  * 因此仅靠顺序遍历 + 「正文前 flush」即可得到交错结构，无需求助外部补丁。
  *
  * @param {Object} conv - { messages: Message[] }
  * @param {Object} options
- * @param {Function} options.enrichToolCalls - 工具富化（默认走 Yuxi 的 enrichTaskToolCalls）
+ * @param {Function} options.enrichToolCalls - 工具富化（默认走 enrichTaskToolCalls）
  */
 export const getConversationDisplayItems = (
   conv,

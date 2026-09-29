@@ -61,9 +61,9 @@
 </template>
 
 <script setup>
-// 参考自 Yuxi（xerrors/Yuxi）的 ModelSelectorComponent 简化版：
+// 模型选择器（简化版）：
 // 保留按提供商分组 + 搜索；模型目录来自 GET /api/chat/models（静态目录），
-// 状态检查 / 缓存刷新 / 元数据徽标依赖 Yuxi 专属后端，未引入。
+// 状态检查 / 缓存刷新 / 元数据徽标依赖额外的后端接口，未引入。
 import { computed, ref } from 'vue'
 import { ChevronDown, Check } from 'lucide-vue-next'
 import { modelApi } from '@/apis/model_api'

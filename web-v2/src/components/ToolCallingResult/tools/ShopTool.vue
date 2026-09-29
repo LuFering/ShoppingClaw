@@ -5,7 +5,7 @@
     :default-expanded="defaultExpanded"
     :force-show-result="hasDetail"
   >
-    <!-- 头部：工具中文名 + 一行可读描述（Yuxi sep-header 风格）。
+    <!-- 头部：工具中文名 + 一行可读描述。
          运行中显示「在查什么」（来自参数），完成后显示「查到了什么」（来自 result_preview）。 -->
     <template #header>
       <div class="sep-header">

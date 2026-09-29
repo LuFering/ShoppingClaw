@@ -48,4 +48,4 @@ ShoppingClaw 是一个**以决策为中心的电商智能体系统**：用户用
 ## 参考与沿革
 
 项目脱胎于 DeepAgents/ScienceClaw 风格的 Agent 工程实践；仓库早期文档与日志
-中的 "Yuxi" 命名是历史遗留，现已统一为 ShoppingClaw。
+中的旧命名是历史遗留，现已统一为 ShoppingClaw。

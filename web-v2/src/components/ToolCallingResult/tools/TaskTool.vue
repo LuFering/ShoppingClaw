@@ -254,7 +254,7 @@ const pendingLabel = computed(() => {
   return ''
 })
 
-// 运行状态（对标 Yuxi）：failed → error
+// 运行状态：failed → error
 const rawStatus = computed(() => getToolCallDisplayStatus(props.toolCall))
 const runStatus = computed(() => (rawStatus.value === 'error' ? 'failed' : rawStatus.value))
 const runStatusLabel = computed(() => {

@@ -261,7 +261,7 @@ const getErrorMessage = computed(() => {
      而对话区画布是 --gray-25(#f8f9f8) / body #f6f7f5，
      于是 AI 正文被裹成一块突兀的白色矩形（白底 + 浅灰画布边界）。
      这里把 md 相关的根容器统一置为透明，让正文直接落在画布上，
-     与 Yuxi 的「消息气泡透明、只有容器有底色」保持一致。 */
+     与「消息气泡透明、只有容器有底色」保持一致。 */
   background: transparent !important;
 
   .md-editor-preview-wrapper {

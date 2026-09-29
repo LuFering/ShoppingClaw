@@ -1,4 +1,4 @@
-// 流式平滑播放器（移植自 Yuxi web/src/composables/useStreamSmoother.js）
+// 流式平滑播放器
 //
 // 问题：后端按 LLM provider 的吐字节奏下发 message_chunk，叠加网络与 provider 侧缓冲后，
 // 增量是一阵一阵到达的 —— 界面表现为「卡一会儿不动，然后整段蹦出来」。
@@ -10,9 +10,9 @@
 //   3) 积压量 / CATCH_UP_MS  —— 追赶速率，积压越多放得越快，但用固定时间摊平
 // 这样既消除了「一卡一蹦」，又不会因为一次大包而瞬间刷屏。
 //
-// 与 Yuxi 的差异：Yuxi 的 msgChunks[id] 是「chunk 数组」，SC 是「单条消息对象、
+// 差异：msgChunks[id] 是「chunk 数组」的写法不适用，本项目是「单条消息对象、
 // content 为累积字符串」，因此这里只把正文增量通过 writeDelta 回调落地，
-// 不搬 Yuxi 的 chunk 骨架合并逻辑。
+// 因此不采用 chunk 骨架合并逻辑。
 
 const START_BUFFER_MS = 180 // 起播前先攒一点，避免开头一顿一顿
 const RATE_SAMPLE_MS = 200 // 到达速率采样窗口

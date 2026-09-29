@@ -1,6 +1,6 @@
-// 工具调用渲染注册表（对标 Yuxi components/ToolCallingResult/toolRegistry.js）
+// 工具调用渲染注册表
 // 统一：工具 id 提取、显示名/图标映射、状态判定、结果解析。
-// 图标库：本项目使用 lucide-vue-next（Yuxi 用 @lucide/vue，API 一致仅包名不同）。
+// 图标库：lucide-vue-next。
 import {
   BookOpen,
   Bot,
@@ -37,9 +37,9 @@ import {
   ShoppingBag
 } from 'lucide-vue-next'
 
-// ── 工具图标映射：Yuxi 通用工具 + 电商业务工具 ──
+// ── 工具图标映射：通用工具 + 电商业务工具 ──
 export const TOOL_ICON_MAP = {
-  // Yuxi 通用工具
+  // 通用工具
   ask_user_question: HelpCircle,
   bash: SquareTerminal,
   calculator: Calculator,
@@ -113,7 +113,7 @@ export const TOOL_ICON_MAP = {
 
 // ── 工具显示名：后端未下发 display_name 时的前端兜底 ──
 export const TOOL_NAME_MAP = {
-  // Yuxi 通用工具
+  // 通用工具
   bash: '执行命令',
   cmd: '执行命令',
   execute: '执行命令',
@@ -266,7 +266,7 @@ export const SUBAGENT_TOOL_IDS = [
 
 export const isSubagentToolCall = (toolCall) => SUBAGENT_TOOL_IDS.includes(getToolCallId(toolCall))
 
-// 结果内容：Yuxi 用 tool_call_result.content，SC 流式侧用 output，两者都兼容
+// 结果内容：流式侧用 output、历史消息用 tool_call_result.content，两者都兼容
 export const parseToolCallResult = (toolCall) => {
   const content = toolCall?.tool_call_result?.content ?? toolCall?.result ?? toolCall?.output
   if (content == null || content === '') return null
@@ -282,10 +282,10 @@ const FINAL_STATUSES = ['completed', 'complete', 'done', 'success', 'called']
 const RUNNING_STATUSES = ['in_progress', 'running', 'active', 'processing', 'calling']
 // interrupted：流被上游报错 / 用户中止打断时，工具只发了 tool_start 而没有
 // tool_complete。归入错误态，避免永久停留在「进行中」；
-// 与 Yuxi getToolCallDisplayStatus 把 interrupted 视为 error 的语义一致。
+// interrupted 视为 error，语义一致。
 const ERROR_STATUSES = ['failed', 'error', 'cancelled', 'canceled', 'interrupted', 'aborted']
 
-/** SC 侧状态归一化：兼容 Yuxi 的 success/error 与 SC 的 completed/failed。 */
+/** 状态归一化：兼容 success/error 与 completed/failed 两套写法。 */
 export const normalizeStatus = (status) => {
   const value = String(status || '').toLowerCase()
   if (FINAL_STATUSES.includes(value)) return 'completed'
@@ -334,7 +334,7 @@ export const getToolCallDisplayStatus = (toolCall, activeSubagentToolCallIds) =>
   if (getToolCallId(toolCall) === 'task') {
     if (status === 'completed') return 'completed'
     // 状态未知时保守显示「运行中」，不要凭空宣称已完成。
-    // Yuxi 有后端下发的 agent_state.subagent_runs 来兜底判断活跃子智能体，
+    // 后端下发的 agent_state.subagent_runs 可兜底判断活跃子智能体，
     // SC 后端没有这个数据，原实现就退化成「不在活跃集合里 = 已完成」，
     // 于是子智能体还在跑（实测可跑 60s+）时，界面上却已经显示「已完成」。
     // 真正的收尾由 AgentChatComponent.finalizeDanglingToolCalls 在流结束时兜底。

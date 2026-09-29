@@ -45,7 +45,7 @@ const props = defineProps({
   live: { type: Boolean, default: false }
 })
 
-// Yuxi 式：默认收起为耗时摘要行；live 时强制展开
+// 默认收起为耗时摘要行；live 时强制展开
 const expanded = ref(props.live)
 const expandedToolIds = ref(new Set())
 watch(

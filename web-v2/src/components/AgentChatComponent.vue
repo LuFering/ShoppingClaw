@@ -39,7 +39,7 @@
           </div>
         </div>
         <div class="header__right">
-          <!-- 状态入口（对标 Yuxi state-entry-btn）：有会话/过程内容时才可用 -->
+          <!-- 状态入口：有会话/过程内容时才可用 -->
           <div
             v-if="conversations.length > 0 || thinkingState.steps.length > 0 || productIndex.length"
             type="button"
@@ -157,7 +157,7 @@
                 />
               </template>
             </div>
-            <!-- 生成中标志：对话进行中显示"正在生成回复" + 三点动画 + 计时（对标 Yuxi generating-status） -->
+            <!-- 生成中标志：对话进行中显示"正在生成回复" + 三点动画 + 计时 -->
             <div class="generating-status" v-if="isReplyLoading && conversations.length > 0">
               <div class="generating-indicator">
                 <div class="loading-dots">
@@ -229,7 +229,7 @@
           </div>
         </div>
 
-        <!-- 右侧状态面板（Yuxi 式：与 chat-main 并排；无内容时不渲染空面板） -->
+        <!-- 右侧状态面板：与 chat-main 并排；无内容时不渲染空面板 -->
         <StatePanel
           v-if="conversations.length > 0 || thinkingState.steps.length > 0 || productIndex.length"
           :open="statePanelOpen"
@@ -258,7 +258,7 @@ import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import ConversationProcessGroupComponent from '@/components/ConversationProcessGroupComponent.vue'
 import StatePanel from '@/components/StatePanel.vue'
-import { getConversationDisplayItems, toYuxiToolCall } from '@/utils/messageGrouping'
+import { getConversationDisplayItems, toToolCallContract } from '@/utils/messageGrouping'
 import { PanelLeftOpen, MessageCirclePlus, LoaderCircle, ChevronRight, Activity, ListCollapse } from 'lucide-vue-next'
 import { handleChatError, translateErrorMessage } from '@/utils/errorHandler'
 import { ScrollController } from '@/utils/scrollController'
@@ -414,12 +414,12 @@ const thinkingState = reactive({
 // 每个线程的思考过程快照（切换对话时恢复）
 const savedThinkingStates = ref({})
 
-// 运行状态栏（Yuxi 式右侧 340px 状态面板；dock=停靠推挤内容 / float=悬浮覆盖）
+// 运行状态栏（右侧 340px 状态面板；dock=停靠推挤内容 / float=悬浮覆盖）
 const statePanelOpen = ref(window.innerWidth >= 1280)
 const statePanelMode = ref('dock')
 const lastStatistics = ref(null)
 
-// 停靠态：open + dock 模式 + 容器足够宽（对标 Yuxi statePanelCanDock）
+// 停靠态：open + dock 模式 + 容器足够宽
 const statePanelDockWidth = 340
 const statePanelDockMinChatWidth = 800
 const chatContainerWidth = ref(window.innerWidth)
@@ -522,8 +522,8 @@ const currentThreadMessages = computed(() => threadMessages.value[currentChatId.
 
 // 在线程状态中管理流式数据
 //
-// ═══ 对标 Yuxi：msgChunks 映射而非单一有序数组 ═══
-// Yuxi 用 `onGoingConv.msgChunks[messageId] = [chunk, ...]` 组织流式数据：
+// ═══ 流式数据用 msgChunks 映射而非单一有序数组 ═══
+// 按 `msgChunks[messageId] = [chunk, ...]` 组织流式数据：
 //   - 正文增量按 message_id（LangChain run id）聚合到同一条 AI 消息
 //   - 工具调用同样带 message_id，归属到产生它的那条 AI 消息
 // 取出时 Object.values() 按插入顺序展开，天然形成
@@ -543,7 +543,7 @@ const createOnGoingConvState = () => ({
   renderedCardCalls: null,
 })
 
-// ═══ 对标 Yuxi：按 message_id 写入流式消息 ═══
+// ═══ 按 message_id 写入流式消息 ═══
 // 后端已为 message_chunk / tool_start / tool_complete 下发 message_id
 // （LangChain run id，同一轮共享、不同轮相异）。
 // 这里把「正文增量」与「该轮产生的工具调用」写到同一条 AI 消息上，
@@ -612,7 +612,7 @@ const upsertToolCallIntoMessage = (ts, messageId, item) => {
   }
 }
 
-// 取得按插入顺序排列的流式消息（对标 Yuxi getThreadOngoingMessages）
+// 取得按插入顺序排列的流式消息
 const getOngoingMessages = (conv) => {
   if (!conv) return []
   const order = conv.order || []
@@ -626,7 +626,7 @@ const getThreadState = (threadId, autoCreate = true) => {
       isStreaming: false,
       onGoingConv: createOnGoingConvState(),
       agentState: null,
-      // 生成中标志：由流的生命周期驱动（对标 Yuxi threadState.replyLoadingVisible）
+      // 生成中标志：由流的生命周期驱动
       replyLoadingVisible: false,
       contextCompressing: false,
     }
@@ -634,7 +634,7 @@ const getThreadState = (threadId, autoCreate = true) => {
   return chatState.threadStates[threadId] || null
 }
 
-// ═══ 流式平滑播放（对标 Yuxi useStreamSmoother）═══
+// ═══ 流式平滑播放 ═══
 // 后端增量是「一阵一阵」到的，直接落 DOM 会卡顿 + 整段蹦出。
 // 这里把正文增量先缓冲，再逐帧按自适应速率播放；工具事件、终态等不经过此层。
 const streamSmoother = useStreamSmoother({
@@ -670,7 +670,7 @@ const conversations = computed(() => {
 
 // 每个会话的展示项。
 //
-// 对标 Yuxi：流式消息本身已按 message_id 归并，每条 AI 消息自带 tool_calls，
+// 流式消息本身已按 message_id 归并，每条 AI 消息自带 tool_calls，
 // 因此 getConversationDisplayItems 仅靠「顺序遍历 + 正文前 flush」即可切出
 // [正文①, 工具组, 正文②, 工具组, 正文③]。无需任何 processAppend 补丁
 // （该补丁是此前工具重复堆叠的根源，已彻底移除）。
@@ -684,7 +684,7 @@ const conversationViews = computed(() => {
   })
 })
 
-// Yuxi 行为：只有「正在流式的那轮会话的最后一个展示项」才是活跃工具组，
+// 只有「正在流式的那轮会话的最后一个展示项」才是活跃工具组，
 // 正文开始输出后自然失去活跃态，工具组随之自动收起。
 const isToolGroupActive = (view, itemIndex) =>
   Boolean(
@@ -772,8 +772,8 @@ const panelStatistics = computed(() => {
   }
 })
 
-// ═══ 生成中标志（对标 Yuxi generating-status）═══
-// 语义对标 Yuxi 的 threadState.replyLoadingVisible：
+// ═══ 生成中标志 ═══
+// 语义对应 threadState.replyLoadingVisible：
 // 由「流的生命周期」驱动（init/开始 → finished/error/interrupted 才结束），
 // 而不是由「是否已有正文/工具调用」驱动。
 // 旧实现用 !hasText && !hasTool 判断，导致一出现正文或工具调用就提前隐藏，
@@ -792,7 +792,7 @@ const replyLoadingText = computed(() => {
 })
 
 // 计时按 thread 维度独立维护：同一对话内再次发起生成会重新计时，
-// 不同对话并行时互不干扰（对标 Yuxi 的 per-thread 计时语义）。
+// 不同对话并行时互不干扰（按 thread 分别计时）。
 const replyElapsedSeconds = ref(0)
 let replyElapsedTimer = null
 let replyStartedAt = null
@@ -1223,7 +1223,7 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
     if (!target.error_message && item.error_message) target.error_message = item.error_message
     if (item.subagent_run) target.subagent_run = item.subagent_run
     if (item.orchestration) target.orchestration = item.orchestration
-    if (ts) upsertToolCallIntoMessage(ts, target.messageId, toYuxiToolCall(target))
+    if (ts) upsertToolCallIntoMessage(ts, target.messageId, toToolCallContract(target))
     return target
   }
   if (plan.dropIds.length) {
@@ -1247,12 +1247,12 @@ const upsertToolCall = (toolCall = {}, ts = null) => {
   } else {
     thinkingState.toolCalls.push(item)
   }
-  // 同步进该轮 AI 消息的 tool_calls（对标 Yuxi：工具挂到产生它的消息上）
+  // 同步进该轮 AI 消息的 tool_calls（工具挂到产生它的消息上）
   if (ts) {
     upsertToolCallIntoMessage(
       ts,
       item.messageId,
-      toYuxiToolCall(thinkingState.toolCalls.find((t) => t.toolCallId === toolCallId) || item)
+      toToolCallContract(thinkingState.toolCalls.find((t) => t.toolCallId === toolCallId) || item)
     )
   }
   return item
@@ -1272,7 +1272,7 @@ const setToolCallDrill = (slug, action, ts = null) => {
     )
   if (!target) return
   target.drill = action
-  if (ts) upsertToolCallIntoMessage(ts, target.messageId, toYuxiToolCall(target))
+  if (ts) upsertToolCallIntoMessage(ts, target.messageId, toToolCallContract(target))
 }
 
 // ═══ SSE 事件处理函数（新协议）═══
@@ -1526,7 +1526,7 @@ const handleSendOrStop = async () => {
   const ts = getThreadState(threadId)
   ts.isStreaming = true
   ts.onGoingConv = createOnGoingConvState()
-  // 生成中标志：本轮生成的起点（对标 Yuxi 在 init 事件置位）。
+  // 生成中标志：本轮生成的起点（init 事件置位）。
   // 同一 thread 内再次发起会重新置 true 并重置计时，实现"每次生成独立状态"。
   ts.replyLoadingVisible = true
   ts.contextCompressing = false
@@ -1773,7 +1773,7 @@ const buildThinkingProcessMsg = () => {
 
 // 把本轮流式产生的消息落回线程历史（正常结束 / 用户停止共用）
 //
-// 对标 Yuxi：流式消息已按 message_id 归并成有序的 AI 消息列表，
+// 流式消息已按 message_id 归并成有序的 AI 消息列表，
 // 每条 AI 消息自带 tool_calls。落库时按序写入即可，
 // 历史回放时 getConversationDisplayItems 能重新切出同样的交错结构。
 const flushOngoingConv = (threadId, ts) => {
@@ -1820,7 +1820,7 @@ const commitOngoingConv = (threadId, ts) => {
   ts.onGoingConv = createOnGoingConvState()
 }
 
-// 流结束后用服务端历史校准本地状态（对标 Yuxi finalizeRunStream 的 fetchThreadMessages）。
+// 流结束后用服务端历史校准本地状态。
 // 后端会把商品卡片、思考过程等结构化产物单独持久化，只有回读才能拿到权威数据；
 // 本地落库只是"让界面立刻收敛"，两者取服务端为准。
 // 拉取失败、服务端条数少于本地（写入尚未可见）、或服务端丢了商品卡片时，
@@ -2088,7 +2088,7 @@ defineExpose({
   max-width: 800px;
   width: 100%;
   margin: 0 auto;
-  /* 遮罩渐隐（对标 Yuxi .bottom 的 linear-gradient 做法）：
+  /* 遮罩渐隐（linear-gradient 做法）：
      旧实现是 `linear-gradient(to top, var(--gray-0) 80%, transparent)`，
      而 SC 的 --gray-0 是纯白 #ffffff，等于在浅灰画布（body 为 #f6f7f5）
      上盖出一条 80% 高的白色矩形，与透明背景的 AI 正文形成生硬色块。

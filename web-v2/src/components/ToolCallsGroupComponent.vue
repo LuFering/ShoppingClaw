@@ -119,22 +119,22 @@ const hasReasoning = computed(() =>
   displayEntries.value.some((entry) => entry.type === 'reasoning')
 )
 // 只有在「工具过多」或「包含推理文本」时才需要折叠成一行 summary，
-// 否则应保持逐行平铺（对标 Yuxi：summary 标题行 + 逐条明细同时可见）。
+// 否则应保持逐行平铺（summary 标题行 + 逐条明细同时可见）。
 // 旧实现是 `length > 0`，等于只要有工具就整体收成一条卡片，
 // 视觉上变成一个个重型折叠块，和「正文/工具交错」的轻量时间线相悖。
 const COLLAPSE_THRESHOLD = 0
-// 一切工具组都可折叠 —— 对齐 Yuxi：`shouldCollapseToolCalls = displayEntries.length > 0`，
+// 一切工具组都可折叠：`shouldCollapseToolCalls = displayEntries.length > 0`，
 // 即只要有内容就收成一个摘要行，而不是只在「工具超过 N 个」时才折叠。
 const shouldCollapseToolCalls = computed(() => displayEntries.value.length > COLLAPSE_THRESHOLD)
 
-// 初始折叠 —— 对齐 Yuxi（`areToolCallsExpanded = ref(false)`）。
+// 初始折叠（`areToolCallsExpanded = ref(false)`）。
 // 历史记录打开时是干净的摘要行；流式过程中由下面的 watch 自动展开。
 const areToolCallsExpanded = ref(false)
 
 watch(
   () => props.isActive,
   (isActive) => {
-    // 严格对齐 Yuxi 的 ToolCallsGroupComponent：
+    // 工具组渲染规则：
     //   活跃（正在流式）→ 展开，让用户看见正在发生的调用
     //   转为非活跃（本轮跑完 / 视线移到下一段）→ 收起
     areToolCallsExpanded.value = Boolean(isActive)

@@ -553,7 +553,7 @@ async def stream_agent_chat(
             "tool_meta": meta_info,
             "icon": meta_info.get("icon"),
             # 归属的 AI 消息 id：前端据此把工具挂到对应消息的 tool_calls 上，
-            # 从而按「正文->工具->正文」顺序自然切段（对标 Yuxi message_id）
+            # 从而按「正文->工具->正文」顺序自然切段（以 message_id 切分）
             "message_id": message_id,
         }
         # ═══ 富载荷：task 卡的 subagent_run ═══
@@ -880,7 +880,7 @@ async def stream_agent_chat(
 
         # 契约规则：一个气泡 = 一段前置文本 + 它引出的那个状态块（tool_start）。
         # 只有「即将发 tool_start」时才推进气泡 id，纯文本段一律复用当前 id。
-        # 这条规则与 Yuxi 的 _stream_message_id（同 run 共享 id）等价，但把
+        # 这条规则与 _stream_message_id（同 run 共享 id）等价，但把
         # 「何时换」的判断权显式交给调用方，避免正文被拼成一大段或用空对空切碎。
         _round_no = int((meta or {}).get("round") or 1)
         orchestrator = Orchestrator(f"round-{_round_no}")
@@ -1664,7 +1664,7 @@ async def stream_agent_chat(
                                     _card_call_id = f"card-{uuid.uuid4().hex[:10]}"
                                     # ═══ 卡片前导：先推进气泡，让这段解说独立成一条 ═══
                                     # 推进后「前导文本」与「卡片」分属不同 message_id，
-                                    # 前端据此切出交替结构（与 Yuxi 的 seed=message_id 同源）。
+                                    # 前端据此切出交替结构（与 seed=message_id 同源）。
                                     _lead_text = _reason_by_sku.get(_sku, "")
                                     if _lead_text:
                                         # ★ 先落已累积的正文，再发前导。
@@ -1985,7 +1985,7 @@ async def stream_agent_chat(
 
         # ═══ 思考过程落盘（按气泡）═══
         # 必须在正文落盘**之前**：无卡片时（纯咨询类回答）要得到
-        # [thinking, 正文] 的顺序，与 Yuxi 的
+        # [thinking, 正文] 的顺序，与
         # ['message'(user), 'process-group', 'message'(answer)] 一致。
         # 有卡片时此处为空操作 —— 卡片路径已 flush 过，靠 _persisted_tc_ids 去重。
         _flush_pending_events_as_top_level()

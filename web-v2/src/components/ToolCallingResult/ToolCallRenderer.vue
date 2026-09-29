@@ -19,7 +19,7 @@
 import { computed, ref } from 'vue'
 import BaseToolCall from './BaseToolCall.vue'
 
-// Yuxi 通用工具
+// 通用工具
 import WebSearchTool from './tools/WebSearchTool.vue'
 import ListKbsTool from './tools/ListKbsTool.vue'
 import GetMindmapTool from './tools/GetMindmapTool.vue'
@@ -152,7 +152,7 @@ const TOOL_RENDERERS = {
 
   // ── 主智能体编排卡已下线（2026-09-21），见上方 import 处的说明 ──
 
-  // ── 主智能体反问澄清（契约里叫 ask_user，渲染复用 Yuxi 的提问组件）──
+  // ── 主智能体反问澄清（契约里叫 ask_user，复用提问组件）──
   ask_user: AskUserQuestionTool,
   ask_user_question: AskUserQuestionTool
 }

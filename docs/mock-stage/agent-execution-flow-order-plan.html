@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>/agent 执行流时序优化方案（对标 Yuxi）</title>
+<title>/agent 执行流时序优化方案</title>
 <style>
   :root{
     --bg:#fafafa; --ink:#1f2328; --faint:#8a9099; --line:#e6e8eb;
@@ -58,12 +58,12 @@
 <div class="wrap">
 
 <header>
-  <h1>/agent 执行流时序优化方案（对标 Yuxi）</h1>
+ <h1>/agent 执行流时序优化方案</h1>
   <div class="sub">问题：为什么执行流是「工具 → 卡片 → 文本」？目标：正文①开场白 → 工具 → 文本 → 卡片 → 文本。前后端是否都要改？—— 结论见下。</div>
 </header>
 
 <div class="note ok">
-  <b>一句话结论</b>：这套时序的<strong>机制前后端都已经存在</strong>（后端 prompt 有硬性条款、SSE 桥按轮次 message_id 流式、前端已是 Yuxi 式时序分组）。
+ <b>一句话结论</b>：这套时序的<strong>机制前后端都已经存在</strong>（后端 prompt 有硬性条款、SSE 桥按轮次 message_id 流式、前端已是 式时序分组）。
   你看到的错误顺序，<strong>直接原因是我给你的 mock 场景就是按「工具→卡片→文本」写的</strong>——它不代表真实系统设计。
   所以主要工作不是"造功能"，而是三件事：<b>① 重写 mock 场景（立即）② 前端按清单验证 ③ 接真后端后验证模型的遵循度并强化</b>。
 </div>
@@ -83,12 +83,12 @@
   </tr>
   <tr>
     <td>后端 SSE 桥</td>
-    <td><code>chat_stream_service.py</code>：token 流按 <code>message_id = msg.id</code> 下发（每轮 LLM 一个 id）；<code>tool_calls</code> 带同一 message_id；<code>render_product_card</code> 落库前<strong>先 flush 已累积正文再存卡</strong>——注释原文即"按 正文→工具→正文 的顺序自然切段（对标 Yuxi message_id）"</td>
+ <td><code>chat_stream_service.py</code>：token 流按 <code>message_id = msg.id</code> 下发（每轮 LLM 一个 id）；<code>tool_calls</code> 带同一 message_id；<code>render_product_card</code> 落库前<strong>先 flush 已累积正文再存卡</strong>——注释原文即"按 正文→工具→正文 的顺序自然切段"</td>
     <td><span class="tag">已有，为交错设计</span></td>
   </tr>
   <tr>
     <td>前端渲染</td>
-    <td><code>AgentChatComponent.vue</code> 的 <code>conversationViews</code> 已是 Yuxi 式分组：<code>message</code> / <code>tool-group</code> / 过程组按数组顺序渲染；卡片在 <code>tool_complete</code> 到达时作为独立条目追加到 <code>conv.order</code>（到达即位置）</td>
+ <td><code>AgentChatComponent.vue</code> 的 <code>conversationViews</code> 已是 式分组：<code>message</code> / <code>tool-group</code> / 过程组按数组顺序渲染；卡片在 <code>tool_complete</code> 到达时作为独立条目追加到 <code>conv.order</code>（到达即位置）</td>
     <td><span class="tag">已有，待验证</span></td>
   </tr>
 </table>
@@ -99,9 +99,9 @@
   前端按到达顺序追加，顺序自然正确，<strong>不需要重排逻辑</strong>。
 </div>
 
-<h2>2. Yuxi 是怎么做的（已查证，作为对标）</h2>
+<h2>2. 是怎么做的（已查证，作为对标）</h2>
 <table>
-  <tr><th>Yuxi 机制</th><th>ShoppingClaw 对应</th></tr>
+ <tr><th>机制</th><th>ShoppingClaw 对应</th></tr>
   <tr>
     <td><code>web/src/utils/messageGrouping.js</code> → <code>getConversationDisplayItems</code>：消息数组按时间顺序遍历，AI 消息的 tool_calls 归组为 <code>tool-group</code> 插在原位置，正文独立 → <strong>渲染顺序 = 真实到达顺序</strong></td>
     <td><code>conversationViews</code>（AgentChatComponent 内）+ <code>ToolCallsGroupComponent</code> —— 同构，已移植</td>
@@ -217,7 +217,7 @@
 
 <footer>
   证据来源（均已实地查证）：BASE_PROMPT.md:77/79/123 · chat_stream_service.py:660-800（message_id 流式 + 卡片前 flush 正文）·
-  AgentChatComponent.vue conversationViews/message_id 归组 · Yuxi web/src/utils/messageGrouping.js。
+ AgentChatComponent.vue conversationViews/message_id 归组 · web/src/utils/messageGrouping.js。
   配套文档：《agent-execution-flow-test-guide.html》（mock 接入方式、toggle、通用清单不变；§4 旧场景已标注作废，以本文档场景为准）。
 </footer>
 

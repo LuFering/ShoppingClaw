@@ -2,13 +2,13 @@
 编排轨迹合成器 —— 把「真实 LLM 执行」映射成前端契约 v1.0 的 orchestration 载荷。
 
 ═══════════════════════════════════════════════════════════════════════════
-为什么需要这一层（对照 Yuxi 的实现）
+为什么需要这一层
 ═══════════════════════════════════════════════════════════════════════════
 
-Yuxi 的做法（`backend/package/yuxi/services/chat_service.py`）值得照抄的是它
+值得借鉴的是它
 **不新增协议**，而是加了一个**翻译层**：
 
-    LangGraph 原始事件  →  _message_payload_yuxi_events()  →  yuxi 自有事件
+    LangGraph 原始事件  →  翻译层  →  前端自有事件
       (AIMessageChunk)      (message_delta / tool_call)      (stream_event)
 
 我们这边同样有翻译层（`sse_adapter.legacy_chunk_to_events`），把旧 chunk 翻成
@@ -16,7 +16,7 @@ EventType。`orchestrate` / `task` 卡属于**契约层虚构的编排动作**�
 没有对应真实工具 —— 所以不能靠 LLM 产出，必须由 runtime **合成**。
 
 本模块就是合成器。它不做任何 LLM 调用、不碰业务数据，只做两件事：
-  1. 维护「当前气泡 id」——即 Yuxi 的 `_stream_message_id` 对应物；
+  1. 维护「当前气泡 id」——即 `_stream_message_id` 对应物；
   2. 按 ORCHESTRATION_REVEAL_STEPS 顺序，把编排决策**逐段**吐出去。
 
 ═══════════════════════════════════════════════════════════════════════════
@@ -119,14 +119,14 @@ def display_name(slug: str | None) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 气泡 id 分配器 —— Yuxi `_stream_message_id` 的对应物
+# 气泡 id 分配器 —— `_stream_message_id` 的对应物
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class Narrator:
     """气泡 id 分配器。
 
-    Yuxi 的 `_stream_message_id(protocol_message_ids, key, preferred)` 用
+    `_stream_message_id(protocol_message_ids, key, preferred)` 用
     `(thread_id, run_id)` 做 key 缓存 id —— 同一个 run 里所有 chunk 共享一个
     message_id，run 变了才换。这里用等价的思路，但把「何时换」的判断权交给
     调用方：**只在即将发 tool_start 时调 `next()`**。

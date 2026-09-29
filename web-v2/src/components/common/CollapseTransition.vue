@@ -1,6 +1,6 @@
 <template>
   <Transition
-    name="yuxi-collapse"
+    name="sc-collapse"
     @before-enter="beforeEnter"
     @enter="enter"
     @after-enter="reset"
@@ -56,8 +56,8 @@ const reset = (el) => {
 </script>
 
 <style lang="less">
-.yuxi-collapse-enter-active,
-.yuxi-collapse-leave-active {
+.sc-collapse-enter-active,
+.sc-collapse-leave-active {
   transition:
     height 0.25s ease,
     padding-top 0.25s ease,
@@ -66,8 +66,8 @@ const reset = (el) => {
   overflow: hidden;
 }
 
-.yuxi-collapse-enter-from,
-.yuxi-collapse-leave-to {
+.sc-collapse-enter-from,
+.sc-collapse-leave-to {
   opacity: 0;
 }
 </style>
