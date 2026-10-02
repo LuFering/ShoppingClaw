@@ -125,8 +125,7 @@ class MasterAgent(BaseAgent):
         # 白名单本身已足够，这里是可读的「为什么不给」说明。
         _MASTER_FORBIDDEN_TOOLS = {
             # 业务工具
-            "search_products", "get_product_full_detail",
-            "get_products_specs_batch", "get_products_specs_extract",
+            "get_products_specs_extract",
             "filter_products_by_criteria", "query_category_knowledge",
             "query_risk_policy", "price_calculator",
             # 展示工具

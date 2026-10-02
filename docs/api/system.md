@@ -40,11 +40,6 @@ docker compose healthcheck 使用本端点（curl -f）。
 
 写操作由 `AuditMiddleware` 自动记录到 `operation_logs`。
 
-## 测试回声（公开）
-
-`POST /api/test/echo` — body `{"message": "hi"}`（或 query）→
-`{"status":"ok","received":"hi","timestamp":...}`。连通性自检用。
-
 ## 根路径
 
 `GET /` → `{message, docs: "/docs", health: "/api/system/health"}`。

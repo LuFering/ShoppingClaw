@@ -11,7 +11,7 @@ import warnings
 # 屏蔽 Pydantic 序列化警告（LangGraph 的 context 序列化时对 dataclass 不兼容）
 warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
-# 确保 src/ 路径在 Python 搜索路径中，使 import jd 等模块正常工作
+# 确保 src/ 路径在 Python 搜索路径中，使顶层包导入正常工作
 _src_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src')
 if _src_path not in sys.path:
     sys.path.insert(0, _src_path)
@@ -271,11 +271,6 @@ async def root():
         "docs": "/docs",
         "health": "/api/system/health",
     }
-
-
-@app.post("/api/test/echo")
-async def test_echo(message: str = "Hello"):
-    return {"status": "ok", "received": message, "timestamp": "2026-04-07T00:00:00Z"}
 
 
 if __name__ == "__main__":

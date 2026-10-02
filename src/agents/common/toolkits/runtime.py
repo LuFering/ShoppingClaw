@@ -297,9 +297,7 @@ class OffloadHandler(RuntimeHandler):
                  relaxed_tools: set | None = None):
         self._threshold = threshold
         self._relaxed_threshold = relaxed_threshold
-        self._relaxed_tools = relaxed_tools or {
-            "get_product_full_detail", "get_products_specs_batch",
-        }
+        self._relaxed_tools = relaxed_tools or set()
 
     async def handle(self, ctx: ToolContext, next_handler: Callable) -> ToolResult:
         result = await next_handler(ctx)

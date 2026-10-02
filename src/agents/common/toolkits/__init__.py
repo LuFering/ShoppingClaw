@@ -43,7 +43,6 @@ def _ensure_tools_loaded():
     import src.agents.common.toolkits.buildin.monitor_tools
     # Optional toolkits: failure should not block buildin tools
     for mod_path, label in [
-        ("src.agents.common.toolkits.research", "research"),
         ("src.agents.common.toolkits.analyst", "analyst"),
         ("src.agents.common.toolkits.critic.tools", "critic"),
     ]:

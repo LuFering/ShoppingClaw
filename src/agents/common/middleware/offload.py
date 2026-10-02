@@ -42,8 +42,6 @@ class ToolResultOffloadMiddleware(AgentMiddleware):
         "edit_file", 
         "ls",
         "grep",
-        "get_product_full_detail",  # 商品详情可能很大
-        "get_products_specs_batch",  # 批量规格
     }
     
     def __init__(self, backend: StateBackend):

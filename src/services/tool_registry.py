@@ -44,16 +44,7 @@ class ToolRegistry:
     def _register_defaults(self):
         """注册默认工具元数据"""
         defaults = {
-            # ═══ 京东 API 工具 ═══
-            "search_products": ToolMeta(
-                "search_products", "🔍", "jd_api", "搜索商品"
-            ),
-            "get_product_full_detail": ToolMeta(
-                "get_product_full_detail", "📋", "jd_api", "获取商品详情"
-            ),
-            "get_products_specs_batch": ToolMeta(
-                "get_products_specs_batch", "📊", "jd_api", "批量获取规格参数"
-            ),
+            # ═══ 分析工具 ═══
             "filter_products_by_criteria": ToolMeta(
                 "filter_products_by_criteria", "🎯", "analysis", "条件筛选商品"
             ),

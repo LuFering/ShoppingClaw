@@ -18,9 +18,6 @@ logger = logging.getLogger(__name__)
 # type 类型:
 #   - http:      远程 HTTP JSON-RPC
 #   - stdio:     本地 stdio 子进程（如 sinataoke_cn）
-#   - streamableHttp: SSE 流式 HTTP（如京东联盟 MCP，暂不可用）
-#
-# 注意: JD 不再通过 MCP 层 — 京东 SDK 已直接在 @tool 装饰器的 research/tools.py 中集成
 MCP_SERVERS: Dict[str, Dict[str, Any]] = {
     # 淘宝/拼多多导购 MCP — 本地 stdio 子进程
     "taobao_mcp": {
