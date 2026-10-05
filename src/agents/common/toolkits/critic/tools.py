@@ -50,9 +50,21 @@ async def query_risk_policy(
     
     # 调用底层知识管理器，指定只检索高优先级的来源类型
     # 聚焦铁律：policy (官方政策) 和 risk_control (风控规则)
+    #
+    # ⚠️ 2026-10-05：**不传 category**。
+    #
+    # 原因：category 在底层是 Chroma 的精确匹配（FilterOperator.EQ），
+    # 而本工具的 category 参数是**品类名**（schema 里写「智能手机、蓝牙耳机」）。
+    # 风控知识天然跨品类 —— 「先涨后降」「翻新机识别」对手机和耳机同样适用。
+    # 若按品类过滤，就得为每个品类各写一份，7 品类 × 4 风险类型 = 28 篇，
+    # 内容大量重复。
+    #
+    # 实测：传 category 时风控文档一条都命中不了（文档的 category 是
+    # 「正品识别」「价格陷阱」这类风险类别名，与品类名对不上）。
+    # 去掉过滤后靠 source_type（policy / risk_control）+ 语义相似度召回，
+    # 一份文档服务所有品类。
     result = await knowledge_manager.query_knowledge(
         query=query,
-        category=category,
         source_types=["policy", "risk_control"],  # 只查铁律
         top_k=3
     )

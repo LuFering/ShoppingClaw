@@ -51,8 +51,18 @@ class KnowledgeItem:
     retriever: str | None = None
 
     def dedupe_key(self) -> str:
-        if self.chunk_id:
-            return self.chunk_id
+        # 按 **doc_id** 去重，而不是 chunk_id。
+        #
+        # 为什么改：同一篇文档会被切成多个 chunk，每个 chunk 有自己的
+        # chunk_id。原先按 chunk_id 去重等于不去重 —— 实测 sop_gift
+        # 一次返回 3 遍（同文档 3 个 chunk 全进 top_k），把名额占满、
+        # 挤掉其他相关文档。
+        #
+        # 按 doc_id 去重后，同一篇文档只保留得分最高的那个 chunk。
+        # 代价是丢掉同文档其他片段的信息 —— 但 top_k 通常只有 3，
+        # 覆盖多篇文档比深挖一篇更有价值。
+        if self.doc_id:
+            return self.doc_id
         normalized_title = (self.title or "").strip().lower()
         normalized_content = self.content.strip().lower()
-        return f"{self.doc_id}::{self.source_type.value}::{normalized_title}::{normalized_content}"
+        return f"{self.source_type.value}::{normalized_title}::{normalized_content}"

@@ -165,8 +165,17 @@ class LlamaIndexer:
         self._clear_collection()
 
     def _clear_collection(self) -> None:
+        # chromadb 1.5.9 不接受 delete(where={})，会报
+        # "Expected where to have exactly one operator, got {}"。
+        # 正确做法是先取出全部 id 再按 id 删 —— 之前这个异常被吞成
+        # warning，导致重建索引时旧数据没被清掉、新旧混在一起。
         try:
-            self._collection().delete(where={})
+            col = self._collection()
+            result = col.get()
+            ids = result.get("ids") or []
+            if ids:
+                col.delete(ids=ids)
+                logger.info("[LlamaIndexer] 清空集合，删除 %d 条", len(ids))
         except Exception as exc:
             logger.warning("[LlamaIndexer] 清空集合失败: %s", exc)
         self._index = None
