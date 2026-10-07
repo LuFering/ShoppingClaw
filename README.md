@@ -77,16 +77,24 @@ uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
 
 ## 界面一览
 
-六个主要界面，覆盖从提问到复盘的完整链路。
+八个主要界面，覆盖从提问到复盘的完整链路。
 
 | 模块 | 解决什么 | 代表能力 |
 | --- | --- | --- |
+| [00 · 首页](#00-首页) | 不知道从哪下手时，给几个入口 | 示例需求、最近决策、直达工作台 |
 | [01 · 对话主界面](#01-对话主界面) | 一句话说清需求，剩下的交给系统 | 流式输出、思考可视化、商品卡片、随时打断 |
 | [02 · 主动助理](#02-主动助理) | 用户不在线时，系统继续盯着 | 定时监控、命中通知、简报与待办 |
 | [03 · 购物档案](#03-购物档案) | 买过什么、想到哪一步，不用记在脑子里 | 五阶段状态机、候选对比、提醒与复盘 |
 | [04 · 采购规划](#04-采购规划) | 成套采购（装修、搬家）怎么拆 | 决策图实时生长、多份交付物、导出 PDF |
 | [05 · 代购送礼](#05-代购送礼) | 给别人买，比给自己买难 | 人物档案、礼盒组合、祝福语 |
-| [06 · 监控任务与数据源](#06-监控任务与数据源) | 在盯什么、数据从哪来 | 任务 CRUD、价格历史曲线、MCP 管理 |
+| [06 · 监控任务](#06-监控任务) | 在盯什么、跑成什么样 | 任务 CRUD、执行日志、价格历史曲线 |
+| [07 · 数据源与智能体](#07-数据源与智能体) | 数据从哪来、有哪几个 agent | MCP 管理、智能体注册表 |
+
+### 00 · 首页
+
+打开就是它。左侧是导航，中间给几个示例需求——不知道怎么说的时候可以直接点。下方是最近两条决策，点进去接着看。
+
+<img src="docs/assets/welcome.png" alt="首页">
 
 ### 01 · 对话主界面
 
@@ -96,28 +104,14 @@ uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
 - **工具调用可视化** —— 每次调用显示参数、耗时、结果。商品卡片由购前子智能体的返回直接合成，不是从自由文本里二次抽取
 - **随时打断与恢复** —— 跑到一半可以停；刷新页面能接回未完成的流，不丢上下文
 
-<img src="docs/assets/shot-chat.png" alt="对话主界面">
+<img src="docs/assets/home-chat.png" alt="对话主界面">
 
 <details>
-<summary>展开更多截图：思考过程、工具调用、商品卡片</summary>
+<summary>展开更多截图：编排与子智能体</summary>
 
-**思考过程**
+主智能体判断该派谁之后，编排过程和子智能体的运行状态都在同一条流里。右侧状态栏能看到本轮用了几个工具、耗时多久、有哪些产物。
 
-模型推理按块流式展示，与正文交错出现。
-
-<img src="docs/assets/shot-thinking.png" alt="思考过程">
-
-**工具调用**
-
-参数、耗时、返回结果都可以展开看。
-
-<img src="docs/assets/shot-tools.png" alt="工具调用">
-
-**商品卡片**
-
-价格、店铺、券信息来自实时抓取。
-
-<img src="docs/assets/shot-cards.png" alt="商品卡片">
+<img src="docs/assets/home-chat-2.png" alt="编排与产物">
 
 </details>
 
@@ -129,7 +123,7 @@ uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
 - **通知是克制的** —— 价格没变不推、排名微动不推；但执行失败一定推，配了监控却悄悄不跑了比不推更糟
 - **命中可回溯** —— 每条通知能查到是哪次执行产生的，可跳转到任务或档案
 
-<img src="docs/assets/shot-assistant.png" alt="主动助理">
+<img src="docs/assets/assistant.png" alt="主动助理">
 
 ### 03 · 购物档案
 
@@ -139,7 +133,7 @@ uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
 - **候选对比** —— 同一条需求下挂多个候选，标出选了哪个、为什么
 - **提醒与复盘** —— 使用中的记录可以挂提醒（换耗材、保修到期），买完可以写使用感受
 
-<img src="docs/assets/shot-decisions.png" alt="购物档案">
+<img src="docs/assets/decisions.png" alt="购物档案">
 
 ### 04 · 采购规划
 
@@ -149,24 +143,7 @@ uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
 - **交付物分四类** —— 完整报告、采购清单、对比表、预算分配，内容各不相同
 - **可导出** —— 报告支持 Markdown 和 PDF，清单支持 CSV
 
-<img src="docs/assets/shot-planning.png" alt="采购规划">
-
-<details>
-<summary>展开更多截图：决策图、交付物</summary>
-
-**决策图**
-
-节点按品类归纳，可缩放拖拽。
-
-<img src="docs/assets/shot-graph.png" alt="决策图">
-
-**交付物**
-
-报告正文、清单、预算表都可就地预览。
-
-<img src="docs/assets/shot-deliverables.png" alt="交付物">
-
-</details>
+<img src="docs/assets/planning.png" alt="采购规划">
 
 ### 05 · 代购送礼
 
@@ -176,17 +153,28 @@ uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
 - **礼盒组合** —— 主礼 + 搭配，不是单件推荐
 - **祝福语** —— 结合人物档案写，不是套模板
 
-<img src="docs/assets/shot-gift.png" alt="代购送礼">
+<img src="docs/assets/gift.png" alt="代购送礼">
 
-### 06 · 监控任务与数据源
+### 06 · 监控任务
 
-定时任务的配置面板，以及 MCP 数据源的管理。
+定时任务的配置面板。空态会引导从模板开始，而不是丢一个空白列表给你。
 
 - **任务管理** —— 创建、暂停、手动触发，看执行日志
 - **价格历史** —— 每次执行落一条快照，可看折线图
-- **MCP 管理** —— 数据源作为独立进程接入，加数据源不用改代码，凭据留在子进程里
+- **执行器可插拔** —— 价格、优惠到期、优惠券、榜单、店铺、Agent 六类
 
-<img src="docs/assets/shot-tasks.png" alt="监控任务">
+<img src="docs/assets/tasks.png" alt="监控任务">
+
+### 07 · 数据源与智能体
+
+MCP 数据源的管理，以及当前注册了哪些智能体。
+
+- **MCP 管理** —— 数据源作为独立进程接入，加数据源不用改代码，凭据留在子进程里
+- **智能体注册表** —— 内置的三个（核心智能体 / 采购规划 / 送礼顾问）可单独开关
+
+<img src="docs/assets/mcps.png" alt="MCP 连接">
+
+<img src="docs/assets/agents.png" alt="智能体管理">
 
 ---
 
@@ -261,6 +249,7 @@ uv run --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
 | 理解数据怎么存 | [存储与持久化](docs/architecture/storage.md) |
 | 对接接口 | [API 约定](docs/api/index.md) · [对话接口](docs/api/chat.md) |
 | 改代码 | [后端指南](docs/development/backend-guide.md) · [前端指南](docs/development/frontend-guide.md) |
+| 搞懂知识库（RAG） | [RAG 系统教程](docs/RAG_TUTORIAL.md) |
 | 部署 / 排障 | [部署运维](docs/operations/deployment.md) · [故障手册](docs/operations/troubleshooting.md) |
 | 全部文档导航 | [docs/index.md](docs/index.md) |
 
