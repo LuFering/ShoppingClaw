@@ -249,7 +249,6 @@ MCP 数据源的管理，以及当前注册了哪些智能体。
 | 理解数据怎么存 | [存储与持久化](docs/architecture/storage.md) |
 | 对接接口 | [API 约定](docs/api/index.md) · [对话接口](docs/api/chat.md) |
 | 改代码 | [后端指南](docs/development/backend-guide.md) · [前端指南](docs/development/frontend-guide.md) |
-| 搞懂知识库（RAG） | [RAG 系统教程](docs/RAG_TUTORIAL.md) |
 | 部署 / 排障 | [部署运维](docs/operations/deployment.md) · [故障手册](docs/operations/troubleshooting.md) |
 | 全部文档导航 | [docs/index.md](docs/index.md) |
 
