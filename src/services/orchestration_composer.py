@@ -611,12 +611,14 @@ def fill_from_subagent_directory(
     available_slugs: Iterable[str],
     selected: Iterable[tuple[str, str]] = (),
     tool_calls: Iterable[str] = (),
+    skill_reads: Iterable[str] = (),
 ) -> OrchestrationTrace:
     """用「注册中心里的真实子智能体」填 skills / rag / dispatch。
 
     Args:
         available_slugs: 后端 subagents.yaml 里的全部 slug
         selected:        [(slug, task 描述)] —— 真正被派出去的那些
+        skill_reads:     本轮真正读过的技能名（read_file 命中 /skills/…/SKILL.md）
 
     RAG 项固定对应主智能体的路由库（见主智能体接口契约 v1.0）：
     subagent_directory / user_profile / archive_index
@@ -637,7 +639,26 @@ def fill_from_subagent_directory(
     #   mcp    = 调了什么**外部服务**
     # 三者不重复 —— 一次工具调用只归其中一栏。
 
-    # Skill：本轮采用的编排手艺。调 SOP 检索 = 用了「派遣编排」这门手艺。
+    # Skill：本轮采用的编排手艺。
+    #
+    # 两个来源，互不排斥：
+    #   a) 读了技能库里的 SKILL.md —— 模型按渐进披露主动取用的编排手艺。
+    #      这才是「用了什么 Skill」的字面含义，所以放在前面。
+    #      ⚠️ 只在**真读过**时出现。技能清单是注入到系统提示词里的，
+    #      但「看见清单」不等于「用了技能」—— 没 read_file 就不算，
+    #      否则每轮都会亮一堆根本没用的技能。
+    #   b) 调了 SOP 检索 —— 走的是向量库那条路，同样是一门编排手艺。
+    for _skill_name in skill_reads:
+        _s = str(_skill_name or "").strip()
+        if not _s:
+            continue
+        trace.skills.append(
+            {
+                "id": f"skill_{_s}",
+                "name": _s,
+                "detail": "读取技能正文",
+            }
+        )
     if "query_orchestration_sop" in _calls:
         trace.skills.append(
             {
