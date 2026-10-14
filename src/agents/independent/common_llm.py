@@ -54,7 +54,10 @@ LLM_TIMEOUT = 120
 # 仍保留环境变量覆盖的能力（`INDEPENDENT_AGENT_MODEL`）：独立 agent 对
 # 推理流的要求比主智能体更硬，将来想试别的模型不该动全局默认。
 INDEPENDENT_MODEL_ENV = "INDEPENDENT_AGENT_MODEL"
-INDEPENDENT_MODEL_FALLBACK = "TingFeng-Model/deepseek-v4-flash"
+# 2026-10-08：TingFeng 的 deepseek-v4-flash 已下线（上游 model_not_found），
+# 换成 BigModel/glm-5.3-flash。选它的理由与原先一致：需要吐推理流，
+# 规划执行流的「实时感」来自这里。
+INDEPENDENT_MODEL_FALLBACK = "BigModel/glm-5.3-flash"
 
 _model = None
 
@@ -63,7 +66,7 @@ def get_model():
     """取独立 agent 用的聊天模型。进程内缓存。
 
     优先 `INDEPENDENT_AGENT_MODEL` 环境变量，其次内置默认
-    （TingFeng-Model/deepseek-v4-flash，因为它吐推理过程），
+    （BigModel/glm-5.3-flash，因为它吐推理过程），
     最后才回退到全局 default_model。
     """
     global _model
@@ -76,14 +79,14 @@ def get_model():
         spec = (
             os.getenv(INDEPENDENT_MODEL_ENV)
             or INDEPENDENT_MODEL_FALLBACK
-            or getattr(config, "default_model", "TingFeng-Model/deepseek-v4-flash")
+            or getattr(config, "default_model", "BigModel/glm-5.3-flash")
         )
         try:
             _model = load_chat_model(spec)
         except Exception as e:
             # 指定的模型不可用时退回全局默认 —— 宁可少一点实时感，
             # 也不能整个推演跑不起来。
-            fallback = getattr(config, "default_model", "TingFeng-Model/deepseek-v4-flash")
+            fallback = getattr(config, "default_model", "BigModel/glm-5.3-flash")
             logger.warning(
                 "[llm] 独立 agent 模型 %s 不可用（%s），回退到 %s", spec, e, fallback
             )
