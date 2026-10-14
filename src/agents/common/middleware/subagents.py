@@ -24,6 +24,58 @@ from src.agents.common.backends.protocol import BackendFactory
 from src.agents.common.middleware._utils import append_to_system_message
 from src.agents.common.middleware.user_scope import CURRENT_USER_ID
 
+
+def _skills_middleware_for(spec: dict) -> AgentMiddleware | None:
+    """把 SubAgent 的 `skills` 字段变成 SkillsMiddleware。
+
+    `SubAgent.skills` 此前只有声明、没有消费 —— 这个函数把它接上。
+
+    约定：`skills` 是**技能库根目录的绝对路径**列表（如
+    `["/skills/pre_purchase/"]`），与 SkillsMiddleware 的 `sources` 同义。
+
+    ⚠️ 必须同时挂 FilesystemMiddleware —— 渐进披露的机制是「提示词里给
+    路径，模型自己 read_file 读正文」。没有文件系统工具，模型看得见
+    清单却读不到正文，等于给了目录不给书。
+    """
+    sources = spec.get("skills")
+    if not sources:
+        return None
+
+    backend = spec.get("skills_backend")
+    if backend is None:
+        # 没给后端 = 技能库读不到（清单空、正文也读不到）。
+        # 不抛错是为了不阻断子智能体启动，但留一条 warning ——
+        # 静默失效比启动失败更难查。
+        logging.warning(
+            "[SubAgent] %s 声明了 skills 但没给 skills_backend，"
+            "技能库将无法读取",
+            spec.get("name"),
+        )
+        return None
+
+    from src.agents.common.middleware.filesystem import FilesystemMiddleware
+    from src.agents.common.middleware.skills import SkillsMiddleware
+
+    return _SkillsBundle(
+        filesystem=FilesystemMiddleware(backend=backend),
+        skills=SkillsMiddleware(backend=backend, sources=list(sources)),
+    )
+
+
+class _SkillsBundle:
+    """一对中间件：文件系统 + 技能库。
+
+    渐进披露要求两者成对出现：SkillsMiddleware 把 SKILL.md 的路径写进
+    系统提示词，模型调 read_file 去读 —— 而 read_file 由
+    FilesystemMiddleware 提供。缺任何一个，链路都是断的。
+    """
+
+    __slots__ = ("filesystem", "skills")
+
+    def __init__(self, *, filesystem: AgentMiddleware, skills: AgentMiddleware) -> None:
+        self.filesystem = filesystem
+        self.skills = skills
+
 """未编译形态的subagent"""
 class SubAgent(TypedDict):
     """Specification for an agent.
@@ -558,6 +610,17 @@ def _get_subagents_legacy(
 
         _middleware = [*default_subagent_middleware, *agent_["middleware"]] if "middleware" in agent_ else [*default_subagent_middleware]
 
+        # 技能库：spec["skills"] → Filesystem + Skills 两个中间件
+        # ══ 2026-10-15 补 ══
+        # 原先只在 New API（backend=…）路径（_get_subagents）里接了这一套，
+        # 而 master 走的是 Legacy API（default_model=…）→ 本函数。
+        # 实测后果：技能实际从未挂载（probe 实证：子智能体不读任何技能）。
+        # 顺序要紧：Filesystem 在前、Skills 在后（后者靠前者的 read_file 读正文）。
+        _skills_bundle = _skills_middleware_for(agent_)
+        if _skills_bundle is not None:
+            _middleware.append(_skills_bundle.filesystem)
+            _middleware.append(_skills_bundle.skills)
+
         interrupt_on = agent_.get("interrupt_on", default_interrupt_on)
         if interrupt_on:
             _middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
@@ -1042,6 +1105,14 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 
             # Use middleware as provided (caller is responsible for building full stack)
             middleware: list[AgentMiddleware] = list(spec.get("middleware", []))
+
+            # 技能库：spec["skills"] → Filesystem + Skills 两个中间件
+            # 顺序要紧：Filesystem 在前，Skills 在后 —— 后者靠前者的
+            # read_file 读正文。
+            _skills_bundle = _skills_middleware_for(spec)
+            if _skills_bundle is not None:
+                middleware.append(_skills_bundle.filesystem)
+                middleware.append(_skills_bundle.skills)
 
             interrupt_on = spec.get("interrupt_on")
             if interrupt_on:

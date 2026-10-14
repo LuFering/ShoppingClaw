@@ -66,12 +66,44 @@ def load_subagent(config_path:Path, default_model)->list:
             "tools": resolved_tools,  # 3. 注入真正的工具对象
             "model": agent_model,     # 4. 注入确定的模型实例
         }
+        # 5. 技能库（可选）：yaml 里写 `skills:` 才带，不写就没有
+        #    —— SubAgentMiddleware 会据此挂 SkillsMiddleware，
+        #    并把 skills_backend 交给它做文件读取。
+        #    两个键成对出现：只给 skills 不给 backend，技能读不到。
+        _skills = spec.get("skills")
+        if _skills:
+            subagent["skills"] = _skills
+            subagent["skills_backend"] = _subagent_skills_backend
         subagents.append(subagent)
     return subagents
 
 # 技能库根目录。相对路径按进程 cwd 解析 —— 容器里是 /app，
 # 本机跑 uvicorn 时是仓库根，两边都指向 src/agents/master_agent/skills。
 _SKILLS_DIR = Path(__file__).parent / "skills"
+
+# 子智能体的技能库根目录（与主智能体分开存放 —— 领域手艺 vs 编排手艺）。
+_SUBAGENT_SKILLS_DIR = Path(__file__).parent.parent / "subagents" / "skills"
+
+
+def _subagent_skills_backend(runtime):
+    """子智能体的文件系统后端 —— 只把技能库开出去。
+
+    与主智能体同法：CompositeBackend 按前缀分流，
+    /skills/… 走只读的 FilesystemBackend(virtual_mode=True)，
+    其余路径留在会话内的 StateBackend。
+
+    为什么不直接给 FilesystemBackend：那会让子智能体读到
+    宿主机任意文件（含 .env）。virtual_mode 把虚拟路径锚定在
+    技能库目录，`..` 与 `~` 被拒。
+    """
+    return CompositeBackend(
+        default=StateBackend(runtime),
+        routes={
+            "/skills/": FilesystemBackend(
+                root_dir=_SUBAGENT_SKILLS_DIR, virtual_mode=True
+            ),
+        },
+    )
 
 
 def _create_fs_backend(runtime):
