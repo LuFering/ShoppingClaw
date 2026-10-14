@@ -70,8 +70,19 @@ def load_subagent(config_path:Path, default_model)->list:
     return subagents
 
 def _create_fs_backend(runtime):
-    """为 FilesystemMiddleware 创建 StateBackend 实例"""
-    return StateBackend(runtime)
+    """为 FilesystemMiddleware 创建后端。
+
+    知识/文档路径(/app/docs/)路由到真实磁盘，其余路径仍走虚拟状态。
+    """
+    from src.agents.common.backends import CompositeBackend, FilesystemBackend
+
+    return CompositeBackend(
+        default=StateBackend(runtime),  # 其余路径：虚拟(附件、agent 生成的文件)
+        routes={
+            # 知识/文档：真实磁盘（virtual_mode=True 限制只能访问 /app/docs 下）
+            "/app/docs/": FilesystemBackend(root_dir="/app/docs", virtual_mode=True),
+        },
+    )
 
 class MasterAgent(BaseAgent):
     name="核心智能体"
