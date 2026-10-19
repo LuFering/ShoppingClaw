@@ -265,14 +265,32 @@ def build_planning_agent():
     `create_agent` 返回的就是个已编译的图：model ↔ tools 之间用条件边
     循环，模型不再产生 tool_calls 时走向 END。
     """
+    from pathlib import Path
+
+    from src.agents.common.backends import CompositeBackend, FilesystemBackend, StateBackend
+    from src.agents.common.middleware.filesystem import FilesystemMiddleware
+    from src.agents.common.middleware.skills import SkillsMiddleware
     from src.agents.independent.common_llm import get_model
     from src.agents.independent.planning.tools import PLANNING_TOOLS
+
+    skills_dir = Path(__file__).parent / "skills"
+
+    def _fs_backend(runtime):
+        # 技能目录(/skills/) → 真实磁盘；其余(工具结果卸载等) → 虚拟状态，避免写进源码目录
+        return CompositeBackend(
+            default=StateBackend(runtime),
+            routes={"/skills/": FilesystemBackend(root_dir=str(skills_dir), virtual_mode=True)},
+        )
 
     return create_agent(
         get_model(),
         tools=PLANNING_TOOLS,
         system_prompt=SYSTEM_PROMPT,
         state_schema=PlanningState,
+        middleware=[
+            SkillsMiddleware(backend=_fs_backend, sources=["/skills/"]),  # 技能清单注入系统提示
+            FilesystemMiddleware(backend=_fs_backend),                    # 让 agent 能读 SKILL.md 正文
+        ],
         name="planning",
     )
 
