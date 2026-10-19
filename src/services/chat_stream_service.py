@@ -889,6 +889,47 @@ async def stream_agent_chat(
         # 本轮出现过的工具名 —— 用于推导 skills / plannedTools
         _seen_tool_names: list[str] = []
 
+        # 本轮**真正读过**的技能名（按顺序去重）。
+        # 判定依据是 read_file 的路径命中技能库 —— 技能清单虽然注入了系统
+        # 提示词，但「看见清单」不等于「用了技能」，只有 read_file 才算数。
+        _skill_reads: list[str] = []
+
+        def _note_skill_read(tool_name: str, args) -> None:
+            """read_file 命中 /skills/<name>/SKILL.md 时记一笔。
+
+            技能名取 SKILL.md 的**父目录名** —— 与前端 ReadFileTool.vue
+            的 skillName 推导同口径，两边显示的名字必然一致。
+            """
+            if tool_name != "read_file" or not args:
+                return
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    return
+            if not isinstance(args, dict):
+                return
+            path = str(args.get("file_path") or args.get("path") or "")
+            if "/skills/" not in path:
+                return
+            # 技能名 = /skills/ 之后的第一段，**不是** SKILL.md 的父目录名。
+            # 技能目录里还有 references/ 子目录（渐进披露第二层），
+            # 读 /skills/x/references/y.md 时父目录是 references，
+            # 按父目录取会把技能认成「references」—— 必须从根往下取。
+            parts = path.split("/skills/", 1)[1].split("/")
+            if not parts or not parts[0]:
+                return
+            name = parts[0]
+            # 路径穿越（.. / .）不认 —— 实际读取会被 validate_path 拦下，
+            # 但这里记的是 args，拦截发生在更后面，所以先挡一道。
+            if name in (".", ".."):
+                return
+            # 只认技能目录下的文件（正文或参考），别的一律不算
+            if len(parts) < 2:
+                return
+            if name not in _skill_reads:
+                _skill_reads.append(name)
+
         # ═══ 气泡归属：编排层合成的工具，必须落在「编排气泡」里 ═══
         # 线上实测踩到的坑（S0 实测，run 01a0b29f）：
         #   orchestrate 卡用 message_id="round-1-s1"（编排气泡），
@@ -1227,6 +1268,7 @@ async def stream_agent_chat(
                 # 这正是编排卡该展示的内容：它是「派遣的依据」，
                 # 而不是派遣之后子智能体内部干了什么（那属于 task 卡）。
                 tool_calls=all_tool_names,
+                skill_reads=_skill_reads,
             )
             # 把「本轮已出现的工具」作为 Skill 的佐证补进去
             # ⚠️ 2026-09-22：删除了这里「用原始工具名追加 skills」的逻辑。
@@ -1469,6 +1511,8 @@ async def stream_agent_chat(
                         # 记录工具名，供编排轨迹推导 skills
                         if tool_name not in _seen_tool_names:
                             _seen_tool_names.append(tool_name)
+                        # 读技能正文 = 真的用了一门编排手艺，单独记一笔
+                        _note_skill_read(tool_name, tool_chunk.get("args"))
 
                         # ═══ subagent_drill: expand ═══
                         # 子智能体开始干活前 → 展开它的卡片，让用户看见内部过程。

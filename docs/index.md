@@ -10,6 +10,7 @@ ShoppingClaw（智能购物助手）的完整开发资料库。按阅读场景�
 | 我想理解数据怎么存、怎么保证不丢 | [存储与持久化](architecture/storage.md) |
 | 我要对接/调试接口 | [API 通用约定](api/index.md) → [对话接口](api/chat.md) |
 | 我要加新功能、改代码 | [后端开发指南](development/backend-guide.md) / [前端开发指南](development/frontend-guide.md) |
+| 我要加 / 改一个 Skill | [Skill 设计规范](development/skills-design.md) |
 | 我要部署 / 排查线上问题 | [部署运维](operations/deployment.md) / [故障手册](operations/troubleshooting.md) |
 
 ## 文档目录
@@ -32,7 +33,8 @@ docs/
 │   └── system.md                # 系统端点
 ├── development/
 │   ├── backend-guide.md         # 后端开发指南（分层/规范/加接口步骤）
-│   └── frontend-guide.md        # 前端开发指南（web-v2）
+│   ├── frontend-guide.md        # 前端开发指南（web-v2）
+│   └── skills-design.md         # Skill 设计规范（提示词/Skill/工具判定、候补台账）
 └── operations/
     ├── deployment.md            # Docker 部署 / 升级 / 备份恢复
     └── troubleshooting.md       # 常见故障排查手册

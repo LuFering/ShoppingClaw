@@ -87,13 +87,16 @@ DEFAULT_CHAT_MODEL_PROVIDERS:dict[str,ChatModelProvider]={
             env="BIG_MODEL_API_KEY",
             models=["glm-5.3-flash","glm-4.7","glm-4.6v","glm-4.5-air"],
     ),
+   # 2026-10-08：TingFeng 的 deepseek-v4-flash 已下线（上游 model_not_found）。
+   # provider 定义保留（前端仍可选），但默认模型改为 BigModel 的 glm-5.3-flash。
+   # 若 TingFeng 恢复，把下面两行的模型名改回即可。
    "TingFeng-Model":ChatModelProvider(
             name="TingFeng-Model",
             url="https://freeapi.tingfengai.art/",
             base_url="https://freeapi.tingfengai.art/v1",
-            default="deepseek-v4-flash",
+            default="glm-5.3-flash",
             env="TINGFENG_KEY",
-            models=["deepseek-v4-flash"],
+            models=["glm-5.3-flash"],
     ), 
 }
 

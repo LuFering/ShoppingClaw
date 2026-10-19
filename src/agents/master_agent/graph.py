@@ -5,7 +5,7 @@ from langchain.agents.middleware import ToolCallLimitMiddleware, TodoListMiddlew
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.agents.common.base import BaseAgent
-from src.agents.common.backends import StateBackend
+from src.agents.common.backends import CompositeBackend, FilesystemBackend, StateBackend
 from src.agents.common.middleware.dynamic_model import DynamicModelMiddleware
 from src.agents.common.middleware.filesystem import FilesystemMiddleware
 # from src.agents.common.middleware.intent_detector import IntentDetectorMiddleware  # 暂时禁用
@@ -66,12 +66,70 @@ def load_subagent(config_path:Path, default_model)->list:
             "tools": resolved_tools,  # 3. 注入真正的工具对象
             "model": agent_model,     # 4. 注入确定的模型实例
         }
+        # 5. 技能库（可选）：yaml 里写 `skills:` 才带，不写就没有
+        #    —— SubAgentMiddleware 会据此挂 SkillsMiddleware，
+        #    并把 skills_backend 交给它做文件读取。
+        #    两个键成对出现：只给 skills 不给 backend，技能读不到。
+        _skills = spec.get("skills")
+        if _skills:
+            subagent["skills"] = _skills
+            subagent["skills_backend"] = _subagent_skills_backend
         subagents.append(subagent)
     return subagents
 
+# 技能库根目录。相对路径按进程 cwd 解析 —— 容器里是 /app，
+# 本机跑 uvicorn 时是仓库根，两边都指向 src/agents/master_agent/skills。
+_SKILLS_DIR = Path(__file__).parent / "skills"
+
+# 子智能体的技能库根目录（与主智能体分开存放 —— 领域手艺 vs 编排手艺）。
+_SUBAGENT_SKILLS_DIR = Path(__file__).parent.parent / "subagents" / "skills"
+
+
+def _subagent_skills_backend(runtime):
+    """子智能体的文件系统后端 —— 只把技能库开出去。
+
+    与主智能体同法：CompositeBackend 按前缀分流，
+    /skills/… 走只读的 FilesystemBackend(virtual_mode=True)，
+    其余路径留在会话内的 StateBackend。
+
+    为什么不直接给 FilesystemBackend：那会让子智能体读到
+    宿主机任意文件（含 .env）。virtual_mode 把虚拟路径锚定在
+    技能库目录，`..` 与 `~` 被拒。
+    """
+    return CompositeBackend(
+        default=StateBackend(runtime),
+        routes={
+            "/skills/": FilesystemBackend(
+                root_dir=_SUBAGENT_SKILLS_DIR, virtual_mode=True
+            ),
+        },
+    )
+
+
 def _create_fs_backend(runtime):
-    """为 FilesystemMiddleware 创建 StateBackend 实例"""
-    return StateBackend(runtime)
+    """为 FilesystemMiddleware 创建后端。
+
+    ══ 2026-10-13：改成 CompositeBackend，给技能库开一条只读路由 ══
+    原先只有 StateBackend（会话内临时文件）。技能正文在磁盘上，
+    必须让 read_file 能读到 —— 但**不能**把整个文件系统暴露给模型。
+
+    CompositeBackend 按路径前缀分流：
+      /skills/… → FilesystemBackend(root_dir=技能库, virtual_mode=True)
+                  虚拟路径锚定在技能库目录，`..` 与 `~` 被拒，
+                  解析后强制校验仍在 root 内（见 _resolve_path）。
+      其它路径  → StateBackend，行为与改动前完全一致。
+
+    这样模型拿到的是 `/skills/writing-task-brief/SKILL.md` 这类虚拟路径，
+    而不是宿主机的真实路径 —— 既读得到，又出不去。
+    """
+    return CompositeBackend(
+        default=StateBackend(runtime),
+        routes={
+            "/skills/": FilesystemBackend(
+                root_dir=_SKILLS_DIR, virtual_mode=True
+            ),
+        },
+    )
 
 class MasterAgent(BaseAgent):
     name="核心智能体"
@@ -268,6 +326,14 @@ class MasterAgent(BaseAgent):
             general_purpose_agent=True,
         )
 
+        # C. 技能库：主智能体的编排手艺（派谁 / 怎么写简报 / 怎么收口）
+        #    与子智能体的领域技能分开存放 —— 这是编排层的知识，
+        #    不该混进购前助手的品类判断里。
+        skills_middleware = SkillsMiddleware(
+            backend=_create_fs_backend,
+            sources=["/skills/"],
+        )
+
         # 5. 组装 Graph
         import logging
         from src.agents.common.middleware.content_guard import ContentGuardMiddleware
@@ -338,6 +404,13 @@ class MasterAgent(BaseAgent):
 
                 # ═══ 第五层：文件系统与子智能体 ═══
                 FilesystemMiddleware(backend=_create_fs_backend),  # 11. 文件读写能力
+                # 11.5 技能库：把 skills/ 下的 SKILL.md 以「名字 + 描述」
+                #      注入系统提示词，正文由模型按需 read_file 取（渐进披露）。
+                #      ⚠️ 必须排在 FilesystemMiddleware **之后** —— 它靠
+                #      read_file 读正文，前面没有文件系统工具就无从下手。
+                #      它的 state_schema（SkillsState）由 factory 自动并入，
+                #      skills_metadata 标了 PrivateStateAttr，不会漏给子智能体。
+                skills_middleware,                   # 11.5 技能库（渐进披露）
                 subagents_middleware,                # 12. 子智能体调度
 
                 # ═══ 第六层：后处理 ═══
