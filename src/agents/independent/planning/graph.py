@@ -267,7 +267,12 @@ def build_planning_agent():
     """
     from pathlib import Path
 
-    from src.agents.common.backends import CompositeBackend, FilesystemBackend, StateBackend
+    from src.agents.common.backends import (
+        CompositeBackend,
+        FilesystemBackend,
+        ReadOnlyBackend,
+        StateBackend,
+    )
     from src.agents.common.middleware.filesystem import FilesystemMiddleware
     from src.agents.common.middleware.skills import SkillsMiddleware
     from src.agents.independent.common_llm import get_model
@@ -279,7 +284,12 @@ def build_planning_agent():
         # 技能目录(/skills/) → 真实磁盘；其余(工具结果卸载等) → 虚拟状态，避免写进源码目录
         return CompositeBackend(
             default=StateBackend(runtime),
-            routes={"/skills/": FilesystemBackend(root_dir=str(skills_dir), virtual_mode=True)},
+            routes={
+                # 技能目录只读：防止模型（或被注入的第三方数据）改写源码里的 SKILL.md
+                "/skills/": ReadOnlyBackend(
+                    FilesystemBackend(root_dir=str(skills_dir), virtual_mode=True)
+                ),
+            },
         )
 
     return create_agent(
@@ -288,8 +298,8 @@ def build_planning_agent():
         system_prompt=SYSTEM_PROMPT,
         state_schema=PlanningState,
         middleware=[
-            SkillsMiddleware(backend=_fs_backend, sources=["/skills/"]),  # 技能清单注入系统提示
-            FilesystemMiddleware(backend=_fs_backend),                    # 让 agent 能读 SKILL.md 正文
+            FilesystemMiddleware(backend=_fs_backend),                    # 文件工具在前（对齐 mainagent 约定）
+            SkillsMiddleware(backend=_fs_backend, sources=["/skills/"]),  # 技能清单在后
         ],
         name="planning",
     )
