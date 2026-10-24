@@ -57,7 +57,7 @@
 
 | 输入形态 | 先读 | 再读 |
 |---|---|---|
-| 「给 X 送什么」（什么都没有） | `clarifying-needs` | `reading-recipient` → `composing-gift` |
+| 「给 X 送什么」（什么都没有） | `clarifying-needs` | `reading-recipient` → `gift-picking` → `composing-gift` |
 | 已经有想法，问「这几件行不行」 | `composing-gift` | `screening-taboos` |
 | 收礼人「什么都不缺」 | `composing-gift` | — |
 | 有忌讳 / 过敏 / 明确不收某类 | `screening-taboos` | 全程以此为准 |
@@ -70,7 +70,7 @@
 ## 4. 工作流（固定七步）
 
 1. **理解关系** — 读 `reading-recipient`，从档案取与本次送礼相关的字段
-2. **提取需求** — 把偏好翻译成一条可执行的挑选标准
+2. **提取需求与方向** — 读 `gift-picking`，把偏好翻译成 2–3 条可执行的挑选方向
 3. **检索商品** — 读 `composing-gift`，**搜品类词，不搜「礼物」**
 4. **比价验货** — 看成交价分布与店铺资质，不看标价
 5. **排除候选** — 排除的留理由、不删除

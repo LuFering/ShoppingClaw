@@ -50,6 +50,7 @@ sudo docker exec shoppingclaw-api python -c "..."   # 容器内验证（注意 s
 | 对话/SSE/持久化 | `src/services/chat_stream_service.py` |
 | 存储读写 | `src/services/redis_store.py`(bridge) · `src/repositories/conversation_repository.py` |
 | Agent/工具 | `src/agents/`（master_agent/ 图、subagents/、common/ 中间件） |
+| 加 / 改 Skill | `src/agents/**/skills/`（设计规范见 `docs/development/skills-design.md`） |
 | 前端请求 | `web-v2/src/apis/*.js`（base.js 统一鉴权封装） |
 
 ## 工作流要求
