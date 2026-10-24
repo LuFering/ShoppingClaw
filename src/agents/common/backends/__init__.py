@@ -4,6 +4,7 @@ from src.agents.common.backends.composite import CompositeBackend
 from src.agents.common.backends.filesystem import FilesystemBackend
 from src.agents.common.backends.local_shell import LocalShellBackend
 from src.agents.common.backends.protocol import BackendProtocol
+from src.agents.common.backends.readonly import ReadOnlyBackend
 from src.agents.common.backends.state import StateBackend
 from src.agents.common.backends.store import BackendContext, NamespaceFactory, StoreBackend
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "FilesystemBackend",
     "LocalShellBackend",
     "NamespaceFactory",
+    "ReadOnlyBackend",
     "StateBackend",
     "StoreBackend",
 ]
