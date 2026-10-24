@@ -29,6 +29,11 @@ def build_embed_model():
         （上层据此跳过索引构建，检索返回空）。
     """
     backend = os.getenv("KNOWLEDGE_EMBED_BACKEND", "dashscope").strip().lower()
+
+    # Ollama 本地嵌入，在取 key 之前处理
+    if backend == "ollama":
+        return _build_ollama()
+
     api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
 
     if not api_key:
@@ -64,6 +69,23 @@ def build_embed_model():
         return model
     logger.warning("[Embedding] DashScope 后端构建失败，回退 OpenAI 兼容协议")
     return _build_openai_compatible(api_key)
+
+
+def _build_ollama():
+    """Ollama 本地嵌入（OpenAI 兼容协议），模型默认 bge-m3，无需 API key。"""
+    from .openai_compat_embedding import OpenAICompatibleEmbedding
+
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434").rstrip("/")
+    model_name = os.getenv("OLLAMA_EMBED_MODEL", "bge-m3")
+    try:
+        return OpenAICompatibleEmbedding(
+            model_name=model_name,
+            api_base=f"{base_url}/v1",
+            api_key="ollama",  # Ollama 不需要 key，占位即可
+        )
+    except Exception as exc:
+        logger.warning("[Embedding] Ollama 嵌入初始化失败: %s", exc)
+        return None
 
 
 def _build_dashscope(api_key: str):

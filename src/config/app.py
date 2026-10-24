@@ -28,7 +28,8 @@ class Config(BaseModel):
         # 而原先的 sensenova-6.8-flash-lite 一个推理 chunk 都不吐 ——
         # 界面上「正在思考」会整段空着，最后一次性蹦出结果。
         # 推理流是「实时感」的物理来源，流里没有就是没有，前端补不出来。
-        default="BigModel/glm-5.3-flash",
+        # 本地部署可用环境变量 DEFAULT_MODEL 覆盖（如 ollama/qwen2.5:3b）。
+        default=os.getenv("DEFAULT_MODEL", "BigModel/glm-5.3-flash"),
         description="默认对话模型",
     )
     # 模型信息（只读，不持久化）
