@@ -109,25 +109,27 @@ def _subagent_skills_backend(runtime):
 def _create_fs_backend(runtime):
     """为 FilesystemMiddleware 创建后端。
 
+    知识/文档路径(/app/docs/)路由到真实磁盘，其余路径仍走虚拟状态。
+
     ══ 2026-10-13：改成 CompositeBackend，给技能库开一条只读路由 ══
     原先只有 StateBackend（会话内临时文件）。技能正文在磁盘上，
     必须让 read_file 能读到 —— 但**不能**把整个文件系统暴露给模型。
 
     CompositeBackend 按路径前缀分流：
-      /skills/… → FilesystemBackend(root_dir=技能库, virtual_mode=True)
-                  虚拟路径锚定在技能库目录，`..` 与 `~` 被拒，
-                  解析后强制校验仍在 root 内（见 _resolve_path）。
-      其它路径  → StateBackend，行为与改动前完全一致。
+      /app/docs/… → 知识/项目文档（root_dir=/app/docs，virtual_mode 锚定）
+      /skills/…   → 技能库（root_dir=_SKILLS_DIR，virtual_mode 锚定）
+      其它路径    → StateBackend，行为与改动前完全一致。
 
-    这样模型拿到的是 `/skills/writing-task-brief/SKILL.md` 这类虚拟路径，
-    而不是宿主机的真实路径 —— 既读得到，又出不去。
+    两条真实磁盘路由都做了 virtual_mode 限制：`..` 与 `~` 被拒，
+    解析后强制校验仍在 root 内 —— 既读得到，又出不去。
     """
     return CompositeBackend(
-        default=StateBackend(runtime),
+        default=StateBackend(runtime),  # 其余路径：虚拟(附件、agent 生成的文件)
         routes={
-            "/skills/": FilesystemBackend(
-                root_dir=_SKILLS_DIR, virtual_mode=True
-            ),
+            # 知识/文档：真实磁盘（virtual_mode=True 限制只能访问 /app/docs 下）
+            "/app/docs/": FilesystemBackend(root_dir="/app/docs", virtual_mode=True),
+            # 技能库（mainagent 既有约定）
+            "/skills/": FilesystemBackend(root_dir=_SKILLS_DIR, virtual_mode=True),
         },
     )
 
